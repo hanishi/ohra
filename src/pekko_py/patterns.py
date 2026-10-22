@@ -6,7 +6,7 @@ import inspect
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .behavior import Behavior, Behaviors, MaybeAwaitable
 from .mailbox import MailboxSelector
@@ -24,11 +24,21 @@ class AskTimeoutError(TimeoutError):
     pass
 
 
-async def ask[Req, Res](
-    target: ActorRef[Req], make: Callable[[ActorRef[Res]], Req], timeout: float
+class Replyable[Res](Protocol):
+    """A request message: anything with a ``reply_to: ActorRef[Res]`` field. ``ask`` reads the
+    reply type from it, which is what lets ``lambda r: Query(sql, r)`` type-check."""
+
+    @property
+    def reply_to(self) -> ActorRef[Res]: ...
+
+
+async def ask[Res](
+    target: ActorRef[Any], make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float
 ) -> Res:
     """Send ``make(reply_to)`` to target and await the first reply.
 
+    ``make`` is usually a lambda or the message class itself. The target's accepted message
+    type is not checked here (see README); the reply type is.
     A reply arriving after the timeout goes to dead letters; nothing is left pending.
     """
     fut: asyncio.Future[Res] = asyncio.get_running_loop().create_future()
@@ -90,9 +100,7 @@ class SpawnProtocol:
     creating actors from outside the system::
 
         async with ActorSystem(SpawnProtocol.apply(), "app") as system:
-            ref = await system.ask(partial(SpawnProtocol.Spawn[WorkerCmd], worker(), "worker"), timeout=1)
-
-    Name the type parameter in the partial: pyright cannot infer it from the behavior alone.
+            ref = await system.ask(lambda r: SpawnProtocol.Spawn(worker(), "worker", r), timeout=1)
     """
 
     @dataclass(frozen=True, slots=True)

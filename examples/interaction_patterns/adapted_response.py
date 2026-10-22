@@ -4,7 +4,6 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -107,7 +106,7 @@ async def main() -> None:
         return Behaviors.receive_message(lambda m: (fe.tell(m), Behaviors.same)[1])
 
     async with ActorSystem(Behaviors.setup(app), "adapted") as system:
-        print("translated:", await system.ask(partial(Translate, "https://pekko.apache.org/docs/"), timeout=1))
+        print("translated:", await system.ask(lambda r: Translate("https://pekko.apache.org/docs/", r), timeout=1))
 
 
 asyncio.run(main())

@@ -3,7 +3,6 @@ the actor's state is only ever touched from its own handler (Pekko interaction p
 import asyncio
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -86,8 +85,8 @@ async def main() -> None:
             raise ValueError("stale version")
 
     async with ActorSystem(customer_repository(save), "repo") as system:
-        print(await system.ask(partial(Update, Customer("123", 1, "Alice", "Fairy tail road 7")), timeout=1))
-        print(await system.ask(partial(Update, Customer("124", -1, "Bob", "")), timeout=1))
+        print(await system.ask(lambda r: Update(Customer("123", 1, "Alice", "Fairy tail road 7"), r), timeout=1))
+        print(await system.ask(lambda r: Update(Customer("124", -1, "Bob", ""), r), timeout=1))
 
 
 asyncio.run(main())

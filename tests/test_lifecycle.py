@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from functools import partial
 
 from pekko_py import (
     ActorContext,
@@ -156,9 +155,9 @@ async def test_watch_with_and_watching_an_already_dead_actor():
 async def test_spawn_protocol_spawns_on_request_with_unique_names():
     events: list[str] = []
     async with ActorSystem(SpawnProtocol.apply(), "t") as system:
-        a = await system.ask(partial(SpawnProtocol.Spawn, recorder("a", events), "worker"), timeout=1)
-        b = await system.ask(partial(SpawnProtocol.Spawn, recorder("b", events), "worker"), timeout=1)
-        c = await system.ask(partial(SpawnProtocol.Spawn, recorder("c", events), ""), timeout=1)
+        a = await system.ask(lambda r: SpawnProtocol.Spawn(recorder("a", events), "worker", r), timeout=1)
+        b = await system.ask(lambda r: SpawnProtocol.Spawn(recorder("b", events), "worker", r), timeout=1)
+        c = await system.ask(lambda r: SpawnProtocol.Spawn(recorder("c", events), "", r), timeout=1)
         assert [r.path for r in (a, b, c)] == [
             "pekko://t/user/worker",
             "pekko://t/user/worker-1",

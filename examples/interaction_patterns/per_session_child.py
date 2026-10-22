@@ -3,7 +3,6 @@ request and stops when done (Pekko interaction patterns)."""
 import asyncio
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -103,7 +102,7 @@ def prepare_to_leave_home(
 
 async def main() -> None:
     async with ActorSystem(home(), "home") as system:
-        print(await system.ask(partial(LeaveHome, "Bobby"), timeout=1))
+        print(await system.ask(lambda r: LeaveHome("Bobby", r), timeout=1))
 
 
 asyncio.run(main())

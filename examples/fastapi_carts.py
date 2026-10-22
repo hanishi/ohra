@@ -12,7 +12,6 @@ import sys
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -92,11 +91,18 @@ def cart() -> Behavior[CartCmd]:
 # --- manager: routes by cart id, spawns on demand, forgets stopped carts ------------------
 
 
+type CartRequest = AddItem | GetCart | Checkout
+
+
 @dataclass(frozen=True)
 class ForCart:
     cart_id: str
-    cmd: CartCmd
+    cmd: CartRequest
     create: bool = True  # False: reply "no such cart" instead of spawning
+
+    @property
+    def reply_to(self) -> ActorRef[dict[str, int]]:  # an envelope is askable if it exposes the inner reply_to
+        return self.cmd.reply_to
 
 
 @dataclass(frozen=True)
@@ -118,7 +124,7 @@ def manager() -> Behavior[ManagerCmd]:
                     child = ctx.spawn(cart(), cart_id)
                     ctx.watch(child)
                     child.tell(cmd)
-                elif isinstance(cmd, (GetCart, Checkout, AddItem)):
+                else:
                     cmd.reply_to.tell({})
             case CartCount(reply_to):
                 reply_to.tell(len(ctx.children))
@@ -153,7 +159,7 @@ def system() -> ActorSystem[ManagerCmd]:
 type Reply = ActorRef[dict[str, int]]
 
 
-def for_cart(cart_id: str, build: Callable[[Reply], CartCmd], create: bool = True) -> Callable[[Reply], ForCart]:
+def for_cart(cart_id: str, build: Callable[[Reply], CartRequest], create: bool = True) -> Callable[[Reply], ForCart]:
     """ask needs a function from reply ref to message; this composes the cart command into ForCart."""
     return lambda reply_to: ForCart(cart_id, build(reply_to), create)
 
@@ -165,7 +171,7 @@ class Item(BaseModel):
 
 @app.post("/carts/{cart_id}/items")
 async def add_item(cart_id: str, item: Item) -> dict[str, Any]:
-    items = await system().ask(for_cart(cart_id, partial(AddItem, item.sku, item.qty)), timeout=2)
+    items = await system().ask(for_cart(cart_id, lambda r: AddItem(item.sku, item.qty, r)), timeout=2)
     return {"cart": cart_id, "items": items}
 
 

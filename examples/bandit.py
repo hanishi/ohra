@@ -10,7 +10,6 @@ reports progress while it runs.
 import asyncio
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -165,7 +164,7 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
 
             def propose(steps: int, reply_to: ActorRef[Summary], p: Progress) -> Behavior[AgentCmd]:
                 for k in range(N_SHARDS):
-                    ctx.ask(shards, partial(Propose, k), Proposal, timeout=1)
+                    ctx.ask(shards, lambda r, k=k: Propose(k, r), Proposal, timeout=1)
                 return collecting(steps, reply_to, p, ())
 
             def collecting(
@@ -178,7 +177,7 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
                             if len(got2) < N_SHARDS:
                                 return collecting(steps, reply_to, p, got2)
                             arm = max(got2, key=lambda c: c[1])[0]
-                            ctx.ask(env, partial(Pull, arm), Rewarded, timeout=1)
+                            ctx.ask(env, lambda r: Pull(arm, r), Rewarded, timeout=1)
                             return pulling(steps, reply_to, p, arm)
                         case Proposal(_):
                             raise RuntimeError("a shard did not answer")
@@ -226,7 +225,7 @@ async def main() -> None:
     means = np.random.default_rng(0).beta(2, 8, N_ARMS)  # most arms poor, a few good
     print(f"{N_ARMS} arms in {N_SHARDS} shards, best mean {means.max():.3f}, {STEPS} steps\n")
     async with ActorSystem(agent(means), "bandit") as system:
-        s = await system.ask(partial(Run, STEPS), timeout=60)
+        s = await system.ask(lambda r: Run(STEPS, r), timeout=60)
     random_regret = STEPS * (means.max() - means.mean())
     print(f"\ndone: regret {s.regret:.1f} (uniform random play would be about {random_regret:.0f}), "
           f"best arm pulled {s.pulls_of_best} of {s.steps} times")

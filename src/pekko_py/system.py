@@ -10,7 +10,7 @@ from typing import Any, Self
 from .behavior import Behavior
 from .cell import ActorCell
 from .mailbox import MailboxSelector
-from .patterns import ask
+from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
 
 
@@ -39,7 +39,7 @@ class ActorSystem[T](ActorRef[T]):
     def tell(self, msg: T) -> None:
         self._root.send_user(msg)
 
-    async def ask[Res](self, make: Callable[[ActorRef[Res]], T], timeout: float) -> Res:
+    async def ask[Res](self, make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float) -> Res:
         return await ask(self, make, timeout)
 
     def terminate(self) -> None:

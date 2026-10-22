@@ -1,7 +1,6 @@
 """Checked by pyright, never run. Each `type: ignore` must be needed,
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
 from dataclasses import dataclass
-from functools import partial
 
 from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
 
@@ -61,6 +60,15 @@ _pool_wrong: Behavior[str] = Routers.pool(4, _b)  # type: ignore[assignment]
 
 
 async def spawn_from_outside(system: ActorSystem[SpawnProtocol.Command]) -> None:
-    ref: ActorRef[Ping] = await system.ask(partial(SpawnProtocol.Spawn[Ping], _b, "pinger"), timeout=1)
-    wrong: ActorRef[str] = await system.ask(partial(SpawnProtocol.Spawn[Ping], _b, "pinger"), timeout=1)  # type: ignore[assignment]
+    ref: ActorRef[Ping] = await system.ask(lambda r: SpawnProtocol.Spawn(_b, "pinger", r), timeout=1)
+    wrong: ActorRef[str] = await system.ask(lambda r: SpawnProtocol.Spawn(_b, "pinger", r), timeout=1)  # type: ignore[assignment]
     del ref, wrong
+
+
+async def ask_infers_the_reply_type(pinger: ActorRef[Ping]) -> None:
+    from pekko_py import ask
+
+    pong: str = await ask(pinger, lambda r: Ping(r), timeout=1)  # a lambda, no partial needed
+    also: str = await ask(pinger, Ping, timeout=1)  # or the class itself
+    wrong: int = await ask(pinger, Ping, timeout=1)  # type: ignore[assignment]
+    del pong, also, wrong

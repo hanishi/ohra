@@ -3,7 +3,7 @@ from .behavior import Behavior, Behaviors, Receive, StashBuffer, StashOverflowEr
 from .cell import TimerScheduler
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
-from .patterns import AskTimeoutError, SpawnProtocol, ask, batching
+from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
 from .ref import ActorRef
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
@@ -27,6 +27,7 @@ __all__ = [
     "PoolRouter",
     "PreRestart",
     "Receive",
+    "Replyable",
     "Routers",
     "Signal",
     "SpawnProtocol",

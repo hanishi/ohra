@@ -9,7 +9,6 @@ import logging
 import random
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -119,7 +118,7 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Run(sql, reply_to):
-                        ctx.ask(db, partial(Query, sql), partial(Answer, reply_to=reply_to), timeout=1)
+                        ctx.ask(db, lambda r: Query(sql, r), lambda res: Answer(res, reply_to), timeout=1)
                     case Answer(result, reply_to):
                         reply_to.tell(result.value if isinstance(result, Success) else f"error: {result.exception}")
                     case Heartbeat():
@@ -150,7 +149,7 @@ def app(ctx: ActorContext[Run]) -> Behavior[Run]:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(relativeCreated)6.0fms %(name)s %(message)s")
     async with ActorSystem(Behaviors.setup(app), "app") as system:
-        asks = (system.ask(partial(Run, sql), timeout=5) for sql in ("select 1", "select 2", "select 3"))
+        asks = (system.ask(lambda r, sql=sql: Run(sql, r), timeout=5) for sql in ("select 1", "select 2", "select 3"))
         print(*await asyncio.gather(*asks), sep="\n")
         await asyncio.sleep(0.7)  # a couple of heartbeats
 

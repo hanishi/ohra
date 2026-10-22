@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .mailbox import MailboxSelector
-from .patterns import ask
+from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
 from .result import Try
 
@@ -85,10 +85,10 @@ class ActorContext[T]:
         """A ref that accepts U and delivers f(u) to this actor. f runs inside the actor."""
         return FunctionRef(f"{self._cell.path}/$adapter", lambda u: self._cell.send_adapted(lambda: f(u)))
 
-    def ask[Req, Res](
+    def ask[Res](
         self,
-        target: ActorRef[Req],
-        make: Callable[[ActorRef[Res]], Req],
+        target: ActorRef[Any],
+        make: Callable[[ActorRef[Res]], Replyable[Res]],
         adapt: Callable[[Try[Res]], T],
         timeout: float,
     ) -> None:

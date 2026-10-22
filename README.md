@@ -68,7 +68,6 @@ Messages are frozen dataclasses, a command protocol is a union, and a handler di
 A request carries its own `reply_to`. From outside the system, `ask` returns the reply or raises `AskTimeoutError`. From inside an actor, `ctx.ask` delivers the reply to the asking actor as a message, wrapped in `Success` or `Failure`.
 
 ```python
-from functools import partial
 from pekko_py import Failure, Success, Try
 
 
@@ -87,7 +86,7 @@ def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
     def on_message(ctx: ActorContext[Fetched | str], msg: Fetched | str) -> Behavior[Fetched | str]:
         match msg:
             case str(url):
-                ctx.ask(fetcher, partial(Fetch, url), Fetched, timeout=2)
+                ctx.ask(fetcher, lambda r: Fetch(url, r), Fetched, timeout=2)
             case Fetched(result):
                 match result:
                     case Success(body):
@@ -99,7 +98,7 @@ def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
     return Behaviors.receive(on_message)
 ```
 
-Use `functools.partial(Fetch, url)` rather than a lambda for the `make` argument: pyright infers the reply type from the partial, not from a lambda.
+The `make` argument is anything that turns a reply ref into the request: a lambda, or the message class itself when `reply_to` is its only field. Pyright infers the reply type from the request's `reply_to` field.
 
 `ctx.pipe_to_self(awaitable, adapt)` does the same for any awaitable, and `ctx.message_adapter(f)` gives you a ref of another type that translates into your own protocol.
 
@@ -124,7 +123,7 @@ def parent(ctx: ActorContext[str]) -> Behavior[str]:
     return Behaviors.receive_message(lambda _: Behaviors.same).receive_signal(on_signal)
 ```
 
-To create actors from plain async code, run `SpawnProtocol.apply()` as the guardian and ask it: `await system.ask(partial(SpawnProtocol.Spawn[Cmd], behavior, "name"), timeout=1)`.
+To create actors from plain async code, run `SpawnProtocol.apply()` as the guardian and ask it: `await system.ask(lambda r: SpawnProtocol.Spawn(behavior, "name", r), timeout=1)`.
 
 ### Supervision
 
@@ -213,6 +212,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 | `MailboxSelector.bounded(capacity)` passed to `spawn` | same, plus `overflow="drop_new" \| "drop_old" \| "fail"` |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
+| (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
 | `system.ignoreRef` | `system.ignore_ref` |
 | (none) | `batching(max_n, max_wait, handle)` |
 | (none) | `pekko_py.shm.SharedArray`, a picklable handle to an array in shared memory |
@@ -234,6 +234,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 - An exception in a message adapter or `pipe_to_self` adapt function is logged and the message is dropped. Pekko delivers a `MessageAdaptionFailure` signal, which fails the actor unless handled.
 - If a handler fails partway through `unstash_all`, the unprocessed messages stay in the buffer as in Pekko, but `resume` and `PreRestart` see the behavior from before the unstash began. Pekko tracks the intermediate behavior reached by the last successful message.
 - Exceptions in `PreRestart` and `PostStop` handlers are logged, not supervised.
+- `ask` and `ctx.ask` check the reply type but not that the target accepts the request, since the reply type is read from the request's `reply_to` field and pyright cannot tie both to one type parameter. `tell` is fully checked. Pekko checks both.
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"` and `overflow="fail"` (raise `MailboxOverflowError` in the sender) are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.

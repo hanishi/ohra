@@ -26,7 +26,6 @@ from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -304,13 +303,13 @@ class Outcome(BaseModel):
 
 @app.post("/predict")
 async def predict(body: Features) -> dict[str, Any]:
-    p: Prediction = await ask(partial(Predict, tuple(body.features)))
+    p: Prediction = await ask(lambda r: Predict(tuple(body.features), r))
     return {"prediction_id": p.prediction_id, "probability": p.probability, "label": int(p.probability > 0.5), "model_version": p.model_version}
 
 
 @app.post("/feedback")
 async def feedback(body: Outcome) -> dict[str, Any]:
-    r: FeedbackResult = await ask(partial(Feedback, body.prediction_id, body.label))
+    r: FeedbackResult = await ask(lambda r: Feedback(body.prediction_id, body.label, r))
     return {"accepted": r.accepted, "online_accuracy": round(r.online_accuracy, 3), "model_version": r.model_version}
 
 

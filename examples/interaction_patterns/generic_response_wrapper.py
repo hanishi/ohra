@@ -8,8 +8,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from functools import partial
-
 from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors, Failure, Success, Try
 
 
@@ -38,7 +36,7 @@ def cookie_fabric() -> Behavior[GiveMeCookies]:
 async def main() -> None:
     async with ActorSystem(cookie_fabric(), "cookies") as system:
         for count in (3, 7):
-            match await system.ask(partial(GiveMeCookies, count), timeout=3):
+            match await system.ask(lambda r: GiveMeCookies(count, r), timeout=3):
                 case Success(Cookies(n)):
                     print(f"Yay, {n} cookies!")
                 case Failure(e):

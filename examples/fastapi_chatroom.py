@@ -15,7 +15,6 @@ import json
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -226,7 +225,7 @@ def system() -> ActorSystem[LobbyCmd]:
 @app.websocket("/ws/{room}/{screen_name}")
 async def chat(ws: WebSocket, room: str, screen_name: str) -> None:
     await ws.accept()
-    result: JoinResult = await system().ask(partial(Join, room, screen_name, ws), timeout=2)
+    result: JoinResult = await system().ask(lambda r: Join(room, screen_name, ws, r), timeout=2)
     match result:
         case Denied(reason):
             await ws.send_json({"type": "denied", "text": reason})

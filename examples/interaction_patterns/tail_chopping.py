@@ -4,7 +4,6 @@ the next too; the first reply wins. Trades extra load for a shorter latency tail
 import asyncio
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -120,7 +119,7 @@ async def main() -> None:
         loop = asyncio.get_running_loop()
         for key in ("a", "b", "c", "d"):
             t0 = loop.time()
-            answer = await system.ask(partial(Find, key), timeout=2)
+            answer = await system.ask(lambda r: Find(key, r), timeout=2)
             print(f"{answer:12}  in {(loop.time() - t0) * 1000:4.0f}ms")
 
 

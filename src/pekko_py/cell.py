@@ -8,6 +8,7 @@ at a time, including across awaits inside the handler.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import itertools
 import logging
@@ -200,6 +201,7 @@ class ActorCell[T]:
         self._sys: deque[object] | None = None  # created on the first system message; most actors never get one
         self._user: deque[object] = deque()
         self._waiter: asyncio.Future[None] | None = None  # set while the loop is idle in _run
+        self._space: deque[asyncio.Future[None]] | None = None  # senders parked in offer()
         self._tasks: set[asyncio.Task[None]] = set()
         self._timers: dict[object, asyncio.TimerHandle] = {}
         self.timers: TimerScheduler[T] = TimerScheduler(self)
@@ -227,6 +229,40 @@ class ActorCell[T]:
 
     def send_adapted(self, thunk: Callable[[], object]) -> None:
         self.send_user(_Adapted(thunk))
+
+    async def offer(self, msg: object) -> None:
+        """Enqueue, waiting for room while a bounded mailbox is full. FIFO among waiters."""
+        cap = self.mailbox.capacity
+        granted = False
+        while not self.stopping and cap is not None and len(self._user) >= cap:
+            if self._space is None:
+                self._space = deque()
+            slot = asyncio.get_running_loop().create_future()
+            # A sender that was granted a slot and lost it to a tell keeps its place at the front.
+            (self._space.appendleft if granted else self._space.append)(slot)
+            try:
+                await slot
+            except asyncio.CancelledError:
+                if slot.done() and not slot.cancelled():
+                    self._release_slot()  # the grant must not die with this sender
+                else:
+                    with contextlib.suppress(ValueError):
+                        self._space.remove(slot)
+                raise
+            granted = True
+        if self.stopping:
+            self.system.dead_letter(msg, self.ref)
+            return
+        self._user.append(msg)
+        self._wake()
+
+    def _release_slot(self) -> None:
+        """A message left the mailbox: let the longest-waiting offer() try again."""
+        while self._space:
+            slot = self._space.popleft()
+            if not slot.done():
+                slot.set_result(None)
+                return
 
     def send_sys(self, msg: object) -> None:
         if self.terminated:
@@ -307,6 +343,7 @@ class ActorCell[T]:
                     await self._system_message(self._sys.popleft())
                 elif self._user:
                     msg = self._user.popleft()
+                    self._release_slot()
                     if isinstance(msg, _Adapted):
                         try:
                             msg = msg.thunk()
@@ -545,6 +582,10 @@ class ActorCell[T]:
 
     async def _finish(self) -> None:
         self.stopping = True
+        while self._space:  # parked senders wake, see stopping, and dead-letter their message
+            slot = self._space.popleft()
+            if not slot.done():
+                slot.set_result(None)
         self.timers.cancel_all()
         for h in self._timers.values():
             h.cancel()

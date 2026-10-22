@@ -189,7 +189,7 @@ def gated() -> Behavior[Cmd]:
 
 ### Routers, batching, and bounded mailboxes
 
-`Routers.pool(n, behavior)` spawns `n` routees and forwards each message by round robin, at random, or by `with_consistent_hashing_routing(key)` so that equal keys reach the same routee. `batching(max_n, max_wait, handle)` is a behavior that collects messages and hands them to `handle` in batches, which is where `np.add.at` earns its keep. `MailboxSelector.bounded(capacity, overflow=...)` passed to `spawn` bounds a mailbox and drops the new message, drops the oldest, or raises in the sender.
+`Routers.pool(n, behavior)` spawns `n` routees and forwards each message by round robin, at random, or by `with_consistent_hashing_routing(key)` so that equal keys reach the same routee. `batching(max_n, max_wait, handle)` is a behavior that collects messages and hands them to `handle` in batches, which is where `np.add.at` earns its keep. `MailboxSelector.bounded(capacity, overflow=...)` passed to `spawn` bounds a mailbox and drops the new message, drops the oldest, or raises in the sender. A producer that can await should use `await ref.offer(msg)` instead of `tell`: on a full mailbox it waits for room, so a slow consumer slows the producer and nothing is lost. `tell` never waits, so it stays usable from callbacks and timers.
 
 ### numpy and parallelism
 
@@ -214,6 +214,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 | `Behaviors.withTimers`, `TimerScheduler.startSingleTimer / startTimerWithFixedDelay / cancel / cancelAll / isTimerActive` | same, snake_case |
 | `Behaviors.withStash`, `StashBuffer.stash / unstashAll / size / isEmpty / isFull`, `StashOverflowException` | same, snake_case; `StashOverflowError` |
 | `MailboxSelector.bounded(capacity)` passed to `spawn` | same, plus `overflow="drop_new" \| "drop_old" \| "fail"` |
+| (none) | `await ref.offer(msg)`: `tell` that waits for room on a full bounded mailbox |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
@@ -255,7 +256,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - Exceptions in `PreRestart` and `PostStop` handlers are logged, not supervised.
 - `ask` and `ctx.ask` check the reply type but not that the target accepts the request, since the reply type is read from the request's `reply_to` field and pyright cannot tie both to one type parameter. `tell` is fully checked. Pekko checks both.
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
-- Pekko's bounded mailbox only drops the new message. `overflow="drop_old"` and `overflow="fail"` (raise `MailboxOverflowError` in the sender) are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity.
+- Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.
 - `batching` is not in Pekko. It flushes a pending batch in `PostStop` and keeps the batch in a closure-local list.
 - Only local refs can be watched. A bridge to a JVM Pekko system over TCP is possible but deferred until there is a caller for it.

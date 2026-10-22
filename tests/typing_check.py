@@ -20,6 +20,7 @@ def check(ping_ref: ActorRef[Ping], str_ref: ActorRef[str], animals: ActorRef[An
     ping_ref.tell(Ping(str_ref))
     ping_ref.tell("not a ping")  # type: ignore[arg-type]
     str_ref.tell(42)  # type: ignore[arg-type]
+    _ = str_ref.offer(42)  # type: ignore[arg-type]
 
     takes_dogs(animals)  # contravariant: a handler of Animal accepts Dogs
 

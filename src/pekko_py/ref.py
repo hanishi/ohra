@@ -24,6 +24,11 @@ class ActorRef[T](ABC):
     @abstractmethod
     def tell(self, msg: T) -> None: ...
 
+    async def offer(self, msg: T) -> None:
+        """Like tell, but on a full bounded mailbox wait for room instead of dropping or raising.
+        Backpressure for producers that can await; tell never waits."""
+        self.tell(msg)
+
     def __repr__(self) -> str:
         return f"ActorRef({self.path})"
 
@@ -40,6 +45,9 @@ class LocalRef[T](ActorRef[T]):
 
     def tell(self, msg: T) -> None:
         self._cell.send_user(msg)
+
+    async def offer(self, msg: T) -> None:
+        await self._cell.offer(msg)
 
 
 class PromiseRef[T](ActorRef[T]):

@@ -135,3 +135,90 @@ async def test_bounded_mailbox_can_fail_the_sender():
             system.tell(2)
         gate.set()
         await eventually(lambda: seen == [0, 1])
+
+
+# --- offer: wait for room instead of dropping -------------------------------------------------
+# Each test opens the gate in a finally *inside* the async with: a handler stuck on the gate
+# would otherwise hold the actor open and the system could never stop.
+
+
+async def test_offer_waits_for_room_and_loses_nothing():
+    gate, seen = asyncio.Event(), []
+    async with ActorSystem(blocker(gate, seen), "t", MailboxSelector.bounded(1)) as system:
+        try:
+            system.tell(0)  # being processed, blocked on the gate
+            await asyncio.sleep(0.01)
+            await system.offer(1)  # fills the one slot
+            parked = asyncio.create_task(system.offer(2))  # no room: parks
+            await asyncio.sleep(0.01)
+            assert not parked.done()
+            gate.set()
+            await parked
+            await eventually(lambda: seen == [0, 1, 2])
+        finally:
+            gate.set()
+
+
+async def test_parked_senders_are_released_in_order():
+    gate, seen = asyncio.Event(), []
+    async with ActorSystem(blocker(gate, seen), "t", MailboxSelector.bounded(1)) as system:
+        try:
+            system.tell(0)
+            await asyncio.sleep(0.01)
+            await system.offer(1)
+            parked = [asyncio.create_task(system.offer(i)) for i in (2, 3, 4)]
+            await asyncio.sleep(0.01)
+            gate.set()
+            await asyncio.gather(*parked)
+            await eventually(lambda: len(seen) == 5)
+        finally:
+            gate.set()
+    assert seen == [0, 1, 2, 3, 4]
+
+
+async def test_parked_sender_is_released_when_the_actor_stops():
+    gate, seen = asyncio.Event(), []
+    system = ActorSystem(blocker(gate, seen), "t", MailboxSelector.bounded(1))
+    try:
+        system.tell(0)
+        await asyncio.sleep(0.01)
+        await system.offer(1)
+        parked = asyncio.create_task(system.offer(2))
+        await asyncio.sleep(0.01)
+        system.terminate()
+        gate.set()  # let the stuck handler finish so the stop can proceed
+        await asyncio.wait_for(parked, 1)  # returns; its message is a dead letter, nothing hangs
+        await asyncio.wait_for(system.when_terminated(), 1)
+    finally:
+        gate.set()
+        system.terminate()
+        await asyncio.wait_for(system.when_terminated(), 1)
+
+
+async def test_offer_on_an_unbounded_mailbox_never_waits():
+    seen: list[int] = []
+    gate = asyncio.Event()
+    gate.set()
+    async with ActorSystem(blocker(gate, seen), "t") as system:
+        for i in range(1, 50):
+            await asyncio.wait_for(system.offer(i), 0.1)
+        await eventually(lambda: len(seen) == 49)
+
+
+async def test_cancelling_a_granted_offer_hands_the_slot_to_the_next_waiter():
+    gate, seen = asyncio.Event(), []
+    async with ActorSystem(blocker(gate, seen), "t", MailboxSelector.bounded(1)) as system:
+        try:
+            system.tell(0)
+            await asyncio.sleep(0.01)
+            await system.offer(1)
+            first = asyncio.create_task(system.offer(2))
+            second = asyncio.create_task(system.offer(3))
+            await asyncio.sleep(0.01)
+            gate.set()
+            await asyncio.sleep(0)  # the actor dequeues 1 and grants the slot to `first`, which has not run yet
+            first.cancel()
+            await asyncio.wait_for(second, 1)  # the grant must pass on, not die with `first`
+            await eventually(lambda: seen == [0, 1, 3])
+        finally:
+            gate.set()

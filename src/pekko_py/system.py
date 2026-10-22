@@ -39,6 +39,9 @@ class ActorSystem[T](ActorRef[T]):
     def tell(self, msg: T) -> None:
         self._root.send_user(msg)
 
+    async def offer(self, msg: T) -> None:
+        await self._root.offer(msg)
+
     async def ask[Res](self, make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float) -> Res:
         return await ask(self, make, timeout)
 

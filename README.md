@@ -232,6 +232,21 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 - Timer messages are validated when dequeued, so a message from a timer that was cancelled or restarted while it sat in the mailbox is dropped. `unstash_all` replays the stashed messages inside the current message's turn, before any new message.
 - An idle actor costs about 3.5KB and 40µs to spawn. A busy actor handles over a million trivial messages a second; waking an idle one costs an asyncio task switch, about 16µs, which is what `batching` amortizes. 100k actors fit, but `examples/population.py` shows why 16 shard actors holding struct-of-arrays beat 100k single-arm actors by hundreds of times on memory and query time.
 
+## Performance
+
+From `examples/benchmark.py` on an Apple Silicon laptop with Python 3.14 and the default event loop. Run it yourself; the numbers move with the machine.
+
+| path | rate | cost |
+|---|---|---|
+| `tell` into a busy actor, handler returns `same` | 1.3M msg/s | 0.8µs per message |
+| `tell`, handler returns a new behavior each time | 630k msg/s | 1.6µs per message |
+| `tell` through a pool of 8 routees | 630k msg/s | 1.6µs per message |
+| ping-pong between two actors | 31k round trips/s | 32µs per round trip |
+| `ask` from outside, one at a time | 30k/s | 33µs per ask |
+| spawn and stop an actor | 77k/s | 13µs per actor |
+
+The two regimes matter more than the figures. A busy actor drains its mailbox without yielding, so a message costs a deque pop, a `match` and a call. A message to an idle actor costs an asyncio task switch, about 16µs, which is what every asyncio design pays and what `batching` amortizes. Returning a new behavior per message allocates a closure and a `Receive`, which is the price of the functional style; keep `Behaviors.same` with state in a per-actor cell on hot paths. The other benchmarks under `examples/` cover threads, batching, population shards and shared memory.
+
 ## Known deviations from Pekko
 
 - A plain `restart` whose setup fails stops the actor. Pekko does the same when restarts are unlimited, but retries while a `with_limit` budget remains. Use `restart_with_backoff` for setups that can fail.
@@ -258,6 +273,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 | `examples/fastapi_chatroom.py` | the chat room over WebSockets: one connection actor per socket with an async handler that writes to it, rooms created on demand, and DeathWatch turning a closed socket into a "left" notice; serves a browser page at `/` |
 | `examples/fastapi_online_learning.py` | a feedback loop behind FastAPI: predictions micro-batched into one numpy call, outcomes posted back, a learner actor taking gradient steps in a thread and hot-swapping the model; serves a playground page at `/`, and `python examples/fastapi_online_learning.py` runs the server with a demo client |
 | `examples/bandit.py` | Thompson sampling over sharded arms: Beta posteriors as arrays, one vectorized draw per shard, `ctx.ask` fan-out, a progress timer |
+| `examples/benchmark.py` | message throughput, round-trip latency and spawn cost of the runtime; the source of the Performance table |
 | `examples/compute.py` | numpy in threads via `pipe_to_self(asyncio.to_thread(...))`, with a latency probe |
 | `examples/batching.py` | `batching` throughput and p99 latency curves |
 | `examples/population.py` | 100k single-arm actors against 16 shards behind `Routers.pool` |

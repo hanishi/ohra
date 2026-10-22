@@ -143,7 +143,12 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
 def app(ctx: ActorContext[Run]) -> Behavior[Run]:
     db = ctx.spawn(database(up_after=0.35), "db")
     c = ctx.spawn(client(db), "client")
-    return Behaviors.receive_message(lambda m: (c.tell(m), Behaviors.same)[1])
+
+    def forward(msg: Run) -> Behavior[Run]:
+        c.tell(msg)
+        return Behaviors.same
+
+    return Behaviors.receive_message(forward)
 
 
 async def main() -> None:

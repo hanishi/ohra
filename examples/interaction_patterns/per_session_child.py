@@ -35,11 +35,19 @@ class GetWallet:
 
 
 def key_cabinet() -> Behavior[GetKeys]:
-    return Behaviors.receive_message(lambda m: (m.reply_to.tell(Keys()), Behaviors.same)[1])
+    def on_message(msg: GetKeys) -> Behavior[GetKeys]:
+        msg.reply_to.tell(Keys())
+        return Behaviors.same
+
+    return Behaviors.receive_message(on_message)
 
 
 def drawer() -> Behavior[GetWallet]:
-    return Behaviors.receive_message(lambda m: (m.reply_to.tell(Wallet()), Behaviors.same)[1])
+    def on_message(msg: GetWallet) -> Behavior[GetWallet]:
+        msg.reply_to.tell(Wallet())
+        return Behaviors.same
+
+    return Behaviors.receive_message(on_message)
 
 
 @dataclass(frozen=True)

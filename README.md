@@ -175,7 +175,11 @@ def gated() -> Behavior[Cmd]:
                         buffer.stash(msg)
                         return Behaviors.same
 
-            active = Behaviors.receive_message(lambda m: (print(m), Behaviors.same)[1])
+            def on_active(msg: Cmd) -> Behavior[Cmd]:
+                print(msg)
+                return Behaviors.same
+
+            active = Behaviors.receive_message(on_active)
             return Behaviors.receive_message(waiting)
 
         return Behaviors.with_stash(1000, with_stash)

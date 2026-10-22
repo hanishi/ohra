@@ -85,8 +85,14 @@ async def test_routees_are_children_of_the_router():
     names: list[ActorRef[Cmd]] = []
 
     def guardian(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
-        names.append(ctx.spawn(Routers.pool(3, routee(seen)), "pool"))
-        return Behaviors.receive_message(lambda m: (names[0].tell(m), Behaviors.same)[1])
+        pool = ctx.spawn(Routers.pool(3, routee(seen)), "pool")
+        names.append(pool)
+
+        def forward(msg: Cmd) -> Behavior[Cmd]:
+            pool.tell(msg)
+            return Behaviors.same
+
+        return Behaviors.receive_message(forward)
 
     async with ActorSystem(Behaviors.setup(guardian), "t") as system:
         system.tell(Work(7))

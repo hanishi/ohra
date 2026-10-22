@@ -103,7 +103,12 @@ async def main() -> None:
 
     def app(ctx: ActorContext[Translate]) -> Behavior[Translate]:
         fe = ctx.spawn(frontend(ctx.spawn(backend(), "backend")), "frontend")
-        return Behaviors.receive_message(lambda m: (fe.tell(m), Behaviors.same)[1])
+
+        def forward(msg: Translate) -> Behavior[Translate]:
+            fe.tell(msg)
+            return Behaviors.same
+
+        return Behaviors.receive_message(forward)
 
     async with ActorSystem(Behaviors.setup(app), "adapted") as system:
         print("translated:", await system.ask(lambda r: Translate("https://pekko.apache.org/docs/", r), timeout=1))

@@ -59,7 +59,12 @@ def arm(arm_id: int, applied: list[int], count: int = 0, total: float = 0.0) -> 
 def population(arms: list[ActorRef[Cmd]], applied: list[int]) -> Behavior[Reward]:
     def setup(ctx: ActorContext[Reward]) -> Behavior[Reward]:
         arms.extend(ctx.spawn(arm(i, applied), str(i)) for i in range(N_ARMS))
-        return Behaviors.receive_message(lambda m: (arms[m.arm].tell(m), Behaviors.same)[1])
+
+        def route(msg: Reward) -> Behavior[Reward]:
+            arms[msg.arm].tell(msg)
+            return Behaviors.same
+
+        return Behaviors.receive_message(route)
 
     return Behaviors.setup(setup)
 

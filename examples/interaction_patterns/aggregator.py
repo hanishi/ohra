@@ -150,7 +150,12 @@ def app(ctx: ActorContext[FindCheapest]) -> Behavior[FindCheapest]:
     b = ctx.spawn(hotel2("Budget", 7950), "budget")
     c = ctx.spawn(hotel1("Slow", 50.0, delay=1.0), "slow")  # misses the deadline
     cust = ctx.spawn(customer(a, b, c), "customer")
-    return Behaviors.receive_message(lambda m: (cust.tell(m), Behaviors.same)[1])
+
+    def forward(msg: FindCheapest) -> Behavior[FindCheapest]:
+        cust.tell(msg)
+        return Behaviors.same
+
+    return Behaviors.receive_message(forward)
 
 
 async def main() -> None:

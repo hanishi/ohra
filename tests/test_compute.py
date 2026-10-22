@@ -68,9 +68,17 @@ def blocking_work(seconds: float) -> str:
     return f"slept {seconds}"
 
 
+def collector_of(replies: list[str]) -> Behavior[str]:
+    def on_message(msg: str) -> Behavior[str]:
+        replies.append(msg)
+        return Behaviors.same
+
+    return Behaviors.receive_message(on_message)
+
+
 async def test_messages_during_compute_are_stashed_and_replayed_in_order():
     replies: list[str] = []
-    collector = Behaviors.receive_message(lambda m: (replies.append(m), Behaviors.same)[1])
+    collector = collector_of(replies)
     async with ActorSystem(collector, "sink") as sink, ActorSystem(worker(), "t") as system:
         system.tell(Compute(0.02, sink))
         system.tell(Echo("a", sink))
@@ -82,7 +90,7 @@ async def test_messages_during_compute_are_stashed_and_replayed_in_order():
 async def test_event_loop_stays_responsive_during_parallel_compute():
     """Many actors blocking threads at once: wall time is parallel, and a ticker never stalls."""
     replies: list[str] = []
-    collector = Behaviors.receive_message(lambda m: (replies.append(m), Behaviors.same)[1])
+    collector = collector_of(replies)
     gaps: list[float] = []
 
     async def ticker() -> None:

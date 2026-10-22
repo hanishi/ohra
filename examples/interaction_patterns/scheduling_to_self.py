@@ -70,14 +70,24 @@ class Tick:
 def ticker(period: float) -> Behavior[Tick]:
     def with_timers(timers: TimerScheduler[Tick]) -> Behavior[Tick]:
         timers.start_timer_with_fixed_delay("tick", Tick(), period)
-        return Behaviors.receive_message(lambda _: (print("tick"), Behaviors.same)[1])
+
+        def on_tick(_: Tick) -> Behavior[Tick]:
+            print("tick")
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_tick)
 
     return Behaviors.with_timers(with_timers)
 
 
 async def main() -> None:
     received: list[Batch] = []
-    sink = Behaviors.receive_message(lambda b: (received.append(b), Behaviors.same)[1])
+
+    def collect(batch: Batch) -> Behavior[Batch]:
+        received.append(batch)
+        return Behaviors.same
+
+    sink = Behaviors.receive_message(collect)
     async with ActorSystem(sink, "sink") as sink_system, ActorSystem(buncher(sink_system, 0.1, 10), "buncher") as b:
         b.tell(ExcitingMessage("one"))
         b.tell(ExcitingMessage("two"))

@@ -87,7 +87,12 @@ def blocker(gate: asyncio.Event, seen: list[int]) -> Behavior[int]:
 def guardian(gate: asyncio.Event, seen: list[int], mailbox: MailboxSelector) -> Behavior[int]:
     def setup(ctx: ActorContext[int]) -> Behavior[int]:
         child = ctx.spawn(blocker(gate, seen), "child", mailbox)
-        return Behaviors.receive_message(lambda m: (child.tell(m), Behaviors.same)[1])
+
+        def forward(msg: int) -> Behavior[int]:
+            child.tell(msg)
+            return Behaviors.same
+
+        return Behaviors.receive_message(forward)
 
     return Behaviors.setup(setup)
 

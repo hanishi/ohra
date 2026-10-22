@@ -197,9 +197,9 @@ class ActorCell[T]:
         self._initial = behavior
         self._behavior: Behavior[T] = behavior
         self._last_live: Behavior[T] | None = None
-        self._sys: deque[object] = deque()
+        self._sys: deque[object] | None = None  # created on the first system message; most actors never get one
         self._user: deque[object] = deque()
-        self._wake = asyncio.Event()
+        self._waiter: asyncio.Future[None] | None = None  # set while the loop is idle in _run
         self._tasks: set[asyncio.Task[None]] = set()
         self._timers: dict[object, asyncio.TimerHandle] = {}
         self.timers: TimerScheduler[T] = TimerScheduler(self)
@@ -223,7 +223,7 @@ class ActorCell[T]:
                 case "fail":
                     raise MailboxOverflowError(f"mailbox of {self.path} is full ({cap})")
         self._user.append(msg)
-        self._wake.set()
+        self._wake()
 
     def send_adapted(self, thunk: Callable[[], object]) -> None:
         self.send_user(_Adapted(thunk))
@@ -233,8 +233,15 @@ class ActorCell[T]:
             if isinstance(msg, _Watch):  # watching a dead actor: notify right away
                 msg.watcher.send_sys(_DeathNotify(self, self.failure))
             return
+        if self._sys is None:
+            self._sys = deque()
         self._sys.append(msg)
-        self._wake.set()
+        self._wake()
+
+    def _wake(self) -> None:
+        w = self._waiter
+        if w is not None and not w.done():
+            w.set_result(None)
 
     # --- children / watch / pipe ---------------------------------------------------
 
@@ -310,8 +317,9 @@ class ActorCell[T]:
                             continue
                     self._set(await self._deliver(self._behavior, msg))
                 else:
-                    self._wake.clear()
-                    await self._wake.wait()
+                    self._waiter = asyncio.get_running_loop().create_future()
+                    await self._waiter
+                    self._waiter = None
         except asyncio.CancelledError:
             await self._finish()
             raise
@@ -556,10 +564,10 @@ class ActorCell[T]:
                 self.log.exception("post_stop callback failed")
         # From here on no awaits: nothing can interleave between these steps.
         self.terminated = True
-        for m in self._sys:
+        for m in self._sys or ():
             if isinstance(m, _Watch):
                 self.watched_by.add(m.watcher)
-        self._sys.clear()
+        self._sys = None
         for m in self._user:
             self.system.dead_letter(m, self.ref)
         self._user.clear()

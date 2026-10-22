@@ -250,6 +250,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
 | `examples/interaction_patterns/` | one runnable file per pattern in Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |
 | `examples/fastapi_carts.py` | a FastAPI service over actors: one cart actor per id, spawned on demand and stopped when idle, handlers that `ask` the manager; run with `uv run --extra web uvicorn examples.fastapi_carts:app` |
+| `examples/fastapi_online_learning.py` | a feedback loop behind FastAPI: predictions micro-batched into one numpy call, outcomes posted back, a learner actor taking gradient steps in a thread and hot-swapping the model; `python examples/fastapi_online_learning.py` runs the server and a demo client |
 | `examples/bandit.py` | Thompson sampling over sharded arms: Beta posteriors as arrays, one vectorized draw per shard, `ctx.ask` fan-out, a progress timer |
 | `examples/compute.py` | numpy in threads via `pipe_to_self(asyncio.to_thread(...))`, with a latency probe |
 | `examples/batching.py` | `batching` throughput and p99 latency curves |
@@ -267,4 +268,6 @@ pyright     # strict; tests/typing_check.py asserts type errors that must occur
 
 ## License
 
-Apache-2.0, the same as Pekko. The interaction-pattern examples are ports of code from the Pekko documentation.
+Apache-2.0, the same as Pekko. The chat room and interaction-pattern examples are derived from the Pekko documentation; see [NOTICE](NOTICE).
+
+pekko-py is not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project.

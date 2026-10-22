@@ -1,0 +1,79 @@
+"""Actor references. ``ActorRef[T]`` is contravariant: a ref accepting a base
+message type can be used where a ref to a subtype is expected."""
+from __future__ import annotations
+
+import asyncio
+import logging
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .cell import ActorCell
+
+_dead_letters = logging.getLogger("pekko_py.dead_letters")
+
+
+class ActorRef[T](ABC):
+    __slots__ = ()
+
+    @property
+    @abstractmethod
+    def path(self) -> str: ...
+
+    @abstractmethod
+    def tell(self, msg: T) -> None: ...
+
+    def __repr__(self) -> str:
+        return f"ActorRef({self.path})"
+
+
+class LocalRef[T](ActorRef[T]):
+    __slots__ = ("_cell",)
+
+    def __init__(self, cell: ActorCell[T]) -> None:
+        self._cell = cell
+
+    @property
+    def path(self) -> str:
+        return self._cell.path
+
+    def tell(self, msg: T) -> None:
+        self._cell.send_user(msg)
+
+
+class PromiseRef[T](ActorRef[T]):
+    """Temporary ref used by ask: the first message completes the future, later ones are dead letters."""
+
+    __slots__ = ("_future", "_path")
+
+    def __init__(self, future: asyncio.Future[T], path: str) -> None:
+        self._future = future
+        self._path = path
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def tell(self, msg: T) -> None:
+        if self._future.done():
+            _dead_letters.debug("dead letter to %s (ask already completed or timed out): %r", self._path, msg)
+        else:
+            self._future.set_result(msg)
+
+
+class FunctionRef[T](ActorRef[T]):
+    """A ref that runs a callback on tell. Used for message adapters."""
+
+    __slots__ = ("_fn", "_path")
+
+    def __init__(self, path: str, fn: Callable[[T], None]) -> None:
+        self._path = path
+        self._fn = fn
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def tell(self, msg: T) -> None:
+        self._fn(msg)

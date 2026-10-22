@@ -10,6 +10,9 @@ learns only from feedback.
     uv run --extra web --extra numpy python examples/fastapi_online_learning.py   # server + demo client
     uv run --extra web --extra numpy uvicorn examples.fastapi_online_learning:app --port 8000
 
+then open http://localhost:8000 for a page to play with: predict, report the outcome, watch
+the weights move.
+
     curl -X POST localhost:8000/predict  -H 'content-type: application/json' -d '{"features": [1.2, -0.3, 0.8, 2.1]}'
     curl -X POST localhost:8000/feedback -H 'content-type: application/json' -d '{"prediction_id": 1, "label": 1}'
     curl localhost:8000/model
@@ -29,6 +32,7 @@ from typing import Any
 
 import numpy as np
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -314,6 +318,60 @@ async def feedback(body: Outcome) -> dict[str, Any]:
 async def model() -> dict[str, Any]:
     m: ModelInfo = await ask(GetModel)
     return {"version": m.version, "feedback_count": m.feedback_count, "online_accuracy": round(m.online_accuracy, 3), "weights": m.weights}
+
+
+PAGE = """<!doctype html><meta charset=utf-8><title>online learning</title>
+<style>
+body{font:15px system-ui;max-width:44em;margin:2em auto;color:#222}
+section{border:1px solid #ddd;border-radius:6px;padding:1em;margin-bottom:1em}
+h2{font-size:1em;margin:0 0 .6em}
+input[type=number]{width:5.5em}
+button{margin:.2em .2em .2em 0}
+.bar{height:10px;background:#4a7;border-radius:5px;transition:width .3s}
+.w{display:grid;grid-template-columns:3em 1fr 4em;gap:.4em;align-items:center;margin:.2em 0}
+.w .track{position:relative;height:10px;background:#eee;border-radius:5px}
+.w .fill{position:absolute;top:0;height:10px;border-radius:5px}
+.muted{color:#777}
+code{background:#f4f4f4;padding:0 .3em}
+</style>
+<section><h2>1. Predict</h2>
+features <span id=feat></span> <button id=rnd>randomize</button> <button id=predict>predict</button>
+<div id=pred class=muted>no prediction yet</div><div class=bar id=pbar style="width:0"></div></section>
+<section><h2>2. Report what actually happened</h2>
+<button id=y1 disabled>outcome was 1</button> <button id=y0 disabled>outcome was 0</button>
+<div id=fb class=muted>predict first</div></section>
+<section><h2>3. Model</h2><div id=model class=muted>loading</div><div id=weights></div></section>
+<section><h2>4. Or let the hidden rule play</h2>
+<div class=muted>The page knows a secret rule, <code>1.5·a − 2.0·b + 0.5·c + 1.0·d + noise &gt; 0</code>, that the service never sees.
+Each round predicts on random features and reports the rule's outcome. Watch the weights converge to it.</div>
+<button id=run>run 100 rounds</button> <span id=prog class=muted></span></section>
+<script>
+const $=id=>document.getElementById(id), post=(p,b)=>fetch(p,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(b)}).then(r=>r.json());
+const inputs=[...Array(4)].map((_,i)=>{const e=document.createElement("input");e.type="number";e.step="0.1";$("feat").append(e,i<3?" ":"");return e});
+const gauss=()=>{let u=1-Math.random(),v=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)};
+const randomize=()=>inputs.forEach(e=>e.value=gauss().toFixed(2)); randomize();
+let last=null;
+async function predict(){const f=inputs.map(e=>+e.value);last=await post("/predict",{features:f});
+ $("pred").textContent=`p(label=1) = ${last.probability.toFixed(3)} → label ${last.probability>0.5?1:0}   (prediction #${last.prediction_id}, model v${last.model_version})`;
+ $("pbar").style.width=(last.probability*100).toFixed(0)+"%";$("y1").disabled=$("y0").disabled=false;$("fb").textContent="which was it?";return last}
+async function feedback(label){if(!last)return;const r=await post("/feedback",{prediction_id:last.prediction_id,label});
+ $("fb").textContent=`${r.accepted?"recorded":"ignored"} · running accuracy ${(r.online_accuracy*100).toFixed(1)}% · model v${r.model_version}`;
+ $("y1").disabled=$("y0").disabled=true;last=null;model()}
+async function model(){const m=await (await fetch("/model")).json();
+ $("model").textContent=`version ${m.version} · ${m.feedback_count} outcomes seen · running accuracy ${(m.online_accuracy*100).toFixed(1)}%`;
+ const max=Math.max(1,...m.weights.map(Math.abs));
+ $("weights").innerHTML=m.weights.map((w,i)=>`<div class=w><span>${"abcd"[i]}</span><div class=track><div class=fill style="left:${w<0?50-Math.abs(w)/max*50:50}%;width:${Math.abs(w)/max*50}%;background:${w<0?"#d66":"#4a7"}"></div></div><span>${w.toFixed(2)}</span></div>`).join("")}
+async function run(n){$("run").disabled=true;for(let i=1;i<=n;i++){randomize();const f=inputs.map(e=>+e.value);const p=await post("/predict",{features:f});
+ const y=1.5*f[0]-2*f[1]+0.5*f[2]+f[3]+0.5*gauss()>0?1:0;const r=await post("/feedback",{prediction_id:p.prediction_id,label:y});
+ if(i%10==0){$("prog").textContent=`round ${i}: accuracy ${(r.online_accuracy*100).toFixed(1)}%, model v${r.model_version}`;model()}}
+ $("run").disabled=false;model()}
+$("rnd").onclick=randomize;$("predict").onclick=predict;$("y1").onclick=()=>feedback(1);$("y0").onclick=()=>feedback(0);$("run").onclick=()=>run(100);model();
+</script>"""
+
+
+@app.get("/")
+async def index() -> HTMLResponse:
+    return HTMLResponse(PAGE)
 
 
 # --- demo client: the world has a hidden rule; the service learns it from feedback alone ------------

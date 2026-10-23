@@ -1,6 +1,8 @@
 # pekko-py
 
-Pekko Typed actors on asyncio, for Python 3.12+. No dependencies.
+**pekko-py is an independent project. It is not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project.**
+
+Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies.
 
 An actor is a function from a message to the next behavior. Typed refs make wrong messages a type error under pyright strict. Everything runs on one event loop, so a handler can `await` without losing the guarantee that an actor handles one message at a time. numpy work goes to threads and comes back as a message.
 
@@ -44,7 +46,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-If you know Pekko or Akka Typed, the names are the same in snake_case, and the semantics are checked against the Pekko source. If you don't, the tour below is enough.
+If you know Apache Pekko or Akka Typed, the names are the same in snake_case, and the semantics are checked against the Apache Pekko source. If you don't, the tour below is enough.
 
 ## Install
 
@@ -197,9 +199,9 @@ A handler that blocks the event loop stalls every actor. Run numpy work with `ct
 
 Messages are shared by reference and never copied. Keep them immutable: frozen dataclasses, and for arrays either copy before sending or set `arr.flags.writeable = False`.
 
-## Pekko names
+## Apache Pekko names
 
-| Pekko | pekko-py |
+| Apache Pekko | pekko-py |
 |---|---|
 | `Behaviors.receive / receiveMessage / receiveSignal / setup / same / stopped / unhandled / empty / ignore` | same names, snake_case; handlers may be `async def` |
 | `ActorRef[-T]` | `ActorRef[T]`, contravariant, enforced by pyright strict |
@@ -248,7 +250,7 @@ From `examples/benchmark.py` on an Apple Silicon laptop with Python 3.14 and the
 
 The two regimes matter more than the figures. A busy actor drains its mailbox without yielding, so a message costs a deque pop, a `match` and a call. A message to an idle actor costs an asyncio task switch, about 16µs, which is what every asyncio design pays and what `batching` amortizes. Returning a new behavior per message allocates a closure and a `Receive`, which is the price of the functional style; keep `Behaviors.same` with state in a per-actor cell on hot paths. The other benchmarks under `examples/` cover threads, batching, population shards and shared memory.
 
-## Known deviations from Pekko
+## Known deviations from Apache Pekko
 
 - A plain `restart` whose setup fails stops the actor. Pekko does the same when restarts are unlimited, but retries while a `with_limit` budget remains. Use `restart_with_backoff` for setups that can fail.
 - An exception in a message adapter or `pipe_to_self` adapt function is logged and the message is dropped. Pekko delivers a `MessageAdaptionFailure` signal, which fails the actor unless handled.
@@ -259,7 +261,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.
 - `batching` is not in Pekko. It flushes a pending batch in `PostStop` and keeps the batch in a closure-local list.
-- Only local refs can be watched. A bridge to a JVM Pekko system over TCP is possible but deferred until there is a caller for it.
+- Only local refs can be watched. A bridge to a JVM Apache Pekko system over TCP is possible but deferred until there is a caller for it.
 - `SharedArray` ownership is a convention: whoever holds the handle owns the segment, sending it transfers ownership, and the owner calls `unlink()` once. A process that crashes while owning a segment leaks it. On Python 3.13+ the resource tracker is bypassed; on 3.12 expect its warnings.
 
 ## Examples
@@ -267,9 +269,9 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | File | Shows |
 |---|---|
 | `examples/counter.py` | the functional style, `ask`, supervision with `resume` |
-| `examples/chatroom.py` | the ChatRoom from the Pekko docs: sessions as children, narrowed refs, DeathWatch |
+| `examples/chatroom.py` | the ChatRoom from the Apache Pekko docs: sessions as children, narrowed refs, DeathWatch |
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
-| `examples/interaction_patterns/` | one runnable file per pattern in Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |
+| `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |
 | `examples/fastapi_carts.py` | a FastAPI service over actors: one cart actor per id, spawned on demand and stopped when idle, handlers that `ask` the manager; run with `uv run --extra web uvicorn examples.fastapi_carts:app` |
 | `examples/fastapi_chatroom.py` | the chat room over WebSockets: one connection actor per socket with an async handler that writes to it, rooms created on demand, and DeathWatch turning a closed socket into a "left" notice; serves a browser page at `/` |
 | `examples/fastapi_online_learning.py` | a feedback loop behind FastAPI: predictions micro-batched into one numpy call, outcomes posted back, a learner actor taking gradient steps in a thread and hot-swapping the model; serves a playground page at `/`, and `python examples/fastapi_online_learning.py` runs the server with a demo client |
@@ -291,6 +293,6 @@ pyright     # strict; tests/typing_check.py asserts type errors that must occur
 
 ## License
 
-Apache-2.0, the same as Pekko. The chat room and interaction-pattern examples are derived from the Pekko documentation; see [NOTICE](NOTICE).
+Apache-2.0, the same as Apache Pekko. The chat room and interaction-pattern examples are derived from the Apache Pekko documentation; see [NOTICE](NOTICE).
 
-pekko-py is not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project.
+pekko-py is an independent project, not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project. Apache Pekko is a trademark of the Apache Software Foundation.

@@ -143,10 +143,10 @@ resilient = Behaviors.supervise(counter()).on_failure(
 
 ### Timers and stash
 
-`Behaviors.with_timers` gives a `TimerScheduler`. Starting a timer with a key already in use cancels the old one, and a message from a cancelled timer that already reached the mailbox is dropped. `Behaviors.with_stash` gives a `StashBuffer`; `buffer.unstash_all(behavior)` replays the stashed messages before any new one.
+`ctx.timers` is the actor's `TimerScheduler`. Starting a timer with a key already in use cancels the old one, and a message from a cancelled timer that already reached the mailbox is dropped. A `StashBuffer` holds messages for later; `buffer.unstash_all(behavior)` replays them before any new one. The factories `Behaviors.setup`, `receive_message` and `receive` take one function and return a behavior, so they work as decorators, and one `setup` is enough to wire timers, a stash and state:
 
 ```python
-from pekko_py import StashBuffer, TimerScheduler
+from pekko_py import ActorContext, StashBuffer
 
 
 @dataclass(frozen=True)
@@ -162,32 +162,31 @@ class Ready:
 type Cmd = Tick | Ready | str
 
 
-def gated() -> Behavior[Cmd]:
-    def with_timers(timers: TimerScheduler[Cmd]) -> Behavior[Cmd]:
-        def with_stash(buffer: StashBuffer[Cmd]) -> Behavior[Cmd]:
-            timers.start_timer_with_fixed_delay("tick", Tick(), 1.0)
+@Behaviors.setup
+def gated(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+    ctx.timers.start_timer_with_fixed_delay("tick", Tick(), 1.0)
+    buffer = StashBuffer[Cmd](1000)
 
-            def waiting(msg: Cmd) -> Behavior[Cmd]:
-                match msg:
-                    case Ready():
-                        return buffer.unstash_all(active)
-                    case Tick():
-                        return Behaviors.same
-                    case _:
-                        buffer.stash(msg)
-                        return Behaviors.same
+    @Behaviors.receive_message
+    def active(msg: Cmd) -> Behavior[Cmd]:
+        print(msg)
+        return Behaviors.same
 
-            def on_active(msg: Cmd) -> Behavior[Cmd]:
-                print(msg)
+    @Behaviors.receive_message
+    def waiting(msg: Cmd) -> Behavior[Cmd]:
+        match msg:
+            case Ready():
+                return buffer.unstash_all(active)
+            case Tick():
+                return Behaviors.same
+            case _:
+                buffer.stash(msg)
                 return Behaviors.same
 
-            active = Behaviors.receive_message(on_active)
-            return Behaviors.receive_message(waiting)
-
-        return Behaviors.with_stash(1000, with_stash)
-
-    return Behaviors.with_timers(with_timers)
+    return waiting
 ```
+
+The Apache Pekko spelling, `Behaviors.with_timers(factory)` and `Behaviors.with_stash(capacity, factory)`, works too and is what the ported examples use.
 
 ### Routers, batching, and bounded mailboxes
 
@@ -213,6 +212,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 | `watch`, `watchWith`, `Terminated`, `ChildFailed`, `DeathPactException` | same; `DeathPactError` |
 | `PreRestart`, `PostStop` | same |
 | `SupervisorStrategy.resume / restart / stop / restartWithBackoff`, `withLimit`, `withResetBackoffAfter`, `withStashCapacity` | same, snake_case |
+| (none) | `ctx.timers`, the same scheduler `with_timers` hands out, so one `setup` needs no timer factory layer |
 | `Behaviors.withTimers`, `TimerScheduler.startSingleTimer / startTimerWithFixedDelay / cancel / cancelAll / isTimerActive` | same, snake_case |
 | `Behaviors.withStash`, `StashBuffer.stash / unstashAll / size / isEmpty / isFull`, `StashOverflowException` | same, snake_case; `StashOverflowError` |
 | `MailboxSelector.bounded(capacity)` passed to `spawn` | same, plus `overflow="drop_new" \| "drop_old" \| "fail"` |
@@ -257,6 +257,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - If a handler fails partway through `unstash_all`, the unprocessed messages stay in the buffer as in Pekko, but `resume` and `PreRestart` see the behavior from before the unstash began. Pekko tracks the intermediate behavior reached by the last successful message.
 - Exceptions in `PreRestart` and `PostStop` handlers are logged, not supervised.
 - `ask` and `ctx.ask` check the reply type but not that the target accepts the request, since the reply type is read from the request's `reply_to` field and pyright cannot tie both to one type parameter. `tell` is fully checked. Pekko checks both.
+- `ctx.timers` exposes the actor's `TimerScheduler` directly; Pekko hands it out only through `Behaviors.withTimers`. Both reach the same scheduler, and a restart cancels its timers either way.
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.

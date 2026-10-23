@@ -155,6 +155,25 @@ async def test_timers_stop_with_the_actor():
     assert len(ticks) == n
 
 
+async def test_timers_are_also_available_on_the_context():
+    """ctx.timers is the same scheduler with_timers hands out, so a flat setup is enough."""
+    ticks: list[str] = []
+
+    @Behaviors.setup
+    def flat(ctx: ActorContext[Tick]) -> Behavior[Tick]:
+        ctx.timers.start_single_timer("k", Tick("from ctx"), 0.005)
+
+        @Behaviors.receive_message
+        def on_tick(msg: Tick) -> Behavior[Tick]:
+            ticks.append(msg.name)
+            return Behaviors.same
+
+        return on_tick
+
+    async with ActorSystem(flat, "t"):
+        await eventually(lambda: ticks == ["from ctx"])
+
+
 # --- stash --------------------------------------------------------------------------
 
 

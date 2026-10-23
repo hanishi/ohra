@@ -24,7 +24,6 @@ from pekko_py import (
     Behaviors,
     Routers,
     Success,
-    TimerScheduler,
     Try,
 )
 
@@ -149,76 +148,73 @@ class Progress:
 def agent(means: np.ndarray) -> Behavior[AgentCmd]:
     best_arm, best_mean = int(means.argmax()), float(means.max())
 
-    def with_timers(timers: TimerScheduler[AgentCmd]) -> Behavior[AgentCmd]:
-        def setup(ctx: ActorContext[AgentCmd]) -> Behavior[AgentCmd]:
-            shards = ctx.spawn(shard_pool(), "shards")
-            env = ctx.spawn(environment(means), "env")
+    def setup(ctx: ActorContext[AgentCmd]) -> Behavior[AgentCmd]:
+        shards = ctx.spawn(shard_pool(), "shards")
+        env = ctx.spawn(environment(means), "env")
 
-            def idle(msg: AgentCmd) -> Behavior[AgentCmd]:
+        def idle(msg: AgentCmd) -> Behavior[AgentCmd]:
+            match msg:
+                case Run(steps, reply_to):
+                    ctx.timers.start_timer_with_fixed_delay("report", Report(), 0.5)
+                    return propose(steps, reply_to, Progress())
+                case _:
+                    return Behaviors.same
+
+        def propose(steps: int, reply_to: ActorRef[Summary], p: Progress) -> Behavior[AgentCmd]:
+            for k in range(N_SHARDS):
+                ctx.ask(shards, lambda r, k=k: Propose(k, r), Proposal, timeout=1)
+            return collecting(steps, reply_to, p, ())
+
+        def collecting(
+            steps: int, reply_to: ActorRef[Summary], p: Progress, got: tuple[tuple[int, float], ...]
+        ) -> Behavior[AgentCmd]:
+            def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
                 match msg:
-                    case Run(steps, reply_to):
-                        timers.start_timer_with_fixed_delay("report", Report(), 0.5)
-                        return propose(steps, reply_to, Progress())
+                    case Proposal(Success(candidate)):
+                        got2 = (*got, candidate)
+                        if len(got2) < N_SHARDS:
+                            return collecting(steps, reply_to, p, got2)
+                        arm = max(got2, key=lambda c: c[1])[0]
+                        ctx.ask(env, lambda r: Pull(arm, r), Rewarded, timeout=1)
+                        return pulling(steps, reply_to, p, arm)
+                    case Proposal(_):
+                        raise RuntimeError("a shard did not answer")
+                    case Report():
+                        print(f"step {p.step:5}  regret {p.regret:7.2f}")
+                        return Behaviors.same
                     case _:
                         return Behaviors.same
 
-            def propose(steps: int, reply_to: ActorRef[Summary], p: Progress) -> Behavior[AgentCmd]:
-                for k in range(N_SHARDS):
-                    ctx.ask(shards, lambda r, k=k: Propose(k, r), Proposal, timeout=1)
-                return collecting(steps, reply_to, p, ())
+            return Behaviors.receive_message(on_message)
 
-            def collecting(
-                steps: int, reply_to: ActorRef[Summary], p: Progress, got: tuple[tuple[int, float], ...]
-            ) -> Behavior[AgentCmd]:
-                def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
-                    match msg:
-                        case Proposal(Success(candidate)):
-                            got2 = (*got, candidate)
-                            if len(got2) < N_SHARDS:
-                                return collecting(steps, reply_to, p, got2)
-                            arm = max(got2, key=lambda c: c[1])[0]
-                            ctx.ask(env, lambda r: Pull(arm, r), Rewarded, timeout=1)
-                            return pulling(steps, reply_to, p, arm)
-                        case Proposal(_):
-                            raise RuntimeError("a shard did not answer")
-                        case Report():
-                            print(f"step {p.step:5}  regret {p.regret:7.2f}")
-                            return Behaviors.same
-                        case _:
-                            return Behaviors.same
+        def pulling(steps: int, reply_to: ActorRef[Summary], p: Progress, arm: int) -> Behavior[AgentCmd]:
+            def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
+                match msg:
+                    case Rewarded(Success(reward)):
+                        shards.tell(Observe(arm, reward))
+                        p2 = Progress(
+                            p.step + 1,
+                            p.regret + best_mean - float(means[arm]),
+                            p.pulls_of_best + (arm == best_arm),
+                        )
+                        if p2.step == steps:
+                            ctx.timers.cancel("report")
+                            reply_to.tell(Summary(p2.step, p2.regret, p2.pulls_of_best))
+                            return Behaviors.receive_message(idle)
+                        return propose(steps, reply_to, p2)
+                    case Rewarded(_):
+                        raise RuntimeError("the environment did not answer")
+                    case Report():
+                        print(f"step {p.step:5}  regret {p.regret:7.2f}")
+                        return Behaviors.same
+                    case _:
+                        return Behaviors.same
 
-                return Behaviors.receive_message(on_message)
+            return Behaviors.receive_message(on_message)
 
-            def pulling(steps: int, reply_to: ActorRef[Summary], p: Progress, arm: int) -> Behavior[AgentCmd]:
-                def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
-                    match msg:
-                        case Rewarded(Success(reward)):
-                            shards.tell(Observe(arm, reward))
-                            p2 = Progress(
-                                p.step + 1,
-                                p.regret + best_mean - float(means[arm]),
-                                p.pulls_of_best + (arm == best_arm),
-                            )
-                            if p2.step == steps:
-                                timers.cancel("report")
-                                reply_to.tell(Summary(p2.step, p2.regret, p2.pulls_of_best))
-                                return Behaviors.receive_message(idle)
-                            return propose(steps, reply_to, p2)
-                        case Rewarded(_):
-                            raise RuntimeError("the environment did not answer")
-                        case Report():
-                            print(f"step {p.step:5}  regret {p.regret:7.2f}")
-                            return Behaviors.same
-                        case _:
-                            return Behaviors.same
+        return Behaviors.receive_message(idle)
 
-                return Behaviors.receive_message(on_message)
-
-            return Behaviors.receive_message(idle)
-
-        return Behaviors.setup(setup)
-
-    return Behaviors.with_timers(with_timers)
+    return Behaviors.setup(setup)
 
 
 async def main() -> None:

@@ -23,7 +23,6 @@ from pekko_py import (
     Behaviors,
     StashBuffer,
     Success,
-    TimerScheduler,
     Try,
 )
 
@@ -102,8 +101,8 @@ class Report:
 
 
 def probe(period: float = 0.005) -> Behavior[Tick | Report]:
-    def with_timers(timers: TimerScheduler[Tick | Report]) -> Behavior[Tick | Report]:
-        timers.start_timer_with_fixed_delay("tick", Tick(), period)
+    def setup(ctx: ActorContext[Tick | Report]) -> Behavior[Tick | Report]:
+        ctx.timers.start_timer_with_fixed_delay("tick", Tick(), period)
         loop = asyncio.get_running_loop()
 
         def ticking(last: float, lateness: list[float]) -> Behavior[Tick | Report]:
@@ -114,14 +113,14 @@ def probe(period: float = 0.005) -> Behavior[Tick | Report]:
                         return ticking(now, [*lateness, (now - last) - period])
                     case Report(reply_to):
                         reply_to.tell(lateness)
-                        timers.start_timer_with_fixed_delay("tick", Tick(), period)  # drops a queued stale Tick
+                        ctx.timers.start_timer_with_fixed_delay("tick", Tick(), period)  # drops a queued stale Tick
                         return ticking(loop.time(), [])
 
             return Behaviors.receive_message(on_message)
 
         return ticking(loop.time(), [])
 
-    return Behaviors.with_timers(with_timers)
+    return Behaviors.setup(setup)
 
 
 # --- driver --------------------------------------------------------------------------------

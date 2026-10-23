@@ -2,7 +2,7 @@
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
 from dataclasses import dataclass
 
-from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
+from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
 
 
 @dataclass(frozen=True)
@@ -42,9 +42,13 @@ def handler(msg: Ping) -> Behavior[Ping]:
 _b: Behavior[Ping] = Behaviors.receive_message(handler)
 
 
-def timers_and_stash(timers: TimerScheduler[Ping], buffer: StashBuffer[Ping], ping: Ping) -> None:
+def timers_and_stash(
+    ctx: ActorContext[Ping], timers: TimerScheduler[Ping], buffer: StashBuffer[Ping], ping: Ping
+) -> None:
     timers.start_single_timer("k", ping, 1.0)
     timers.start_single_timer("k", "not a ping", 1.0)  # type: ignore[arg-type]
+    ctx.timers.start_single_timer("k", ping, 1.0)
+    ctx.timers.start_single_timer("k", "not a ping", 1.0)  # type: ignore[arg-type]
     buffer.stash(ping)
     buffer.stash(42)  # type: ignore[arg-type]
 

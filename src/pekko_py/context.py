@@ -12,7 +12,7 @@ from .result import Try
 
 if TYPE_CHECKING:
     from .behavior import Behavior
-    from .cell import ActorCell
+    from .cell import ActorCell, TimerScheduler
     from .system import ActorSystem
 
 
@@ -33,6 +33,13 @@ class ActorContext[T]:
     @property
     def log(self) -> logging.Logger:
         return self._cell.log
+
+    @property
+    def timers(self) -> TimerScheduler[T]:
+        """This actor's timers, the same scheduler ``Behaviors.with_timers`` hands out.
+        Lets a single ``Behaviors.setup`` start timers without another factory layer.
+        Not in Apache Pekko, where timers come only through ``withTimers``."""
+        return self._cell.timers
 
     @property
     def children(self) -> list[ActorRef[Any]]:

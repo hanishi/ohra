@@ -43,7 +43,6 @@ from pekko_py import (
     Behavior,
     Behaviors,
     Success,
-    TimerScheduler,
     Try,
     batching,
 )
@@ -198,55 +197,52 @@ class Stats:
 
 
 def learner(predict_ref: Callable[[], ActorRef[UseModel]]) -> Behavior[LearnerCmd]:
-    def with_timers(timers: TimerScheduler[LearnerCmd]) -> Behavior[LearnerCmd]:
-        def setup(ctx: ActorContext[LearnerCmd]) -> Behavior[LearnerCmd]:
-            timers.start_timer_with_fixed_delay("step", _Step(), STEP_EVERY)
-            # Per-message state that is updated in place; everything else is in behavior parameters.
-            pending: OrderedDict[int, tuple[tuple[float, ...], float]] = OrderedDict()
-            minibatch: list[tuple[tuple[float, ...], int]] = []
+    def setup(ctx: ActorContext[LearnerCmd]) -> Behavior[LearnerCmd]:
+        ctx.timers.start_timer_with_fixed_delay("step", _Step(), STEP_EVERY)
+        # Per-message state that is updated in place; everything else is in behavior parameters.
+        pending: OrderedDict[int, tuple[tuple[float, ...], float]] = OrderedDict()
+        minibatch: list[tuple[tuple[float, ...], int]] = []
 
-            def learning(model: Model, stats: Stats, stepping: bool) -> Behavior[LearnerCmd]:
-                def on_message(msg: LearnerCmd) -> Behavior[LearnerCmd]:
-                    match msg:
-                        case Predicted(pid, features, prob):
-                            pending[pid] = (features, prob)
-                            if len(pending) > PENDING_LIMIT:
-                                pending.popitem(last=False)
-                        case Feedback(pid, label, reply_to):
-                            found = pending.pop(pid, None)
-                            if found is None:
-                                reply_to.tell(FeedbackResult(False, stats.accuracy, model.version))
-                                return Behaviors.same
-                            features, prob = found
-                            minibatch.append((features, label))
-                            new_stats = Stats(stats.feedback + 1, stats.correct + ((prob > 0.5) == bool(label)))
-                            reply_to.tell(FeedbackResult(True, new_stats.accuracy, model.version))
-                            return learning(model, new_stats, stepping)
-                        case _Step() if not stepping and len(minibatch) >= MIN_STEP_SAMPLES:
-                            x = np.array([f for f, _ in minibatch])
-                            y = np.array([float(label) for _, label in minibatch], dtype=np.float64)
-                            minibatch.clear()
-                            ctx.pipe_to_self(asyncio.to_thread(sgd_steps, model, x, y), _Stepped)
-                            return learning(model, stats, stepping=True)
-                        case _Stepped(result):
-                            if isinstance(result, Success):
-                                predict_ref().tell(UseModel(result.value))
-                                return learning(result.value, stats, stepping=False)
-                            ctx.log.error("step failed: %r", result.exception)
-                            return learning(model, stats, stepping=False)
-                        case GetModel(reply_to):
-                            reply_to.tell(ModelInfo(model.version, stats.feedback, stats.accuracy, tuple(model.weights.tolist())))
-                        case _Step():
-                            pass
-                    return Behaviors.same
+        def learning(model: Model, stats: Stats, stepping: bool) -> Behavior[LearnerCmd]:
+            def on_message(msg: LearnerCmd) -> Behavior[LearnerCmd]:
+                match msg:
+                    case Predicted(pid, features, prob):
+                        pending[pid] = (features, prob)
+                        if len(pending) > PENDING_LIMIT:
+                            pending.popitem(last=False)
+                    case Feedback(pid, label, reply_to):
+                        found = pending.pop(pid, None)
+                        if found is None:
+                            reply_to.tell(FeedbackResult(False, stats.accuracy, model.version))
+                            return Behaviors.same
+                        features, prob = found
+                        minibatch.append((features, label))
+                        new_stats = Stats(stats.feedback + 1, stats.correct + ((prob > 0.5) == bool(label)))
+                        reply_to.tell(FeedbackResult(True, new_stats.accuracy, model.version))
+                        return learning(model, new_stats, stepping)
+                    case _Step() if not stepping and len(minibatch) >= MIN_STEP_SAMPLES:
+                        x = np.array([f for f, _ in minibatch])
+                        y = np.array([float(label) for _, label in minibatch], dtype=np.float64)
+                        minibatch.clear()
+                        ctx.pipe_to_self(asyncio.to_thread(sgd_steps, model, x, y), _Stepped)
+                        return learning(model, stats, stepping=True)
+                    case _Stepped(result):
+                        if isinstance(result, Success):
+                            predict_ref().tell(UseModel(result.value))
+                            return learning(result.value, stats, stepping=False)
+                        ctx.log.error("step failed: %r", result.exception)
+                        return learning(model, stats, stepping=False)
+                    case GetModel(reply_to):
+                        reply_to.tell(ModelInfo(model.version, stats.feedback, stats.accuracy, tuple(model.weights.tolist())))
+                    case _Step():
+                        pass
+                return Behaviors.same
 
-                return Behaviors.receive_message(on_message)
+            return Behaviors.receive_message(on_message)
 
-            return learning(untrained(), Stats(), stepping=False)
+        return learning(untrained(), Stats(), stepping=False)
 
-        return Behaviors.setup(setup)
-
-    return Behaviors.with_timers(with_timers)
+    return Behaviors.setup(setup)
 
 
 # --- guardian: wires predictor and learner, exposes one protocol to HTTP -------------------------

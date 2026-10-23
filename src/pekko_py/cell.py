@@ -101,7 +101,7 @@ class _Supervisor[T](Behavior[T]):
 
 
 class TimerScheduler[T]:
-    """Pekko's TimerScheduler, obtained with ``Behaviors.with_timers``.
+    """Pekko's TimerScheduler, reached as ``ctx.timers`` or through ``Behaviors.with_timers``.
 
     A timer message is validated when it is dequeued, so a message from a timer that
     was cancelled or restarted while it sat in the mailbox is dropped. Starting a timer

@@ -28,7 +28,6 @@ from pekko_py import (
     Behaviors,
     Signal,
     Terminated,
-    TimerScheduler,
 )
 
 IDLE_TIMEOUT = 30.0  # seconds without a request before a cart actor stops
@@ -62,9 +61,9 @@ type CartCmd = AddItem | GetCart | Checkout | _Idle
 
 
 def cart() -> Behavior[CartCmd]:
-    def with_timers(timers: TimerScheduler[CartCmd]) -> Behavior[CartCmd]:
+    def setup(ctx: ActorContext[CartCmd]) -> Behavior[CartCmd]:
         def active(items: dict[str, int]) -> Behavior[CartCmd]:
-            timers.start_single_timer("idle", _Idle(), IDLE_TIMEOUT)  # restarted on every request
+            ctx.timers.start_single_timer("idle", _Idle(), IDLE_TIMEOUT)  # restarted on every request
 
             def on_message(msg: CartCmd) -> Behavior[CartCmd]:
                 match msg:
@@ -85,7 +84,7 @@ def cart() -> Behavior[CartCmd]:
 
         return active({})
 
-    return Behaviors.with_timers(with_timers)
+    return Behaviors.setup(setup)
 
 
 # --- manager: routes by cart id, spawns on demand, forgets stopped carts ------------------

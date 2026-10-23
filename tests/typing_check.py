@@ -77,3 +77,12 @@ async def ask_infers_the_reply_type(pinger: ActorRef[Ping]) -> None:
     also: str = await ask(pinger, Ping, timeout=1)  # or the class itself
     wrong: int = await ask(pinger, Ping, timeout=1)  # type: ignore[assignment]
     del pong, also, wrong
+
+
+def fastapi_dependency_is_typed() -> None:
+    from pekko_py.fastapi import Actors
+
+    actors = Actors(_b, "web")
+    system: ActorSystem[Ping] = actors.depends()
+    wrong: ActorSystem[str] = actors.depends()  # type: ignore[assignment]
+    del system, wrong

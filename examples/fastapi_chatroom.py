@@ -13,7 +13,6 @@ demo with three clients:
 import asyncio
 import json
 import sys
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ from fastapi.responses import HTMLResponse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Signal, Terminated
+from pekko_py.fastapi import Actors
 
 # --- room protocol (as in examples/chatroom.py, plus join/leave notices) ----------------------
 
@@ -208,24 +208,15 @@ def lobby() -> Behavior[LobbyCmd]:
 # --- HTTP and WebSocket ------------------------------------------------------------------------------
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ANN201
-    async with ActorSystem(lobby(), "chat") as system:
-        app.state.system = system
-        yield
+actors = Actors(lobby(), "chat")
+app = FastAPI(title="chat", lifespan=actors.lifespan)
 
-
-app = FastAPI(title="chat", lifespan=lifespan)
-
-
-def system() -> ActorSystem[LobbyCmd]:
-    return app.state.system
 
 
 @app.websocket("/ws/{room}/{screen_name}")
-async def chat(ws: WebSocket, room: str, screen_name: str) -> None:
+async def chat(ws: WebSocket, room: str, screen_name: str, system: ActorSystem[LobbyCmd] = actors.depends()) -> None:
     await ws.accept()
-    result: JoinResult = await system().ask(lambda r: Join(room, screen_name, ws, r), timeout=2)
+    result: JoinResult = await system.ask(lambda r: Join(room, screen_name, ws, r), timeout=2)
     match result:
         case Denied(reason):
             await ws.send_json({"type": "denied", "text": reason})
@@ -237,7 +228,7 @@ async def chat(ws: WebSocket, room: str, screen_name: str) -> None:
             except WebSocketDisconnect:
                 pass
             finally:
-                system().tell(Leave(conn))
+                system.tell(Leave(conn))
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>chat</title>

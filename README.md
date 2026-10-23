@@ -54,8 +54,8 @@ If you know Apache Pekko or Akka Typed, the names are the same in snake_case, an
 ```
 pip install -e .            # the library
 pip install -e '.[numpy]'   # plus numpy, for the examples that use it
-pip install -e '.[web]'     # plus FastAPI and uvicorn, for examples/fastapi_carts.py
-pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright
+pip install -e '.[web]'     # plus FastAPI and uvicorn, for pekko_py.fastapi and the fastapi_* examples
+pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 ```
 
 ## Tour
@@ -202,6 +202,25 @@ A handler that blocks the event loop stalls every actor. Run numpy work with `ct
 
 Messages are shared by reference and never copied. Keep them immutable: frozen dataclasses, and for arrays either copy before sending or set `arr.flags.writeable = False`.
 
+### FastAPI
+
+`pekko_py.fastapi.Actors` owns an `ActorSystem` for the life of a FastAPI app and hands it to routes as a typed dependency, so `ask` replies are type-checked all the way to the response. An `AskTimeoutError` that escapes a route becomes a 504. Needs the `web` extra.
+
+```python
+from fastapi import FastAPI
+from pekko_py.fastapi import Actors
+
+actors = Actors(counter(), "web")
+app = FastAPI(lifespan=actors.lifespan)
+
+
+@app.get("/total")
+async def total(system: ActorSystem[Command] = actors.depends()) -> dict[str, int]:
+    return {"total": await system.ask(GetTotal, timeout=1)}
+```
+
+Inside a WebSocket route the same dependency works, and the connection actor pattern in `examples/fastapi_chatroom.py` keeps one actor per socket.
+
 ## Apache Pekko names
 
 | Apache Pekko | pekko-py |
@@ -267,6 +286,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.
+- `pekko_py.fastapi` is not in Pekko; it is the lifespan, dependency and 504 mapping that every FastAPI app over actors otherwise writes by hand.
 - `batching` is not in Pekko. It flushes a pending batch in `PostStop` and keeps the batch in a closure-local list.
 - Only local refs can be watched. A bridge to a JVM Apache Pekko system over TCP is possible but deferred until there is a caller for it.
 - `SharedArray` ownership is a convention: whoever holds the handle owns the segment, sending it transfers ownership, and the owner calls `unlink()` once. A process that crashes while owning a segment leaks it. On Python 3.13+ the resource tracker is bypassed; on 3.12 expect its warnings.
@@ -289,7 +309,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | `examples/population.py` | 100k single-arm actors against 16 shards behind `Routers.pool` |
 | `examples/shared_memory.py` | `SharedArray` against pickling for a 400MB array |
 
-The last four need numpy: `uv run --extra numpy python examples/bandit.py`.
+The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra: `uv run --extra web python examples/fastapi_carts.py`.
 
 ## Development
 

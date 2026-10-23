@@ -24,7 +24,6 @@ import sys
 import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +31,7 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -46,6 +45,7 @@ from pekko_py import (
     Try,
     batching,
 )
+from pekko_py.fastapi import Actors
 
 N_FEATURES = 4
 BATCH_MAX_N, BATCH_MAX_WAIT = 64, 0.005  # prediction micro-batches
@@ -274,22 +274,12 @@ def service() -> Behavior[Cmd]:
 # --- HTTP ---------------------------------------------------------------------------------------------
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ANN201
-    async with ActorSystem(service(), "online") as system:
-        app.state.system = system
-        yield
-
-
-app = FastAPI(title="online learning", lifespan=lifespan)
-
-
-def ask[R](make: Callable[[ActorRef[R]], Cmd]) -> Any:
-    return app.state.system.ask(make, timeout=5)
+actors = Actors(service(), "online")
+app = FastAPI(title="online learning", lifespan=actors.lifespan)
 
 
 class Features(BaseModel):
-    features: list[float]
+    features: list[float] = Field(min_length=N_FEATURES, max_length=N_FEATURES)
 
 
 class Outcome(BaseModel):
@@ -298,20 +288,20 @@ class Outcome(BaseModel):
 
 
 @app.post("/predict")
-async def predict(body: Features) -> dict[str, Any]:
-    p: Prediction = await ask(lambda r: Predict(tuple(body.features), r))
+async def predict(body: Features, system: ActorSystem[Cmd] = actors.depends()) -> dict[str, Any]:
+    p = await system.ask(lambda r: Predict(tuple(body.features), r), timeout=5)
     return {"prediction_id": p.prediction_id, "probability": p.probability, "label": int(p.probability > 0.5), "model_version": p.model_version}
 
 
 @app.post("/feedback")
-async def feedback(body: Outcome) -> dict[str, Any]:
-    r: FeedbackResult = await ask(lambda r: Feedback(body.prediction_id, body.label, r))
+async def feedback(body: Outcome, system: ActorSystem[Cmd] = actors.depends()) -> dict[str, Any]:
+    r = await system.ask(lambda r: Feedback(body.prediction_id, body.label, r), timeout=5)
     return {"accepted": r.accepted, "online_accuracy": round(r.online_accuracy, 3), "model_version": r.model_version}
 
 
 @app.get("/model")
-async def model() -> dict[str, Any]:
-    m: ModelInfo = await ask(GetModel)
+async def model(system: ActorSystem[Cmd] = actors.depends()) -> dict[str, Any]:
+    m = await system.ask(GetModel, timeout=5)
     return {"version": m.version, "feedback_count": m.feedback_count, "online_accuracy": round(m.online_accuracy, 3), "weights": m.weights}
 
 

@@ -10,7 +10,6 @@ await the reply; the actor system lives for the lifetime of the app.
 """
 import sys
 from collections.abc import Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +28,7 @@ from pekko_py import (
     Signal,
     Terminated,
 )
+from pekko_py.fastapi import Actors
 
 IDLE_TIMEOUT = 30.0  # seconds without a request before a cart actor stops
 
@@ -141,18 +141,9 @@ def manager() -> Behavior[ManagerCmd]:
 # --- HTTP ------------------------------------------------------------------------------------
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ANN201
-    async with ActorSystem(manager(), "carts") as system:
-        app.state.system = system
-        yield
+actors = Actors(manager(), "carts")
+app = FastAPI(title="carts", lifespan=actors.lifespan)
 
-
-app = FastAPI(title="carts", lifespan=lifespan)
-
-
-def system() -> ActorSystem[ManagerCmd]:
-    return app.state.system
 
 
 type Reply = ActorRef[dict[str, int]]
@@ -169,27 +160,27 @@ class Item(BaseModel):
 
 
 @app.post("/carts/{cart_id}/items")
-async def add_item(cart_id: str, item: Item) -> dict[str, Any]:
-    items = await system().ask(for_cart(cart_id, lambda r: AddItem(item.sku, item.qty, r)), timeout=2)
+async def add_item(cart_id: str, item: Item, system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, Any]:
+    items = await system.ask(for_cart(cart_id, lambda r: AddItem(item.sku, item.qty, r)), timeout=2)
     return {"cart": cart_id, "items": items}
 
 
 @app.get("/carts/{cart_id}")
-async def get_cart(cart_id: str) -> dict[str, Any]:
-    items = await system().ask(for_cart(cart_id, GetCart, create=False), timeout=2)
+async def get_cart(cart_id: str, system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, Any]:
+    items = await system.ask(for_cart(cart_id, GetCart, create=False), timeout=2)
     if not items:
         raise HTTPException(404, "no such cart")
     return {"cart": cart_id, "items": items}
 
 
 @app.delete("/carts/{cart_id}")
-async def checkout(cart_id: str) -> dict[str, Any]:
-    items = await system().ask(for_cart(cart_id, Checkout, create=False), timeout=2)
+async def checkout(cart_id: str, system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, Any]:
+    items = await system.ask(for_cart(cart_id, Checkout, create=False), timeout=2)
     if not items:
         raise HTTPException(404, "no such cart")
     return {"cart": cart_id, "checked_out": items}
 
 
 @app.get("/carts")
-async def count() -> dict[str, int]:
-    return {"active_carts": await system().ask(CartCount, timeout=2)}
+async def count(system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, int]:
+    return {"active_carts": await system.ask(CartCount, timeout=2)}

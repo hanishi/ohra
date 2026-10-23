@@ -26,6 +26,7 @@ type Command = Increment | GetTotal
 
 
 def counter(total: int = 0) -> Behavior[Command]:
+    @Behaviors.receive_message
     def on_message(msg: Command) -> Behavior[Command]:
         match msg:
             case Increment(by):
@@ -34,7 +35,7 @@ def counter(total: int = 0) -> Behavior[Command]:
                 reply_to.tell(total)
                 return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def main() -> None:
@@ -63,14 +64,14 @@ pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright
 
 Messages are frozen dataclasses, a command protocol is a union, and a handler dispatches with `match`. A handler returns the next behavior: a new one carrying new state, `Behaviors.same`, `Behaviors.stopped()`, or `Behaviors.unhandled`. Handlers may be `async def`; an awaiting handler keeps the actor busy, and the next message waits.
 
-`Behaviors.setup(lambda ctx: ...)` runs once per actor and is where per-actor state and children are created. `Behaviors.receive(lambda ctx, msg: ...)` is `receive_message` with the context.
+`Behaviors.setup`, `receive`, `receive_message` and `receive_signal` each take one function and return a behavior, so they work as decorators. The decorator form and the call form are the same thing and can be mixed freely: `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`. The decorator form is new in pekko-py, since Apache Pekko has no equivalent; the snippets below use it, and the ported examples use the call form. `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context.
 
 ### Ask and reply
 
 A request carries its own `reply_to`. From outside the system, `ask` returns the reply or raises `AskTimeoutError`. From inside an actor, `ctx.ask` delivers the reply to the asking actor as a message, wrapped in `Success` or `Failure`.
 
 ```python
-from pekko_py import Failure, Success, Try
+from pekko_py import ActorContext, Failure, Success, Try
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class Fetched:
 
 
 def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[Fetched | str], msg: Fetched | str) -> Behavior[Fetched | str]:
         match msg:
             case str(url):
@@ -97,7 +99,7 @@ def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
                         ctx.log.warning("fetch failed: %r", e)
         return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 ```
 
 The `make` argument is anything that turns a reply ref into the request: a lambda, or the message class itself when `reply_to` is its only field. Pyright infers the reply type from the request's `reply_to` field.
@@ -112,17 +114,19 @@ The `make` argument is anything that turns a reply ref into the request: a lambd
 from pekko_py import Signal, Terminated
 
 
+@Behaviors.setup
 def parent(ctx: ActorContext[str]) -> Behavior[str]:
     worker = ctx.spawn(counter(), "worker")
     ctx.watch(worker)
 
+    @Behaviors.receive_signal
     def on_signal(ctx: ActorContext[str], sig: Signal) -> Behavior[str]:
         if isinstance(sig, Terminated):
             ctx.log.info("%s stopped", sig.ref.path)
             return Behaviors.stopped()
         return Behaviors.unhandled
 
-    return Behaviors.receive_message(lambda _: Behaviors.same).receive_signal(on_signal)
+    return on_signal
 ```
 
 To create actors from plain async code, run `SpawnProtocol.apply()` as the guardian and ask it: `await system.ask(lambda r: SpawnProtocol.Spawn(behavior, "name", r), timeout=1)`.
@@ -143,7 +147,7 @@ resilient = Behaviors.supervise(counter()).on_failure(
 
 ### Timers and stash
 
-`ctx.timers` is the actor's `TimerScheduler`. Starting a timer with a key already in use cancels the old one, and a message from a cancelled timer that already reached the mailbox is dropped. A `StashBuffer` holds messages for later; `buffer.unstash_all(behavior)` replays them before any new one. The factories `Behaviors.setup`, `receive_message` and `receive` take one function and return a behavior, so they work as decorators, and one `setup` is enough to wire timers, a stash and state:
+`ctx.timers` is the actor's `TimerScheduler`. Starting a timer with a key already in use cancels the old one, and a message from a cancelled timer that already reached the mailbox is dropped. A `StashBuffer` holds messages for later; `buffer.unstash_all(behavior)` replays them before any new one. One `setup` is enough to wire timers, a stash and state:
 
 ```python
 from pekko_py import ActorContext, StashBuffer
@@ -212,6 +216,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 | `watch`, `watchWith`, `Terminated`, `ChildFailed`, `DeathPactException` | same; `DeathPactError` |
 | `PreRestart`, `PostStop` | same |
 | `SupervisorStrategy.resume / restart / stop / restartWithBackoff`, `withLimit`, `withResetBackoffAfter`, `withStashCapacity` | same, snake_case |
+| `Behaviors.setup(ctx => ...)` | `@Behaviors.setup` on a `def`, or the call form; the same for `receive`, `receive_message` and `receive_signal` |
 | (none) | `ctx.timers`, the same scheduler `with_timers` hands out, so one `setup` needs no timer factory layer |
 | `Behaviors.withTimers`, `TimerScheduler.startSingleTimer / startTimerWithFixedDelay / cancel / cancelAll / isTimerActive` | same, snake_case |
 | `Behaviors.withStash`, `StashBuffer.stash / unstashAll / size / isEmpty / isFull`, `StashOverflowException` | same, snake_case; `StashOverflowError` |
@@ -257,6 +262,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - If a handler fails partway through `unstash_all`, the unprocessed messages stay in the buffer as in Pekko, but `resume` and `PreRestart` see the behavior from before the unstash began. Pekko tracks the intermediate behavior reached by the last successful message.
 - Exceptions in `PreRestart` and `PostStop` handlers are logged, not supervised.
 - `ask` and `ctx.ask` check the reply type but not that the target accepts the request, since the reply type is read from the request's `reply_to` field and pyright cannot tie both to one type parameter. `tell` is fully checked. Pekko checks both.
+- The `Behaviors` factories double as decorators. This is only a Python spelling of the same call, so there is nothing to port, but Apache Pekko code has no counterpart to it.
 - `ctx.timers` exposes the actor's `TimerScheduler` directly; Pekko hands it out only through `Behaviors.withTimers`. Both reach the same scheduler, and a restart cancels its timers either way.
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.

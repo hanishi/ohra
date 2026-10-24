@@ -53,14 +53,20 @@ class ClusterSingletonSettings:
         if not 0 <= self.buffer_size <= 10000:
             raise ValueError("buffer_size must be >= 0 and <= 10000")
 
+    def max_hand_over_retries_for(self, removal_margin: float) -> int:
+        n = round(removal_margin * 1000) // round(self.hand_over_retry_interval * 1000)  # whole ms, as Pekko
+        return max(self.min_number_of_hand_over_retries, n + 3)
+
+    def max_take_over_retries_for(self, removal_margin: float) -> int:
+        return max(1, self.max_hand_over_retries_for(removal_margin) - 3)
+
     @property
     def max_hand_over_retries(self) -> int:
-        n = round(self.removal_margin * 1000) // round(self.hand_over_retry_interval * 1000)  # whole ms, as Pekko
-        return max(self.min_number_of_hand_over_retries, n + 3)
+        return self.max_hand_over_retries_for(self.removal_margin)
 
     @property
     def max_take_over_retries(self) -> int:
-        return max(1, self.max_hand_over_retries - 3)
+        return self.max_take_over_retries_for(self.removal_margin)
 
 
 @dataclass(frozen=True)
@@ -278,6 +284,10 @@ class _Manager:
         self.singleton = singleton
         self.settings = settings
         self.cluster = Cluster(ctx.system)
+        # removal_margin <= 0 falls back to the cluster's down-removal margin (ClusterSingletonManager.scala 520)
+        self.removal_margin = settings.removal_margin if settings.removal_margin > 0 else self.cluster.settings.effective_down_removal_margin
+        self.max_hand_over_retries = settings.max_hand_over_retries_for(self.removal_margin)
+        self.max_take_over_retries = settings.max_take_over_retries_for(self.removal_margin)
         self.log = ctx.log
         self.loop = asyncio.get_running_loop()
         self.self_unique_address = self.cluster.self_unique_address
@@ -351,8 +361,8 @@ class _Manager:
         self.deliver_change()
 
     def schedule_delayed_member_removed(self, m: Member) -> None:
-        if self.settings.removal_margin > 0:
-            self.ctx.timers.start_single_timer(("delayed-removed", m.unique_address), _DelayedMemberRemoved(m), self.settings.removal_margin)
+        if self.removal_margin > 0:
+            self.ctx.timers.start_single_timer(("delayed-removed", m.unique_address), _DelayedMemberRemoved(m), self.removal_margin)
         else:
             self.ctx.self.tell(_DelayedMemberRemoved(m))
 
@@ -520,7 +530,7 @@ class _Manager:
                     from_.tell(HandOverToMe(self.ctx.self))
                     return self.becoming_oldest([sender, *previous_oldest])
                 case _HandOverRetry(count):
-                    if count <= self.settings.max_hand_over_retries:
+                    if count <= self.max_hand_over_retries:
                         if previous_oldest:
                             self.peer(previous_oldest[0].address).tell(HandOverToMe(self.ctx.self))
                         self.ctx.timers.start_single_timer(_HAND_OVER_RETRY, _HandOverRetry(count + 1), self.settings.hand_over_retry_interval)
@@ -589,10 +599,10 @@ class _Manager:
         def handler(msg: _ManagerMsg) -> Behavior[_ManagerMsg] | None:
             match msg:
                 case _TakeOverRetry(count):
-                    if (self.cluster.is_terminated or self.self_exited) and (new_oldest is None or count > self.settings.max_take_over_retries):
+                    if (self.cluster.is_terminated or self.self_exited) and (new_oldest is None or count > self.max_take_over_retries):
                         leave()
                         return self.goto_stopping(instance) if instance is not None else self.stop()
-                    if count <= self.settings.max_take_over_retries:
+                    if count <= self.max_take_over_retries:
                         if new_oldest is not None:
                             self.peer(new_oldest.address).tell(TakeOverFromMe(self.ctx.self))
                         self.ctx.timers.start_single_timer(_TAKE_OVER_RETRY, _TakeOverRetry(count + 1), self.settings.hand_over_retry_interval)

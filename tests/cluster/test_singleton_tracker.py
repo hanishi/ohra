@@ -70,3 +70,9 @@ def test_self_exiting_removes_self_from_the_order():
     t.self_exiting()
     assert t.next_change() == OldestChanged(B)
     assert [m.unique_address for m in t.members_by_age] == [B]
+
+
+def test_retry_counts_use_the_resolved_removal_margin():
+    s = ClusterSingletonSettings(hand_over_retry_interval=1.0)
+    assert s.max_hand_over_retries_for(20.0) == 23 and s.max_take_over_retries_for(20.0) == 20
+    assert s.max_hand_over_retries_for(0.0) == 15

@@ -296,6 +296,14 @@ class _RegionStopped:
 class _HandOffTimeout: ...
 
 
+@dataclass(frozen=True)
+class _DelayedShardRegionTerminated:
+    """A removed member's region is marked terminated only after the down-removal margin (ShardCoordinator.scala
+    1096), so its shards are not started elsewhere while the downed side may still run them."""
+
+    region: str
+
+
 _OF_INTEREST = frozenset({"up", "leaving", "exiting"})  # Pekko's memberStatusOfInterest for coordinator placement
 
 
@@ -526,8 +534,13 @@ class _Coordinator:
 
     def on_member_removed(self, m: Member) -> None:
         self.registered_addresses.discard(m.unique_address)
+        margin = self.cluster.settings.effective_down_removal_margin
         for path in [r for r in list(self.state.regions) + list(self.refs) if _is_at(r, m.address)]:
-            self.region_terminated(path)
+            if margin > 0 and path in self.alive_regions:
+                self.region_termination_in_progress.add(path)  # GetShardHome for its shards waits, as Pekko's
+                self.ctx.timers.start_single_timer(("region-removed", path), _DelayedShardRegionTerminated(path), margin)
+            else:
+                self.region_terminated(path)
 
     # --- the behavior ---------------------------------------------------------------------------------------------
 
@@ -554,6 +567,9 @@ class _Coordinator:
                     self.on_rebalance_message(msg)
                 case _RegionStopped(path):
                     self.region_terminated(path)
+                case _DelayedShardRegionTerminated(path):
+                    if path in self.state.regions or path in self.refs:
+                        self.region_terminated(path)
                 case _Terminate():
                     self.terminate()
                 case _:

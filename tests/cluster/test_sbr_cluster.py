@@ -9,13 +9,21 @@ from typing import Any, cast
 
 import pytest
 
-from pekko_py import ActorSystem
-from pekko_py.cluster.core import Cluster
+from pekko_py import ActorSystem, AskTimeoutError
+from pekko_py.cluster.core import Cluster, MemberRemoved, Subscribe
+from pekko_py.patterns import ask
+from pekko_py.ref import FunctionRef
 from pekko_py.cluster.sbr import SplitBrainResolverSettings, _Resolver  # pyright: ignore[reportPrivateUsage]
 from pekko_py.remote.remoting import read_frame
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node
+from .test_cluster_sharding import Count, ids_hosted_by, ref
+from .test_cluster_sharding import node as sharding_node
+from .test_cluster_sharding import start as start_sharding
+from .test_singleton import Hit, Log, starts
+from .test_singleton import node as singleton_node
+from .test_singleton import start as start_singleton
 
 SBR: dict[str, Any] = dict(downing=SplitBrainResolverSettings(stable_after=0.3))
 
@@ -106,3 +114,48 @@ async def test_resolver_failure_fails_the_daemon(monkeypatch: pytest.MonkeyPatch
     p = free_port()
     async with cluster_node("c", p, [p], **SBR) as node:
         await eventually(lambda: Cluster(node).is_terminated, timeout=5)
+
+
+# --- the down-removal margin: singletons and shards of a downed node start elsewhere only after it -----------
+
+MARGIN: dict[str, Any] = dict(downing=SplitBrainResolverSettings(stable_after=0.3), down_removal_margin=1.0)
+
+
+def removal_times(system: ActorSystem[Any]) -> list[float]:
+    times: list[float] = []
+    Cluster(system).subscriptions.tell(Subscribe(FunctionRef("removed", lambda _e: times.append(asyncio.get_running_loop().time())), MemberRemoved))
+    return times
+
+
+async def test_singleton_moves_after_crash_only_after_the_removal_margin():
+    p1, p2, p3 = three_ports()
+    async with AsyncExitStack() as stack:
+        a, b, c = [await stack.enter_async_context(singleton_node(p, [p1], **MARGIN)) for p in (p1, p2, p3)]
+        await eventually(lambda: all(all_up(n, 3) for n in (a, b, c)), timeout=5)
+        log: Log = []
+        proxies = [start_singleton(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
+        assert await ask(proxies[2], Hit, timeout=3) == 1
+        removed_at = removal_times(b)
+        await crash(a)
+        await eventually(lambda: starts(log) == [p1, p2], timeout=8)  # downed by the resolver, removed, then the margin
+        start_at = next(t for kind, port, t in log if kind == "start" and port == p2)
+        assert removed_at and start_at - removed_at[0] >= 0.9  # not before the margin (within timer tolerance)
+        await eventually(lambda: all_up(c, 2), timeout=5)
+        assert await ask(proxies[2], Hit, timeout=3) == 1
+
+
+async def test_shards_of_a_crashed_region_move_only_after_the_removal_margin():
+    p1, p2, p3 = three_ports()
+    async with AsyncExitStack() as stack:
+        nodes = [await stack.enter_async_context(sharding_node(p, [p1], **MARGIN)) for p in (p1, p2, p3)]
+        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+        regions = [start_sharding(n) for n in nodes]
+        where = await ids_hosted_by(regions, nodes, 12)
+        on_c = next(e for e, i in where.items() if i == 2)
+        removed_at = removal_times(nodes[0])
+        await crash(nodes[2])
+        await eventually(lambda: bool(removed_at), timeout=5)  # downed by the resolver and removed by the leader
+        with pytest.raises(AskTimeoutError):  # the shard stays c's for the margin: nothing is answered
+            await ask(ref(nodes[0], on_c), lambda r: Count(0, r), timeout=0.5)
+        assert await ask(ref(nodes[0], on_c), lambda r: Count(1, r), timeout=8) == 1  # a fresh entity elsewhere
+        assert asyncio.get_running_loop().time() - removed_at[0] >= 0.9

@@ -18,7 +18,7 @@ from pekko_py.remote.remoting import read_frame
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node
-from .test_cluster_sharding import Count, ids_hosted_by, ref
+from .test_cluster_sharding import Count, hosted, ids_hosted_by, ref
 from .test_cluster_sharding import node as sharding_node
 from .test_cluster_sharding import start as start_sharding
 from .test_singleton import Hit, Log, starts
@@ -159,3 +159,33 @@ async def test_shards_of_a_crashed_region_move_only_after_the_removal_margin():
             await ask(ref(nodes[0], on_c), lambda r: Count(0, r), timeout=0.5)
         assert await ask(ref(nodes[0], on_c), lambda r: Count(1, r), timeout=8) == 1  # a fresh entity elsewhere
         assert asyncio.get_running_loop().time() - removed_at[0] >= 0.9
+
+
+async def test_a_node_restarted_on_its_port_inside_the_margin_hosts_no_shard_twice():
+    """Pekko keys the delayed termination by incarnation: the restarted node must not inherit the dead one's shards
+    and then lose them to a second allocation when the margin ends."""
+    p1, p2, p3 = three_ports()
+    async with AsyncExitStack() as stack:
+        nodes = [await stack.enter_async_context(sharding_node(p, [p1], **MARGIN)) for p in (p1, p2, p3)]
+        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+        regions = [start_sharding(n) for n in nodes]
+        where = await ids_hosted_by(regions, nodes, 12)
+        on_c = [e for e, i in where.items() if i == 2]
+        assert on_c
+        removed_at = removal_times(nodes[0])
+        await crash(nodes[2])
+        await eventually(lambda: bool(removed_at), timeout=5)
+        c2 = await stack.enter_async_context(sharding_node(p3, [p1], **MARGIN))  # restarted inside the 1 s margin
+        await eventually(lambda: all_up(c2, 3) and all_up(nodes[0], 3), timeout=5)
+        region_c2 = start_sharding(c2)
+        await asyncio.sleep(1.5)  # past the margin
+        e = on_c[0]
+        assert [await ask(ref(nodes[0], e), lambda r: Count(1, r), timeout=5) for _ in range(3)] == [1, 2, 3]  # one fresh entity
+        hosts = [r for r in (regions[0], regions[1], region_c2) if e in await hosted(r)]
+        assert len(hosts) == 1, f"{e} hosted by {len(hosts)} regions"
+        for i in range(40):  # the restarted region stays registered: fresh ids reach it
+            await ask(ref(nodes[0], f"fresh{i}"), lambda r: Count(1, r), timeout=5)
+            if await hosted(region_c2):
+                break
+        else:
+            raise AssertionError("the restarted node's region never hosted anything")

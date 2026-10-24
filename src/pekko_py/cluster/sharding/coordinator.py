@@ -445,6 +445,12 @@ class _Coordinator:
         if not self.is_member(region):
             self.log.info("%s: ShardRegion [%s] was not registered since the coordinator does not know about its node", self.type_name, path)
             return
+        if path in self.region_termination_in_progress:
+            # Only a new incarnation on that address can register while the removed one's margin runs: the old process
+            # is gone for certain, so its shards are released now. Pekko keys the delayed termination by the old ref,
+            # so there the new incarnation is simply a different region.
+            self.ctx.timers.cancel(("region-removed", path))
+            self.region_terminated(path)
         self.refs[path] = region
         self.alive_regions.add(path)
         self.graceful_shutdown_in_progress.discard(path)

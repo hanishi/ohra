@@ -15,6 +15,7 @@ from .signals import Signal
 from .supervision import SupervisorStrategy
 
 if TYPE_CHECKING:
+    from .persistence import Store, _Persister  # pyright: ignore[reportPrivateUsage]
     from .cell import TimerScheduler
     from .context import ActorContext
 
@@ -188,6 +189,14 @@ class Behaviors:
     @staticmethod
     def supervise[T](behavior: Behavior[T]) -> _SuperviseBuilder[T]:
         return _SuperviseBuilder(behavior)
+
+    @staticmethod
+    def persisted[S](store: Store[S]) -> _Persister[S]:
+        """Make a state-to-behavior factory persisted: ``@Behaviors.persisted(store)`` on ``def cart(items)``.
+        Calling the factory writes the state before becoming; ``factory.recover(id, empty)`` starts it."""
+        from .persistence import persisted
+
+        return persisted(store)
 
     @staticmethod
     def with_timers[T](

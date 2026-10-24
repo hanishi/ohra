@@ -1,6 +1,7 @@
-"""A FastAPI service backed by actors: one cart actor per cart id, spawned on demand by a
-manager and stopped after a period of inactivity. Request handlers ask the manager and
-await the reply; the actor system lives for the lifetime of the app.
+"""A FastAPI service backed by actors: one cart entity per cart id, created by the shard region on
+its first message, passivated after a period of inactivity, and persisted in SQLite so a cart survives
+passivation and a server restart. Request handlers ask the entity directly; the actor system lives for
+the lifetime of the app. CARTS_DB sets the database path (default: carts.db next to this file).
 
     uv run --extra web uvicorn examples.fastapi_carts:app --port 8000
 
@@ -8,8 +9,8 @@ await the reply; the actor system lives for the lifetime of the app.
     curl localhost:8000/carts/alice
     curl -X DELETE localhost:8000/carts/alice
 """
+import os
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,12 +26,21 @@ from pekko_py import (
     ActorSystem,
     Behavior,
     Behaviors,
-    Signal,
-    Terminated,
+    Entity,
+    EntityContext,
+    EntityRef,
+    EntityTypeKey,
+    GetShardRegionState,
+    Passivate,
+    Sharding,
+    ShardingEnvelope,
+    SqliteStore,
+    ask,
 )
 from pekko_py.fastapi import Actors
 
-IDLE_TIMEOUT = 30.0  # seconds without a request before a cart actor stops
+IDLE_TIMEOUT = 30.0  # seconds without a request before a cart entity is passivated
+store = SqliteStore[dict[str, int]](os.environ.get("CARTS_DB", str(Path(__file__).with_name("carts.db"))))
 
 # --- cart protocol -------------------------------------------------------------------
 
@@ -52,106 +62,41 @@ class Checkout:
     reply_to: ActorRef[dict[str, int]]
 
 
-@dataclass(frozen=True)
-class _Idle:
-    pass
+type CartCmd = AddItem | GetCart | Checkout
+
+Cart = EntityTypeKey[CartCmd]("Cart")
+
+# --- cart entity: items as the behavior's state, written before every reply -----------------
 
 
-type CartCmd = AddItem | GetCart | Checkout | _Idle
+def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
+    @Behaviors.persisted(store)
+    def cart(items: dict[str, int]) -> Behavior[CartCmd]:
+        def on_message(ctx: ActorContext[CartCmd], msg: CartCmd) -> Behavior[CartCmd]:
+            match msg:
+                case AddItem(sku, qty, reply_to):
+                    updated = {**items, sku: items.get(sku, 0) + qty}
+                    return cart(updated).then_reply(reply_to, updated)  # written, then replied
+                case GetCart(reply_to):
+                    reply_to.tell(items)  # a read: nothing written
+                    return Behaviors.same
+                case Checkout(reply_to):
+                    # An empty cart is written, the caller gets the items, then the region stops this entity
+                    # after anything already queued; a request that raced the checkout starts a fresh cart.
+                    passivate = lambda: entity.shard.tell(Passivate(ctx.self))  # noqa: E731
+                    return cart({}).then_reply(reply_to, items).then_run(passivate)
 
+        return Behaviors.receive(on_message)
 
-def cart() -> Behavior[CartCmd]:
-    def setup(ctx: ActorContext[CartCmd]) -> Behavior[CartCmd]:
-        def active(items: dict[str, int]) -> Behavior[CartCmd]:
-            ctx.timers.start_single_timer("idle", _Idle(), IDLE_TIMEOUT)  # restarted on every request
-
-            def on_message(msg: CartCmd) -> Behavior[CartCmd]:
-                match msg:
-                    case AddItem(sku, qty, reply_to):
-                        updated = {**items, sku: items.get(sku, 0) + qty}
-                        reply_to.tell(updated)
-                        return active(updated)
-                    case GetCart(reply_to):
-                        reply_to.tell(items)
-                        return active(items)
-                    case Checkout(reply_to):
-                        reply_to.tell(items)
-                        return Behaviors.stopped()
-                    case _Idle():
-                        return Behaviors.stopped()
-
-            return Behaviors.receive_message(on_message)
-
-        return active({})
-
-    return Behaviors.setup(setup)
-
-
-# --- manager: routes by cart id, spawns on demand, forgets stopped carts ------------------
-
-
-type CartRequest = AddItem | GetCart | Checkout
-
-
-@dataclass(frozen=True)
-class ForCart:
-    cart_id: str
-    cmd: CartRequest
-    create: bool = True  # False: reply "no such cart" instead of spawning
-
-    @property
-    def reply_to(self) -> ActorRef[dict[str, int]]:  # an envelope is askable if it exposes the inner reply_to
-        return self.cmd.reply_to
-
-
-@dataclass(frozen=True)
-class CartCount:
-    reply_to: ActorRef[int]
-
-
-type ManagerCmd = ForCart | CartCount
-
-
-def manager() -> Behavior[ManagerCmd]:
-    def on_message(ctx: ActorContext[ManagerCmd], msg: ManagerCmd) -> Behavior[ManagerCmd]:
-        match msg:
-            case ForCart(cart_id, cmd, create):
-                existing = ctx.child(cart_id)
-                if existing is not None:
-                    existing.tell(cmd)
-                elif create:
-                    child = ctx.spawn(cart(), cart_id)
-                    ctx.watch(child)
-                    child.tell(cmd)
-                else:
-                    cmd.reply_to.tell({})
-            case CartCount(reply_to):
-                reply_to.tell(len(ctx.children))
-        return Behaviors.same
-
-    def on_signal(ctx: ActorContext[ManagerCmd], sig: Signal) -> Behavior[ManagerCmd]:
-        if isinstance(sig, Terminated):
-            ctx.log.info("cart %s stopped", sig.ref.path.rsplit("/", 1)[-1])
-            return Behaviors.same
-        return Behaviors.unhandled
-
-    return Behaviors.receive(on_message).receive_signal(on_signal)
+    return cart.recover(entity.entity_id, empty={})  # one read; the first message creates the row
 
 
 # --- HTTP ------------------------------------------------------------------------------------
 
+type RegionCmd = ShardingEnvelope[CartCmd] | GetShardRegionState
 
-actors = Actors(manager(), "carts")
+actors = Actors(Sharding.init(Entity(Cart, cart_entity).with_passivate_after(IDLE_TIMEOUT)), "carts")
 app = FastAPI(title="carts", lifespan=actors.lifespan)
-
-
-
-type Reply = ActorRef[dict[str, int]]
-
-
-def for_cart(cart_id: str, build: Callable[[Reply], CartRequest], create: bool = True) -> Callable[[Reply], ForCart]:
-    """ask needs a function from reply ref to message; this composes the cart command into ForCart."""
-    return lambda reply_to: ForCart(cart_id, build(reply_to), create)
 
 
 class Item(BaseModel):
@@ -159,28 +104,38 @@ class Item(BaseModel):
     qty: int = 1
 
 
+async def existing(system: ActorSystem[RegionCmd], cart_id: str) -> EntityRef[CartCmd]:
+    """Asking an unknown id would create an empty cart, so read-only routes check the store first.
+    The store, not the set of live entities, is the truth: a passivated or restarted cart is still a cart."""
+    loaded = await store.load(cart_id)
+    if loaded is None or not loaded[0]:  # never written, or checked out (an empty cart is written then)
+        raise HTTPException(404, "no such cart")
+    return Sharding.entity_ref_for(system, cart_id)
+
+
 @app.post("/carts/{cart_id}/items")
-async def add_item(cart_id: str, item: Item, system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, Any]:
-    items = await system.ask(for_cart(cart_id, lambda r: AddItem(item.sku, item.qty, r)), timeout=2)
+async def add_item(cart_id: str, item: Item, system: ActorSystem[RegionCmd] = actors.depends()) -> dict[str, Any]:
+    items = await ask(Sharding.entity_ref_for(system, cart_id), lambda r: AddItem(item.sku, item.qty, r), timeout=2)
     return {"cart": cart_id, "items": items}
 
 
 @app.get("/carts/{cart_id}")
-async def get_cart(cart_id: str, system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, Any]:
-    items = await system.ask(for_cart(cart_id, GetCart, create=False), timeout=2)
+async def get_cart(cart_id: str, system: ActorSystem[RegionCmd] = actors.depends()) -> dict[str, Any]:
+    items = await ask(await existing(system, cart_id), GetCart, timeout=2)
     if not items:
         raise HTTPException(404, "no such cart")
     return {"cart": cart_id, "items": items}
 
 
 @app.delete("/carts/{cart_id}")
-async def checkout(cart_id: str, system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, Any]:
-    items = await system.ask(for_cart(cart_id, Checkout, create=False), timeout=2)
+async def checkout(cart_id: str, system: ActorSystem[RegionCmd] = actors.depends()) -> dict[str, Any]:
+    items = await ask(await existing(system, cart_id), Checkout, timeout=2)
     if not items:
         raise HTTPException(404, "no such cart")
     return {"cart": cart_id, "checked_out": items}
 
 
 @app.get("/carts")
-async def count(system: ActorSystem[ManagerCmd] = actors.depends()) -> dict[str, int]:
-    return {"active_carts": await system.ask(CartCount, timeout=2)}
+async def count(system: ActorSystem[RegionCmd] = actors.depends()) -> dict[str, int]:
+    state = await system.ask(GetShardRegionState, timeout=2)
+    return {"active_carts": len(state.entity_ids)}

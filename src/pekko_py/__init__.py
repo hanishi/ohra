@@ -4,9 +4,22 @@ from .cell import TimerScheduler
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
+from .persistence import InMemoryStore, Persist, Persisted, PersistenceError, RevisionConflictError, SqliteStore, Store
 from .ref import ActorRef
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
+from .sharding import (
+    CurrentShardRegionState,
+    Entity,
+    EntityContext,
+    EntityRef,
+    EntityTypeKey,
+    GetShardRegionState,
+    Passivate,
+    ShardCommand,
+    Sharding,
+    ShardingEnvelope,
+)
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
 from .system import ActorSystem
@@ -19,20 +32,37 @@ __all__ = [
     "Behavior",
     "Behaviors",
     "ChildFailed",
+    "CurrentShardRegionState",
     "DeathPactError",
+    "Entity",
+    "EntityContext",
+    "EntityRef",
+    "EntityTypeKey",
     "Failure",
+    "GetShardRegionState",
+    "InMemoryStore",
     "MailboxOverflowError",
     "MailboxSelector",
-    "PostStop",
+    "Passivate",
+    "Persist",
+    "Persisted",
+    "PersistenceError",
     "PoolRouter",
+    "PostStop",
     "PreRestart",
     "Receive",
     "Replyable",
+    "RevisionConflictError",
     "Routers",
+    "ShardCommand",
+    "Sharding",
+    "ShardingEnvelope",
     "Signal",
     "SpawnProtocol",
+    "SqliteStore",
     "StashBuffer",
     "StashOverflowError",
+    "Store",
     "Success",
     "SupervisorStrategy",
     "Terminated",

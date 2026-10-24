@@ -61,9 +61,11 @@ class ActorContext[T]:
     ) -> ActorRef[U]:
         return self._cell.spawn_child(behavior, None, mailbox).ref
 
-    def stop(self, child: ActorRef[Any]) -> None:
-        """Stop a direct child after its current message. Its pending messages become dead letters."""
-        self._cell.stop_child(child)
+    def stop(self, child: ActorRef[Any], *, after_pending: bool = False) -> None:
+        """Stop a direct child after its current message; its pending messages become dead letters.
+        With after_pending=True the stop queues behind the messages already in the child's mailbox,
+        like classic Pekko's PoisonPill, which Pekko Typed has no public equivalent of."""
+        self._cell.stop_child(child, after_pending)
 
     # --- DeathWatch -----------------------------------------------------------
 

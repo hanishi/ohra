@@ -2,7 +2,7 @@
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
 from dataclasses import dataclass
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
+from pekko_py import ActorContext, ActorRef, ShardingEnvelope, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
 
 
 @dataclass(frozen=True)
@@ -86,3 +86,29 @@ def fastapi_dependency_is_typed() -> None:
     system: ActorSystem[Ping] = actors.depends()
     wrong: ActorSystem[str] = actors.depends()  # type: ignore[assignment]
     del system, wrong
+
+
+def sharding_is_typed(region: ActorRef[ShardingEnvelope[Ping]]) -> None:
+    from pekko_py import EntityRef, Sharding
+
+    ref: EntityRef[Ping] = Sharding.entity_ref_for(region, "a")
+    ref.tell("not a ping")  # type: ignore[arg-type]
+    wrong: EntityRef[str] = Sharding.entity_ref_for(region, "a")  # type: ignore[assignment]
+    del ref, wrong
+
+
+def persistence_is_typed() -> None:
+    from pekko_py.persistence import InMemoryStore
+
+    store = InMemoryStore[int]()
+
+    @Behaviors.persisted(store)
+    def counter(total: int) -> Behavior[Ping]:
+        del total
+        return _b
+
+    node: Behavior[Ping] = counter(1)
+    counter("one")  # type: ignore[arg-type]
+    counter.recover("id", empty="zero")  # type: ignore[arg-type]
+    wrong: Behavior[str] = counter.recover("id", empty=0)  # type: ignore[assignment]
+    del node, wrong

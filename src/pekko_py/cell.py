@@ -74,6 +74,7 @@ class _Adapted:
 
 
 _DROP = object()
+_POISON = object()  # a user-queue stop: processed in order, after the messages ahead of it
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -195,6 +196,7 @@ class ActorCell[T]:
         self.failure: BaseException | None = None
         self.stopping = False
         self.terminated = False
+        self._poisoned = False  # a _POISON sits in _user: it takes no capacity and is never evicted
         self._initial = behavior
         self._behavior: Behavior[T] = behavior
         self._last_live: Behavior[T] | None = None
@@ -215,17 +217,24 @@ class ActorCell[T]:
             self.system.dead_letter(msg, self.ref)
             return
         cap = self.mailbox.capacity
-        if cap is not None and len(self._user) >= cap:
+        if cap is not None and self._occupancy() >= cap:
             match self.mailbox.overflow:
                 case "drop_new":
                     self.system.dead_letter(msg, self.ref)
                     return
                 case "drop_old":
-                    self.system.dead_letter(self._user.popleft(), self.ref)
+                    victim = self._user.popleft()
+                    if victim is _POISON:  # the oldest real message goes, the pending stop stays in front
+                        victim = self._user.popleft()
+                        self._user.appendleft(_POISON)
+                    self.system.dead_letter(victim, self.ref)
                 case "fail":
                     raise MailboxOverflowError(f"mailbox of {self.path} is full ({cap})")
         self._user.append(msg)
         self._wake()
+
+    def _occupancy(self) -> int:
+        return len(self._user) - self._poisoned
 
     def send_adapted(self, thunk: Callable[[], object]) -> None:
         self.send_user(_Adapted(thunk))
@@ -234,7 +243,7 @@ class ActorCell[T]:
         """Enqueue, waiting for room while a bounded mailbox is full. FIFO among waiters."""
         cap = self.mailbox.capacity
         granted = False
-        while not self.stopping and cap is not None and len(self._user) >= cap:
+        while not self.stopping and cap is not None and self._occupancy() >= cap:
             if self._space is None:
                 self._space = deque()
             slot = asyncio.get_running_loop().create_future()
@@ -298,13 +307,19 @@ class ActorCell[T]:
         self.children[name] = child
         return child
 
-    def stop_child(self, ref: ActorRef[Any]) -> None:
+    def stop_child(self, ref: ActorRef[Any], after_pending: bool = False) -> None:
         cell = _cell_of(ref)
         if cell is self:
             raise ValueError("an actor stops itself by returning Behaviors.stopped")
         if self.children.get(cell.name) is not cell:
             raise ValueError(f"{ref.path} is not a child of {self.path}")
-        cell.send_sys(_STOP)
+        if after_pending:
+            if not cell.stopping and not cell._poisoned:
+                cell._poisoned = True
+                cell._user.append(_POISON)  # outside the capacity: a stop must not be dropped
+                cell._wake()
+        else:
+            cell.send_sys(_STOP)
 
     def watch(self, ref: ActorRef[Any], custom: tuple[T] | None) -> None:
         other = _cell_of(ref)
@@ -352,6 +367,10 @@ class ActorCell[T]:
                             continue
                         if msg is _DROP:
                             continue
+                    if msg is _POISON:
+                        self._poisoned = False
+                        self._set(_STOPPED)
+                        continue
                     self._set(await self._deliver(self._behavior, msg))
                 else:
                     self._waiter = asyncio.get_running_loop().create_future()
@@ -610,7 +629,8 @@ class ActorCell[T]:
                 self.watched_by.add(m.watcher)
         self._sys = None
         for m in self._user:
-            self.system.dead_letter(m, self.ref)
+            if m is not _POISON:
+                self.system.dead_letter(m, self.ref)
         self._user.clear()
         note = _DeathNotify(self, self.failure)
         for w in self.watched_by:

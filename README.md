@@ -196,6 +196,54 @@ The Apache Pekko spelling, `Behaviors.with_timers(factory)` and `Behaviors.with_
 
 `Routers.pool(n, behavior)` spawns `n` routees and forwards each message by round robin, at random, or by `with_consistent_hashing_routing(key)` so that equal keys reach the same routee. `batching(max_n, max_wait, handle)` is a behavior that collects messages and hands them to `handle` in batches, which is where `np.add.at` earns its keep. `MailboxSelector.bounded(capacity, overflow=...)` passed to `spawn` bounds a mailbox and drops the new message, drops the oldest, or raises in the sender. A producer that can await should use `await ref.offer(msg)` instead of `tell`: on a full mailbox it waits for room, so a slow consumer slows the producer and nothing is lost. `tell` never waits, so it stays usable from callbacks and timers.
 
+### Sharding
+
+`Sharding.init(Entity(key, create))` is a shard region: one entity actor per id, created by its first message, passivated when idle or when it asks, with messages that arrive while it is passivating buffered for the next incarnation. This is the region layer of Apache Pekko's `ClusterSharding` inside one process, which is what most single-node apps use it for: address by id, create on demand, and keep only hot entities in memory.
+
+```python
+from pekko_py import Entity, EntityContext, EntityTypeKey, Sharding
+
+Cart = EntityTypeKey[Command]("Cart")
+
+
+def cart(entity: EntityContext[Command]) -> Behavior[Command]:
+    return counter()  # entity.entity_id names this cart; entity.shard.tell(Passivate(ctx.self)) stops it early
+
+
+region = Sharding.init(Entity(Cart, cart).with_passivate_after(30.0))
+```
+
+Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "cart-42")` gives an `EntityRef`, an `ActorRef` that `tell`s and `ask`s the entity whether or not it exists yet. `GetShardRegionState` asks the region which entities are live.
+
+### Persistence
+
+`Behaviors.persisted(store)` makes a state-to-behavior factory durable: calling it with a new state returns a behavior that writes the state before it is installed and before any deferred reply leaves. `factory.recover(id, empty)` starts the actor by loading the state for that id in one read. There are no events and no replay. The latest state is the truth, which is what carts, sessions and rooms want.
+
+```python
+from pekko_py import SqliteStore
+
+store = SqliteStore[int]("counters.db")
+
+
+@Behaviors.persisted(store)
+def durable_counter(total: int) -> Behavior[Command]:
+    @Behaviors.receive_message
+    def on_message(msg: Command) -> Behavior[Command]:
+        match msg:
+            case Increment(by):
+                return durable_counter(total + by)  # written, then installed
+            case GetTotal(reply_to):
+                reply_to.tell(total)  # a read: nothing written
+                return Behaviors.same
+
+    return on_message
+
+
+recovered = durable_counter.recover("counter-1", empty=0)
+```
+
+`then_reply(ref, msg)` and `then_run(callback)` on the returned behavior defer effects until the write has completed; anything done inside the handler before returning happens whether or not the write succeeds. Every write carries a revision, and a store rejects a stale one, so two incarnations of one id cannot overwrite each other silently. A failed write fails the actor with the old behavior still current, and a `restart` reloads the committed state when `supervise` wraps the `recover(...)` behavior. Recovery always calls the one factory it was given, so an actor with several phases keeps the phase inside the persisted state rather than switching to another persisted factory. `InMemoryStore` is for tests; `SqliteStore` is stdlib SQLite with writes in a thread, pickle by default (trusted local storage only) and a codec argument for anything else. With sharding, the entity factory is `lambda e: cart.recover(e.entity_id, empty={})`, and a passivated entity recovers on its next message.
+
 ### numpy and parallelism
 
 A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. For another process, `pekko_py.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
@@ -241,6 +289,12 @@ Inside a WebSocket route the same dependency works, and the connection actor pat
 | `Behaviors.withStash`, `StashBuffer.stash / unstashAll / size / isEmpty / isFull`, `StashOverflowException` | same, snake_case; `StashOverflowError` |
 | `MailboxSelector.bounded(capacity)` passed to `spawn` | same, plus `overflow="drop_new" \| "drop_old" \| "fail"` |
 | (none) | `await ref.offer(msg)`: `tell` that waits for room on a full bounded mailbox |
+| `ClusterSharding.init(Entity(key)(create))` | `ctx.spawn(Sharding.init(Entity(key, create)), name)`; single node |
+| `sharding.entityRefFor(key, id)` | `Sharding.entity_ref_for(region_ref, id)` |
+| `EntityTypeKey`, `EntityContext`, `EntityRef`, `ShardingEnvelope`, `ClusterSharding.Passivate`, `GetShardRegionState` | same; `Passivate` |
+| `DurableStateBehavior(persistenceId, emptyState, commandHandler)` | `@Behaviors.persisted(store)` on a state-to-behavior factory, started with `factory.recover(id, empty)` |
+| `Effect.persist(state).thenReply(replyTo)(f)`, `Effect.none` | `factory(state).then_reply(ref, msg)` / `.then_run(callback)`; any plain behavior, including `same`, writes nothing |
+| durable state stores (JDBC, R2DBC) | `InMemoryStore`, `SqliteStore(path, codec=...)` |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
@@ -286,6 +340,9 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.
+- `ctx.stop(child, after_pending=True)` queues the stop behind the child's pending messages, like classic Pekko's `PoisonPill`; Pekko Typed has no public equivalent. `Sharding` uses it so passivation never drops a message the region already forwarded.
+- Persistence is pekko-py's own shape, not `DurableStateBehavior`: state is the factory's parameter and a persisting handler returns `factory(new_state)` instead of `Effect.persist`, because Pekko's command-handler-and-`Effect` form exists to share an API with event sourcing, which pekko-py does not have. A revision conflict fails the actor rather than surfacing as a result. The default codec is pickle; Pekko uses its serialization extension. No events, snapshots or projections.
+- `Sharding` is the region layer of `ClusterSharding` on one node: no coordinator, rebalancing or remembered entities. The region ref is passed to `entity_ref_for` explicitly since there is no extension registry; `with_passivate_after` and `with_buffer_size` replace Pekko's passivation and buffer-size settings, with idle checked on a tick of half the timeout as in Pekko, so an entity passivates between one and one and a half timeouts after its last message; and the region answers `GetShardRegionState` itself rather than through a separate query ref.
 - `pekko_py.fastapi` is not in Pekko; it is the lifespan, dependency and 504 mapping that every FastAPI app over actors otherwise writes by hand.
 - `batching` is not in Pekko. It flushes a pending batch in `PostStop` and keeps the batch in a closure-local list.
 - Only local refs can be watched. A bridge to a JVM Apache Pekko system over TCP is possible but deferred until there is a caller for it.
@@ -299,7 +356,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | `examples/chatroom.py` | the ChatRoom from the Apache Pekko docs: sessions as children, narrowed refs, DeathWatch |
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
 | `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |
-| `examples/fastapi_carts.py` | a FastAPI service over actors: one cart actor per id, spawned on demand and stopped when idle, handlers that `ask` the manager; run with `uv run --extra web uvicorn examples.fastapi_carts:app` |
+| `examples/fastapi_carts.py` | a FastAPI service over actors: one entity per cart id through `Sharding`, persisted in SQLite with `Behaviors.persisted` so carts survive passivation and restarts, typed `ask` from routes to entities |
 | `examples/fastapi_chatroom.py` | the chat room over WebSockets: one connection actor per socket with an async handler that writes to it, rooms created on demand, and DeathWatch turning a closed socket into a "left" notice; serves a browser page at `/` |
 | `examples/fastapi_online_learning.py` | a feedback loop behind FastAPI: predictions micro-batched into one numpy call, outcomes posted back, a learner actor taking gradient steps in a thread and hot-swapping the model; serves a playground page at `/`, and `python examples/fastapi_online_learning.py` runs the server with a demo client |
 | `examples/bandit.py` | Thompson sampling over sharded arms: Beta posteriors as arrays, one vectorized draw per shard, `ctx.ask` fan-out, a progress timer |
@@ -309,7 +366,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | `examples/population.py` | 100k single-arm actors against 16 shards behind `Routers.pool` |
 | `examples/shared_memory.py` | `SharedArray` against pickling for a 400MB array |
 
-The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra: `uv run --extra web python examples/fastapi_carts.py`.
+The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra and run under uvicorn: `uv run --extra web uvicorn examples.fastapi_carts:app --port 8000`.
 
 ## Development
 

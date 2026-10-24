@@ -4,9 +4,33 @@ stable for ``stable_after`` and then downs one side of a partition by a strategy
 centers, the lease-majority strategy and quarantine."""
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
+from ..behavior import Behavior, Behaviors
+from ..context import ActorContext
+from ..ref import ActorRef
 from ..remote import Address, UniqueAddress
+from .core import (
+    ClusterDomainEvent,
+    Down,
+    LeaderChanged,
+    MemberDowned,
+    MemberExited,
+    MemberJoined,
+    MemberLeft,
+    MemberRemoved,
+    MemberUp,
+    MemberWeaklyUp,
+    ReachabilityChanged,
+    ReachableMember,
+    SeenChanged,
+    Subscribe,
+    UnreachableMember,
+)
 from .gossip import Member
 from .reachability import Reachability, Record
 
@@ -17,7 +41,7 @@ __all__ = [
     "KeepOldest",
     "SplitBrainResolverSettings",
     "StaticQuorum",
-    "_DowningStrategy",
+    "split_brain_resolver",
 ]
 
 # --- settings and strategy values ------------------------------------------------------------------------------
@@ -387,3 +411,263 @@ class _DowningStrategy:
         finally:
             self._unreachable, self._reachability = original_unreachable, original_reachability
 
+
+
+# --- the resolver (SplitBrainResolver.scala) -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Tick: ...
+
+
+class _Resolver:
+    """SplitBrainResolverBase: fed by cluster events and ticks, active on the leader. Unreachable members are downed by
+    the strategy once membership and reachability have been stable for ``stable_after``; an unstable cluster downs
+    everything after ``stable_after + down_all_when_unstable``, on every node."""
+
+    def __init__(
+        self,
+        settings: SplitBrainResolverSettings,
+        self_unique_address: UniqueAddress,
+        down: Callable[[Address], None],
+        clock: Callable[[], float],
+        log: logging.Logger,
+    ) -> None:
+        self.settings = settings
+        self.self_unique_address = self_unique_address
+        self._down = down
+        self.clock = clock
+        self.log = log
+        self.strategy = _DowningStrategy(self_unique_address, settings.strategy)
+        self.leader = False
+        self.self_member_added = False
+        self.stopped = False
+        self.stable_deadline = 0.0
+        self.reset_stable_deadline()
+        self.reachability_changed_stats: tuple[float, float, int] = (clock(), clock(), 0)  # first change, latest, count
+        self.log.info(
+            "SBR started. Config: strategy [%s], stable-after [%s s], down-all-when-unstable [%s], selfUniqueAddress [%s].",
+            type(settings.strategy).__name__,
+            settings.stable_after,
+            "off" if settings.effective_down_all_when_unstable == 0 else f"{settings.effective_down_all_when_unstable} s",
+            self_unique_address,
+        )
+
+    # --- state helpers --------------------------------------------------------------------------------------------
+
+    @property
+    def is_responsible(self) -> bool:
+        return self.leader and self.self_member_added
+
+    def reset_stable_deadline(self) -> None:
+        self.stable_deadline = self.clock() + self.settings.stable_after
+
+    def reset_reachability_changed_stats(self) -> None:
+        now = self.clock()
+        self.reachability_changed_stats = (now, now, 0)
+
+    def _stats_str(self) -> str:
+        first, latest, count = self.reachability_changed_stats
+        if count == 0:
+            return "reachability unchanged"
+        now = self.clock()
+        return f"reachability changed {count} times since {now - first:.3f} s ago, latest change was {now - latest:.3f} s ago"
+
+    def reset_reachability_changed_stats_if_all_unreachable_downed(self) -> None:
+        if self.reachability_changed_stats[2] > 0 and self.strategy.is_all_unreachable_down_or_exiting:
+            self.log.debug("SBR resetting reachability stats, after all unreachable healed, downed or removed")
+            self.reset_reachability_changed_stats()
+
+    def update_reachability_changed_stats(self) -> None:
+        now = self.clock()
+        first, _latest, count = self.reachability_changed_stats
+        self.reachability_changed_stats = (now, now, 1) if count == 0 else (first, now, count + 1)
+
+    def mutate_member_info(self, reset_stable: bool, f: Callable[[], None]) -> None:
+        """Wrap an update of the strategy's members so the stable deadline is reset and the change is logged."""
+        unreachable_before = len(self.strategy.unreachable)
+        f()
+        unreachable_after = len(self.strategy.unreachable)
+        if reset_stable:
+            if self.is_responsible:
+                if unreachable_before == 0 and unreachable_after > 0:
+                    self.log.info(
+                        "SBR found unreachable members, waiting for stable-after = %s s before taking downing decision. Now %d unreachable members found.",
+                        self.settings.stable_after,
+                        unreachable_after,
+                    )
+                elif unreachable_before > 0 and unreachable_after == 0:
+                    self.log.info("SBR found all unreachable members healed during stable-after period, no downing decision necessary for now.")
+                elif unreachable_after > 0:
+                    self.log.info(
+                        "SBR found unreachable members changed during stable-after period. Resetting timer. Now %d unreachable members found.",
+                        unreachable_after,
+                    )
+            self.reset_stable_deadline()
+
+    def mutate_responsibility_info(self, f: Callable[[], None]) -> None:
+        before = self.is_responsible
+        f()
+        after = self.is_responsible
+        if not before and after:
+            self.log.info("This node is now the leader responsible for taking SBR decisions among the reachable nodes (more leaders may exist).")
+        elif before and not after:
+            self.log.info("This node is not the leader any more and not responsible for taking SBR decisions.")
+
+    # --- events ----------------------------------------------------------------------------------------------------
+
+    def handle(self, event: ClusterDomainEvent) -> None:
+        match event:
+            case SeenChanged(seen_by=seen_by):
+                self.strategy.set_seen_by(seen_by)
+            case MemberJoined(member=m):
+                self.strategy.add(m)
+            case MemberWeaklyUp(member=m):
+                if m.unique_address == self.self_unique_address:
+                    self.mutate_responsibility_info(lambda: setattr(self, "self_member_added", True))
+                self.strategy.add(m)
+            case MemberUp(member=m):
+                self.add_up(m)
+            case MemberLeft(member=m):
+                self.mutate_member_info(False, lambda: self.strategy.add(m))
+            case MemberExited(member=m):
+                self.mutate_member_info(True, lambda: self.strategy.add(m))
+            case UnreachableMember(member=m) | MemberDowned(member=m):
+                self.unreachable_member(m)
+            case ReachableMember(member=m):
+                self.reachable_member(m)
+            case ReachabilityChanged(reachability=r):
+                self.strategy.set_reachability(r)
+            case MemberRemoved(member=m):
+                self.remove(m)
+            case LeaderChanged(leader=leader):
+                self.mutate_responsibility_info(lambda: setattr(self, "leader", leader == self.self_unique_address.address))
+            case _:
+                pass
+
+    def add_up(self, m: Member) -> None:
+        def f() -> None:
+            self.strategy.add(m)
+            if m.unique_address == self.self_unique_address:
+                self.mutate_responsibility_info(lambda: setattr(self, "self_member_added", True))
+
+        self.mutate_member_info(True, f)
+        if isinstance(self.settings.strategy, StaticQuorum) and self.strategy.is_too_many_members:
+            q = self.settings.strategy.quorum_size
+            self.log.warning(
+                "The cluster size is [%d] and static-quorum.quorum-size is [%d]. You should not add more than [%d] (quorum-size * 2 - 1) "
+                "members to the cluster. If the exceeded cluster size remains when a SBR decision is needed it will down all nodes.",
+                len(self.strategy.members()),
+                q,
+                q * 2 - 1,
+            )
+
+    def unreachable_member(self, m: Member) -> None:
+        if m.unique_address == self.self_unique_address:
+            return
+
+        def f() -> None:
+            self.strategy.add_unreachable(m)
+            self.update_reachability_changed_stats()
+            self.reset_reachability_changed_stats_if_all_unreachable_downed()
+
+        self.mutate_member_info(True, f)
+
+    def reachable_member(self, m: Member) -> None:
+        if m.unique_address == self.self_unique_address:
+            return
+
+        def f() -> None:
+            self.strategy.add_reachable(m)
+            self.update_reachability_changed_stats()
+            self.reset_reachability_changed_stats_if_all_unreachable_downed()
+
+        self.mutate_member_info(True, f)
+
+    def remove(self, m: Member) -> None:
+        if m.unique_address == self.self_unique_address:
+            self.stopped = True
+            return
+
+        def f() -> None:
+            self.strategy.remove(m)
+            self.reset_reachability_changed_stats_if_all_unreachable_downed()
+
+        self.mutate_member_info(False, f)
+
+    # --- ticks and decisions ----------------------------------------------------------------------------------------
+
+    def tick(self) -> None:
+        first, latest, count = self.reachability_changed_stats
+        if count > 0:
+            now = self.clock()
+            down_all_when_unstable = self.settings.effective_down_all_when_unstable
+            # DownAll on instability runs on every node, to decide as quickly and aggressively as possible once time is out.
+            if down_all_when_unstable > 0 and now - first > self.settings.stable_after + down_all_when_unstable:
+                self.log.warning("SBR detected instability and will down all nodes: %s", self._stats_str())
+                self.act_on_decision(DownAllDecision())
+            elif down_all_when_unstable <= 0 and now - latest > self.settings.stable_after * 2:
+                self.log.debug("SBR no reachability changes within %s s, resetting stats", self.settings.stable_after * 2)
+                self.reset_reachability_changed_stats()
+        if self.is_responsible and self.strategy.unreachable and self.clock() >= self.stable_deadline:
+            self.act_on_decision(self.strategy.decide())
+
+    def act_on_decision(self, decision: Decision) -> frozenset[UniqueAddress]:
+        """Down the nodes the decision names, self last; returns them."""
+        try:
+            nodes_to_down = self.strategy.nodes_to_down(decision)
+        except _DoubleDecision as e:
+            self.log.warning("%s", e)
+            nodes_to_down = self.strategy.nodes_to_down(DownAllDecision())
+        down_myself = self.self_unique_address in nodes_to_down
+        self.log.warning(
+            "SBR took decision %s and is downing [%s]%s, [%d] unreachable of [%d] members%s, all members [%s], full reachability status: [%s]",
+            type(decision).__name__,
+            ", ".join(str(n.address) for n in sorted(nodes_to_down, key=lambda n: n.address)),
+            " including myself" if down_myself else "",
+            len(self.strategy.unreachable),
+            len(self.strategy.members()),
+            f", indirectly connected [{sorted(str(n) for n in self.strategy.indirectly_connected)}]" if isinstance(decision, DownIndirectlyConnected) else "",
+            ", ".join(str(m) for m in self.strategy.all_members),
+            self.strategy.reachability,
+        )
+        if nodes_to_down:
+            # Downing is idempotent; self is downed last since it may shut down at once when alone.
+            for node in sorted(nodes_to_down, key=lambda n: n.address):
+                if node != self.self_unique_address:
+                    self.down(node)
+            if down_myself:
+                self.down(self.self_unique_address)
+            self.reset_reachability_changed_stats()
+            self.reset_stable_deadline()
+        return nodes_to_down
+
+    def down(self, node: UniqueAddress) -> None:
+        self.log.info("SBR is downing [%s]", node)
+        self._down(node.address)
+
+
+def split_brain_resolver(
+    settings: SplitBrainResolverSettings, self_unique_address: UniqueAddress, core: ActorRef[Any], subscriptions: ActorRef[Any]
+) -> Behavior[Any]:
+    """The resolver actor: subscribes to every cluster event, ticks every ``settings.tick_interval``, downs through
+    the core daemon's ``Down``, and stops when this member is removed."""
+
+    def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+        resolver = _Resolver(settings, self_unique_address, lambda a: core.tell(Down(a)), asyncio.get_running_loop().time, ctx.log)
+        subscriptions.tell(Subscribe(ctx.self, ClusterDomainEvent))
+        ctx.timers.start_timer_with_fixed_delay("tick", _Tick(), settings.tick_interval)
+
+        def on_message(msg: Any) -> Behavior[Any]:
+            match msg:
+                case _Tick():
+                    resolver.tick()
+                case ClusterDomainEvent():
+                    resolver.handle(msg)
+                case _:
+                    pass
+            return Behaviors.stopped() if resolver.stopped else Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    return Behaviors.setup(setup)

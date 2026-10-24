@@ -7,7 +7,17 @@ from typing import Any
 
 import pytest
 
-from pekko_py.cluster.core import ClusterSettings
+from pekko_py.cluster.core import (
+    ClusterSettings,
+    LeaderChanged,
+    MemberDowned,
+    MemberRemoved,
+    MemberUp,
+    ReachabilityChanged,
+    ReachableMember,
+    SeenChanged,
+    UnreachableMember,
+)
 from pekko_py.cluster.gossip import UP_NUMBER_UNSET, Member
 from pekko_py.cluster.reachability import Reachability, Record
 from pekko_py.cluster.sbr import (
@@ -23,8 +33,9 @@ from pekko_py.cluster.sbr import (
     StaticQuorum,
     _DoubleDecision,  # pyright: ignore[reportPrivateUsage]
     _DowningStrategy,  # pyright: ignore[reportPrivateUsage]
+    _Resolver,  # pyright: ignore[reportPrivateUsage]
 )
-from pekko_py.remote import UniqueAddress
+from pekko_py.remote import Address, UniqueAddress
 
 # --- fixtures (TestAddresses.scala and StrategySetup) ------------------------------------------------------------
 
@@ -362,3 +373,176 @@ def test_keep_oldest_downs_indirectly_connected():
 
 def test_down_all_downs_everything():
     downing(DownAll(), {A, B, C, D}, {A, B}, {C, D})
+
+
+# --- the resolver, driven by a manual clock (SplitBrainResolverSpec.DowningTestActor) ----------------------------
+
+
+class Driver:
+    """A resolver with a manual clock, recording what it downs."""
+
+    def __init__(
+        self, strategy: DowningStrategy = KeepMajority(), stable_after: float = 10.0, down_all_when_unstable: float = 0.0, self_member: Member = A
+    ) -> None:
+        self.now = 1000.0
+        self.downed: list[Address] = []
+        self.r = _Resolver(
+            SplitBrainResolverSettings(strategy, stable_after, down_all_when_unstable),
+            self_member.unique_address,
+            self.downed.append,
+            lambda: self.now,
+            logging.getLogger("test.sbr"),
+        )
+
+    def up(self, *ms: Member) -> None:
+        for m in ms:
+            self.r.handle(MemberUp(m))
+
+    def lead(self, m: Member = A) -> None:
+        self.r.handle(LeaderChanged(m.address))
+
+    def unreachable(self, *ms: Member) -> None:
+        for m in ms:
+            self.r.handle(UnreachableMember(m))
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+        self.r.tick()
+
+
+def test_downs_unreachable_only_after_stable_after():
+    d = Driver()
+    d.up(A, B, C)
+    d.lead()
+    d.unreachable(C)
+    d.advance(9.9)
+    assert d.downed == []
+    d.advance(0.2)
+    assert d.downed == [C.address]
+
+
+def test_a_change_resets_the_stable_deadline():
+    d = Driver()
+    d.up(A, B, C, D)
+    d.lead()
+    d.unreachable(C)
+    d.advance(8)
+    d.unreachable(D)
+    d.advance(8)
+    assert d.downed == []
+    d.advance(2.1)
+    assert sorted(d.downed) == sorted([C.address, D.address])
+
+
+def test_only_the_leader_downs():
+    d = Driver()
+    d.up(A, B, C)
+    d.unreachable(C)
+    d.advance(11)
+    assert d.downed == []
+    d.lead(B)
+    d.advance(11)
+    assert d.downed == []
+    d.lead(A)
+    d.advance(0.1)
+    assert d.downed == [C.address]
+
+
+def test_leader_before_self_up_is_not_responsible():
+    d = Driver()
+    d.lead()
+    d.up(B, C)
+    d.unreachable(C)
+    d.advance(11)
+    assert d.downed == []
+    d.up(A)
+    d.advance(11)
+    assert d.downed == [C.address]
+
+
+def test_minority_downs_itself_last():
+    d = Driver()
+    d.up(A, B, C)
+    d.lead()
+    d.unreachable(B, C)
+    d.advance(11)
+    assert d.downed == [A.address]  # DownReachable: self is the only reachable node
+
+
+def test_tick_with_no_unreachable_does_nothing():
+    d = Driver()
+    d.up(A)
+    d.lead()
+    d.advance(100)
+    assert d.downed == []
+
+
+def test_healed_member_is_not_downed():
+    d = Driver()
+    d.up(A, B, C)
+    d.lead()
+    d.unreachable(C)
+    d.advance(5)
+    d.r.handle(ReachableMember(C))
+    d.advance(20)
+    assert d.downed == []
+
+
+def test_member_downed_elsewhere_is_not_downed_again():
+    d = Driver()
+    d.up(A, B, C)
+    d.lead()
+    d.unreachable(C)
+    d.r.handle(MemberDowned(downed(C)))
+    d.advance(11)
+    assert d.downed == []
+
+
+def test_removed_member_leaves_the_unreachable_set():
+    d = Driver()
+    d.up(A, B, C)
+    d.lead()
+    d.unreachable(C)
+    d.r.handle(MemberRemoved(C.with_status("down").with_status("removed"), "down"))
+    d.advance(11)
+    assert d.downed == [] and d.r.strategy.unreachable == frozenset()
+
+
+def test_resolver_stops_on_self_removed():
+    d = Driver()
+    d.up(A)
+    d.r.handle(MemberRemoved(A.with_status("down").with_status("removed"), "down"))
+    assert d.r.stopped
+
+
+def test_down_all_when_unstable_fires_on_non_leader_once():
+    d = Driver(stable_after=10.0, down_all_when_unstable=5.0)
+    d.up(A, B, C, D)  # not the leader
+    d.unreachable(C)
+    d.advance(7)
+    d.unreachable(D)
+    d.advance(7)
+    d.r.handle(ReachableMember(D))  # C stays unreachable
+    d.advance(1.1)  # 15.1 s since the first change: stable_after + down_all_when_unstable exceeded
+    assert sorted(d.downed) == sorted(m.address for m in (A, B, C, D)) and d.downed[-1] == A.address
+    d.advance(1)
+    assert len(d.downed) == 4  # stats reset after acting, and a non-leader takes no decision
+
+
+def test_stats_reset_after_two_stable_after_when_down_all_is_off():
+    d = Driver(stable_after=10.0)
+    d.up(A, B, C)
+    d.unreachable(C)
+    d.advance(21)
+    assert d.r.reachability_changed_stats[2] == 0
+
+
+def test_double_decision_becomes_down_all():
+    d = Driver()
+    d.up(A, B, C, D, E, F, G)
+    d.lead()
+    d.r.handle(ReachabilityChanged(reachability([(D, E), (G, F), (A, D), (A, E), (A, F), (A, G)])))
+    d.unreachable(D, E, F, G)
+    d.r.handle(SeenChanged(False, frozenset(m.address for m in (A, B, C))))
+    d.advance(11)
+    assert set(d.downed) == {m.address for m in (A, B, C, D, E, F, G)} and d.downed[-1] == A.address

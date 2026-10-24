@@ -16,7 +16,7 @@ from ..ref import ActorRef
 from ..remote import Address, UniqueAddress
 from ..result import Failure, Try
 from ..remote.serialization import remotable
-from ..signals import PostStop, Signal
+from ..signals import ChildFailed, PostStop, Signal, Terminated
 from .failure_detector import FailureDetectorRegistry, HeartbeatNodeRing, HeartbeatSenderState, PhiAccrualFailureDetector
 from .reachability import Reachability
 from .gossip import (
@@ -614,6 +614,7 @@ class _CoreDaemon:
         self.subscribers: dict[ActorRef[Any], set[type[ClusterDomainEvent]]] = {}
         self.heartbeat_state: HeartbeatSenderState | None = None  # ClusterHeartbeatSender, alive while initialized
         self.heartbeat_seq = 0
+        self.downing_provider: ActorRef[Any] | None = None
         self.uninitialized: Behavior[_Msg] = Behaviors.receive(self._uninitialized).receive_signal(self._on_signal)
         self.initialized: Behavior[_Msg] = Behaviors.receive(self._initialized).receive_signal(self._on_signal)
 
@@ -744,6 +745,14 @@ class _CoreDaemon:
     def _on_signal(self, _ctx: ActorContext[_Msg], signal: Signal) -> Behavior[_Msg]:
         if signal is PostStop:
             self.publish_changes(self.empty_state)  # ClusterDomainEventPublisher.postStop: everyone is Removed now
+        elif isinstance(signal, Terminated) and self.is_downing_provider(signal.ref):
+            self.subscribers.pop(signal.ref, None)
+            # The downing provider is vital to a working cluster: its failure, or its stop before this member is
+            # Removed or Down, ends the daemon and with it the node. Its stop on self Removed is the normal exit.
+            self_status = self.latest_gossip.member(self.self_unique_address).status if self.latest_gossip.has_member(self.self_unique_address) else "removed"
+            if isinstance(signal, ChildFailed) or self_status not in ("down", "removed"):
+                self.log.error("Cluster downing provider stopped (%s); shutting down the node", signal)
+                return Behaviors.stopped()
         return Behaviors.same
 
     def become_initialized(self) -> Behavior[_Msg]:
@@ -758,6 +767,13 @@ class _CoreDaemon:
         self.ctx.timers.start_timer_with_fixed_delay(
             "heartbeat", _HeartbeatTick(), s.heartbeat_interval, max(s.periodic_tasks_initial_delay, s.heartbeat_interval)
         )
+        if s.downing is not None and self.downing_provider is None:
+            from .sbr import split_brain_resolver  # the resolver imports this module's events
+
+            self.downing_provider = self.ctx.spawn(
+                split_brain_resolver(s.downing, self.self_unique_address, self.ctx.self, self.ctx.self), "downingProvider"
+            )
+            self.ctx.watch(self.downing_provider)
         return self.initialized
 
     # --- joining -------------------------------------------------------------------------------------------
@@ -1327,10 +1343,15 @@ class _CoreDaemon:
             if isinstance(event, tuple(classes)):
                 subscriber.tell(event)
 
+    def is_downing_provider(self, ref: ActorRef[Any]) -> bool:
+        return self.downing_provider is not None and ref.path == self.downing_provider.path
+
     def subscription(self, msg: ClusterStateSubscription) -> None:
         match msg:
             case Subscribe(subscriber, event_class):
-                if is_local_actor(subscriber):  # a stopped subscriber drops out, as from Pekko's event stream
+                if is_local_actor(subscriber) and not self.is_downing_provider(subscriber):
+                    # A stopped subscriber drops out, as from Pekko's event stream. The downing provider keeps its
+                    # plain watch from become_initialized, so its death arrives as a signal, not as an Unsubscribe.
                     self.ctx.watch_with(subscriber, Unsubscribe(subscriber))
                 self.subscribers.setdefault(subscriber, set()).add(event_class)
                 publish_diff(self.empty_state, self.published_state, lambda e: subscriber.tell(e) if isinstance(e, event_class) else None)

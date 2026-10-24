@@ -43,6 +43,7 @@ from .cluster.sharding import (
     Sharding,
     ShardingEnvelope,
 )
+from .cluster.sbr import DownAll, KeepMajority, KeepOldest, SplitBrainResolverSettings, StaticQuorum
 from .cluster.singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
@@ -80,6 +81,7 @@ __all__ = [
     "Deregister",
     "Deregistered",
     "Down",
+    "DownAll",
     "Entity",
     "EntityContext",
     "EntityRef",
@@ -91,6 +93,8 @@ __all__ = [
     "InMemoryStore",
     "Join",
     "JoinSeedNodes",
+    "KeepMajority",
+    "KeepOldest",
     "LeaderChanged",
     "Leave",
     "Listing",
@@ -132,6 +136,8 @@ __all__ = [
     "ShardingEnvelope",
     "Signal",
     "SingletonActor",
+    "SplitBrainResolverSettings",
+    "StaticQuorum",
     "SpawnProtocol",
     "SqliteStore",
     "StashBuffer",

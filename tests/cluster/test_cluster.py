@@ -477,3 +477,20 @@ async def test_a_failing_exiting_task_does_not_block_the_exit():
         Cluster(b).add_exiting_task(failing)
         Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
         await asyncio.wait_for(b.when_terminated(), timeout=2)
+
+
+def test_publish_diff_emits_seen_and_reachability_changes_last():
+    from pekko_py.cluster.core import ReachabilityChanged, SeenChanged, diff_reachability, diff_seen, publish_diff
+    from pekko_py.cluster.gossip import MembershipState
+    from pekko_py.cluster.reachability import Reachability
+
+    a, b = UniqueAddress("127.0.0.1", 1, 1, "c"), UniqueAddress("127.0.0.1", 2, 2, "c")
+    g = Gossip.empty().with_member(Member(a, 1, "up")).with_member(Member(b, 2, "up"))
+    old = MembershipState(g.seen(a), a)
+    new = MembershipState(g.seen(a).seen(b).with_reachability(Reachability.empty().unreachable(a, b)), a)
+    events: list[ClusterDomainEvent] = []
+    publish_diff(old, new, events.append)
+    assert isinstance(events[-2], SeenChanged) and events[-2].seen_by == frozenset({a.address, b.address})
+    assert isinstance(events[-1], ReachabilityChanged) and events[-1].reachability.all_unreachable == frozenset({b})
+    assert diff_seen(new, new) == [] and diff_reachability(new, new) == []
+    assert diff_seen(old, MembershipState(g.seen(a), a)) == []  # same seen set, same convergence: nothing

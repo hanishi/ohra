@@ -18,6 +18,7 @@ from ..result import Failure, Try
 from ..remote.serialization import remotable
 from ..signals import PostStop, Signal
 from .failure_detector import FailureDetectorRegistry, HeartbeatNodeRing, HeartbeatSenderState, PhiAccrualFailureDetector
+from .reachability import Reachability
 from .gossip import (
     REMOVE_UNREACHABLE_WITH_MEMBER_STATUS,
     UP_NUMBER_UNSET,
@@ -182,6 +183,21 @@ class ReachableMember(ReachabilityEvent): ...
 @dataclass(frozen=True)
 class LeaderChanged(ClusterDomainEvent):
     leader: Address | None
+
+
+@dataclass(frozen=True)
+class SeenChanged(ClusterDomainEvent):
+    """Internal, as Pekko's: the set of nodes that have seen the current gossip, or convergence, changed."""
+
+    convergence: bool
+    seen_by: frozenset[Address]
+
+
+@dataclass(frozen=True)
+class ReachabilityChanged(ClusterDomainEvent):
+    """Internal, as Pekko's: the reachability table changed."""
+
+    reachability: Reachability
 
 
 @dataclass(frozen=True)
@@ -503,6 +519,22 @@ def diff_leader(old: MembershipState, new: MembershipState) -> list[LeaderChange
     return []
 
 
+def diff_seen(old: MembershipState, new: MembershipState) -> list[SeenChanged]:
+    if new is old:
+        return []
+    new_convergence = new.convergence(frozenset())
+    new_seen_by = frozenset(n.address for n in new.latest_gossip.seen_by)
+    if new_convergence != old.convergence(frozenset()) or new_seen_by != frozenset(n.address for n in old.latest_gossip.seen_by):
+        return [SeenChanged(new_convergence, new_seen_by)]
+    return []
+
+
+def diff_reachability(old: MembershipState, new: MembershipState) -> list[ReachabilityChanged]:
+    if new.latest_gossip.reachability == old.latest_gossip.reachability:
+        return []
+    return [ReachabilityChanged(new.latest_gossip.reachability)]
+
+
 def publish_diff(old: MembershipState, new: MembershipState, pub: Callable[[ClusterDomainEvent], None]) -> None:
     for e in diff_member_events(old, new):
         pub(e)
@@ -516,6 +548,10 @@ def publish_diff(old: MembershipState, new: MembershipState, pub: Callable[[Clus
     for e in diff_reachable(old, new):
         pub(e)
     for e in diff_leader(old, new):
+        pub(e)
+    for e in diff_seen(old, new):
+        pub(e)
+    for e in diff_reachability(old, new):
         pub(e)
 
 

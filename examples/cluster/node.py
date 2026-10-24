@@ -14,7 +14,8 @@ they join.
 Every node must run under the same system name, so NAME is only used for the log lines; the system is "cluster".
 Ctrl-c makes a node leave the cluster gracefully: its greeter leaves every listing and, if it hosted the counter,
 the counter is handed over before the node exits and starts again at 1 on the next oldest node. Kill a node
-instead (kill -9) and the others report it unreachable until you `Down` it.
+instead (kill -9) and the others report it unreachable, and the split-brain resolver downs and removes it after
+five seconds of stability (keep-majority): its singleton and shards start elsewhere without anyone sending `Down`.
 """
 import asyncio
 import logging
@@ -50,6 +51,7 @@ from pekko_py import (  # noqa: E402
     Register,
     ServiceKey,
     SingletonActor,
+    SplitBrainResolverSettings,
     Subscribe,
     remotable,
 )
@@ -181,7 +183,10 @@ def listener(name: str) -> Behavior[Event]:
 
 
 def node(name: str, port: int, seed_ports: list[int]) -> ActorSystem[Event]:
-    settings = ClusterSettings(seed_nodes=tuple(Address("cluster", HOST, p) for p in seed_ports))
+    settings = ClusterSettings(
+        seed_nodes=tuple(Address("cluster", HOST, p) for p in seed_ports),
+        downing=SplitBrainResolverSettings(stable_after=5.0),  # keep-majority: a dead node is removed on its own
+    )
     system = ActorSystem(listener(name), "cluster", address=(HOST, port), cluster=settings)
     Cluster(system).subscriptions.tell(Subscribe(system, ClusterDomainEvent))
     return system

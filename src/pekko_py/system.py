@@ -5,14 +5,17 @@ import asyncio
 import logging
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
-from .behavior import Behavior
+from .behavior import Behavior, Behaviors
 from .cell import ActorCell
 from .mailbox import MailboxSelector
 from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
 from .remote import Remoting, UniqueAddress, resolve_local, unique_address
+
+if TYPE_CHECKING:
+    from .cluster.cluster import Cluster, ClusterSettings
 
 
 class ActorSystem[T](ActorRef[T]):
@@ -27,10 +30,13 @@ class ActorSystem[T](ActorRef[T]):
         name: str = "system",
         mailbox: MailboxSelector | None = None,
         address: tuple[str, int] | None = None,
+        cluster: ClusterSettings | None = None,
     ) -> None:
         self.name = name
         self.log = logging.getLogger(f"pekko_py.system.{name}")
         self._dead_letters = logging.getLogger("pekko_py.dead_letters")
+        if cluster is not None and address is None:
+            raise ValueError("a cluster node needs an address=(host, port)")
         self.address: UniqueAddress | None = unique_address(*address, name) if address else None
         """Set when the system is reachable from other nodes; paths then read pekko://name@host:port/..."""
         self.remoting: Remoting | None = Remoting(self, self.address) if self.address else None
@@ -39,8 +45,17 @@ class ActorSystem[T](ActorRef[T]):
         self._root: ActorCell[T] = ActorCell(self, None, "user", f"{root}/user", guardian, mailbox or MailboxSelector())
         self.ignore_ref: ActorRef[Any] = FunctionRef(f"{root}/ignore", lambda _: None)
         """A ref that drops everything: pass it as reply_to when you do not want the reply."""
-        if self.remoting is not None:  # remoting closes once the guardian is gone, however it went
-            self._root.done.add_done_callback(lambda _: self._close_remoting())
+        self._system_root: ActorCell[Any] | None = None
+        """Pekko's /system guardian: hosts the cluster daemon. Only when a cluster is configured."""
+        self.cluster: Cluster | None = None
+        """The cluster extension, reached as ``Cluster(system)``."""
+        if cluster is not None:
+            from .cluster.cluster import Cluster as _Cluster
+
+            self._system_root = ActorCell(self, None, "system", f"{root}/system", Behaviors.empty)
+            self.cluster = _Cluster._start(self, cluster)  # pyright: ignore[reportPrivateUsage]
+        # Shutdown order: user root, then system root, then remoting, however the user root went.
+        self._root.done.add_done_callback(lambda _: self._user_root_stopped())
 
     @property
     def path(self) -> str:
@@ -63,15 +78,26 @@ class ActorSystem[T](ActorRef[T]):
         return resolve_local(self, path)
 
     def terminate(self) -> None:
-        """Stop the guardian and its subtree. Complete the shutdown with when_terminated."""
+        """Stop the guardian and its subtree, then the system root. Complete the shutdown with when_terminated."""
         self._root.send_sys(_stop_msg())
 
+    def _user_root_stopped(self) -> None:
+        if self.remoting is not None:
+            self.remoting.listening.set()  # a cluster daemon still waiting to listen must not block the stop
+        if self._system_root is not None:
+            self._system_root.done.add_done_callback(lambda _: self._close_remoting())
+            self._system_root.send_sys(_stop_msg())
+        elif self.remoting is not None:
+            self._close_remoting()
+
     def _close_remoting(self) -> None:
-        assert self.remoting is not None
-        self._shutdown = asyncio.get_running_loop().create_task(self.remoting.close())
+        if self.remoting is not None:
+            self._shutdown = asyncio.get_running_loop().create_task(self.remoting.close())
 
     async def when_terminated(self) -> None:
         await asyncio.shield(self._root.done)
+        if self._system_root is not None:
+            await asyncio.shield(self._system_root.done)
         if self._shutdown is not None:
             await asyncio.shield(self._shutdown)
 

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .ref import ActorRef, LocalRef
-from .serialization import Json, Serialization, SerializationError
+from .serialization import Json, Serialization, SerializationError, remotable
 
 _log = logging.getLogger("pekko_py.remote")
 MAX_FRAME = 16 * 2**20
@@ -33,6 +33,33 @@ if TYPE_CHECKING:
     from .system import ActorSystem
 
 
+@remotable
+@dataclass(frozen=True)
+class Address:
+    """A system's name and listening address. Ordered by (host, port), as Pekko's addressOrdering."""
+
+    name: str
+    host: str
+    port: int
+
+    @staticmethod
+    def parse(text: str) -> Address:
+        """``pekko://name@host:port``."""
+        if not text.startswith("pekko://") or "@" not in text or ":" not in text.rpartition("@")[2]:
+            raise ValueError(f"not an address: {text!r}")
+        name, _, hostport = text[len("pekko://") :].rstrip("/").rpartition("@")
+        host, _, port = hostport.rpartition(":")
+        return Address(name, host, int(port))
+
+    @property
+    def root(self) -> str:
+        return f"pekko://{self.name}@{self.host}:{self.port}"
+
+    def __lt__(self, other: Address) -> bool:
+        return (self.host, self.port) < (other.host, other.port)
+
+
+@remotable
 @dataclass(frozen=True)
 class UniqueAddress:
     """Where a system listens, plus a uid that changes every time the process restarts."""
@@ -43,12 +70,19 @@ class UniqueAddress:
     name: str
 
     @property
+    def address(self) -> Address:
+        return Address(self.name, self.host, self.port)
+
+    @property
     def authority(self) -> str:
         return f"{self.name}@{self.host}:{self.port}"
 
     @property
     def root(self) -> str:
         return f"pekko://{self.authority}"
+
+    def __lt__(self, other: UniqueAddress) -> bool:
+        return (self.host, self.port, self.uid) < (other.host, other.port, other.uid)
 
 
 class RemoteRef[T](ActorRef[T]):
@@ -106,9 +140,16 @@ def resolve_local(system: ActorSystem[Any], path: str) -> ActorRef[Any]:
     if not path.startswith(root + "/"):
         raise LookupError(f"{path} is not on this system ({root})")
     segments = path[len(root) + 1 :].split("/")
-    if segments[0] != "user":
-        raise LookupError(f"{path}: only /user paths resolve")
-    cell: ActorCell[Any] = system._root  # pyright: ignore[reportPrivateUsage]
+    cell: ActorCell[Any] | None
+    match segments[0]:
+        case "user":
+            cell = system._root  # pyright: ignore[reportPrivateUsage]
+        case "system":
+            cell = system._system_root  # pyright: ignore[reportPrivateUsage]
+        case _:
+            cell = None
+    if cell is None:
+        raise LookupError(f"{path}: only /user and /system paths resolve")
     for name in segments[1:]:
         child = cell.children.get(name)
         if child is None:
@@ -217,6 +258,8 @@ class Remoting:
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
+        self.listening = asyncio.Event()
+        """Set once listen() has run, however it went: the cluster waits for it before joining."""
 
     def ref_path(self, ref: ActorRef[Any]) -> str:
         """The path another node can send to: a local or remote ref's own path, else a temp path here."""
@@ -281,8 +324,11 @@ class Remoting:
     # --- inbound --------------------------------------------------------------------------------
 
     async def listen(self) -> None:
-        if self._server is None:
-            self._server = await asyncio.start_server(self._accept, self.address.host, self.address.port)
+        try:
+            if self._server is None:
+                self._server = await asyncio.start_server(self._accept, self.address.host, self.address.port)
+        finally:
+            self.listening.set()
 
     async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._track(asyncio.current_task())

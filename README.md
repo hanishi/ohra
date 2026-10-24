@@ -283,7 +283,32 @@ async def client() -> None:
         print(await ask(greeter, lambda r: Greet("pekko", r), timeout=3))
 ```
 
-A `tell` to a node that is down never blocks or raises; once the connection attempt fails the message is a dead letter, as in Pekko. Sending an unregistered type, or a message over 16 MiB, raises `SerializationError` at `tell`. A message for a path nobody owns, or one that fails to decode, is a dead letter on the receiving node and the connection stays up. Replies travel on the replying node's own connection back, so the asking side must be listening too (`async with` does that) and `address=` must be a host its peers can reach: it is both the bind and the advertised address, and `127.0.0.1` and `localhost` are different authorities. Message adapters are kept for the actor's lifetime, so create them in `setup` rather than per message. This is the first cluster layer, remoting only: no membership, no remote `watch`, and a peer that restarts is served rather than quarantined. The listener accepts any peer, so run it on a private network or behind a tunnel; TLS is out of scope, as it is for Apache Pekko's Artery without TLS configured.
+A `tell` to a node that is down never blocks or raises; once the connection attempt fails the message is a dead letter, as in Pekko. Sending an unregistered type, or a message over 16 MiB, raises `SerializationError` at `tell`. A message for a path nobody owns, or one that fails to decode, is a dead letter on the receiving node and the connection stays up. Replies travel on the replying node's own connection back, so the asking side must be listening too (`async with` does that) and `address=` must be a host its peers can reach: it is both the bind and the advertised address, and `127.0.0.1` and `localhost` are different authorities. Message adapters are kept for the actor's lifetime, so create them in `setup` rather than per message. Remoting alone has no membership and no remote `watch`, and a peer that restarts is served rather than quarantined; membership is the next section. The listener accepts any peer, so run it on a private network or behind a tunnel; TLS is out of scope, as it is for Apache Pekko's Artery without TLS configured.
+
+### Cluster
+
+Give a system `cluster=ClusterSettings(seed_nodes=...)` and it runs Apache Pekko's membership protocol under `/system/cluster`: it joins through the seed nodes, gossips the member list with a vector clock, elects the lowest address among reachable Up members as leader, and lets only that leader, on convergence, move members `joining → up` and `leaving → exiting → removed`. Phi-accrual failure detection over heartbeats marks a silent node `unreachable`; `Down` it and the leader removes it. A node that is downed, or that leaves, terminates its own system. `Cluster(system)` is the extension: `manager` takes the commands, `subscriptions` the subscriptions, and `state` / `self_member` are the current view.
+
+```python
+from pekko_py import Address, Cluster, ClusterSettings, Leave, MemberEvent, Subscribe
+
+
+def cluster_node(port: int, seed_port: int) -> ActorSystem[MemberEvent]:
+    seeds = (Address("app", "127.0.0.1", seed_port),)
+    system = ActorSystem(listener, "app", address=("127.0.0.1", port), cluster=ClusterSettings(seed_nodes=seeds))
+    Cluster(system).subscriptions.tell(Subscribe(system, MemberEvent))  # current state first, then every change
+    return system
+
+
+async def main() -> None:
+    async with cluster_node(2551, 2551) as first, cluster_node(2552, 2551) as second:
+        await until(lambda: all(m.status == "up" for m in Cluster(first).state.members) and len(Cluster(first).state.members) == 2)
+        print(Cluster(first).state.leader)                        # Address(name='app', host='127.0.0.1', port=2551)
+        Cluster(first).manager.tell(Leave(Cluster(second).self_address))
+        await second.when_terminated()                            # exiting nodes shut themselves down
+```
+
+`listener` is any `Behavior[MemberEvent]`; it receives `MemberJoined`, `MemberUp`, `MemberLeft`, `MemberExited`, `MemberRemoved(member, previous_status)` and, under `ReachabilityEvent`, `UnreachableMember` / `ReachableMember`; `LeaderChanged`, `SelfUp` and `SelfRemoved` arrive when subscribing to `ClusterDomainEvent`. The first seed node forms the cluster alone once the other seeds have not answered within `seed_node_timeout`; any other node asks every seed and joins the first to answer, and a node with no seed nodes waits for a `Join(address)` or `JoinSeedNodes(...)` command. All settings are `ClusterSettings` fields with Pekko's defaults in seconds (`gossip_interval`, `heartbeat_interval`, `acceptable_heartbeat_pause`, `failure_detector_threshold`, `monitored_by_nr_of_members`, `allow_weakly_up_members`, ...). A member that rejoins from a restarted process is a new incarnation: the old one is marked terminated and removed before the new one is let in. Shutting a system down does not `Leave` first, so stop a node gracefully by sending `Leave(Cluster(system).self_address)` and awaiting `when_terminated()`, or let the others `Down` it once it is unreachable. The cluster-wide Receptionist and `ClusterSharding`'s coordinator are not part of this layer.
 
 ### numpy and parallelism
 
@@ -339,6 +364,12 @@ Inside a WebSocket route the same dependency works, and the connection actor pat
 | `pekko.remote.artery.canonical.hostname / port` | `ActorSystem(..., address=(host, port))`; paths read `pekko://name@host:port/user/...` |
 | `ActorRefResolver.resolveActorRef(path)` | `system.resolve(path)`: a local ref, or a `RemoteRef` for another node |
 | serialization bindings and manifests | `@remotable` on a frozen dataclass; self-describing JSON with `$type` and `$ref` |
+| `pekko.cluster.seed-nodes` and the other `pekko.cluster.*` settings | `ActorSystem(..., cluster=ClusterSettings(seed_nodes=(Address(name, host, port), ...), ...))`; the failure detector settings are `ClusterSettings` fields in seconds |
+| `Cluster(system).manager ! Join(addr)` / `JoinSeedNodes` / `Leave` / `Down` | `Cluster(system).manager.tell(Join(addr))`, same names |
+| `Cluster(system).subscriptions ! Subscribe(ref, classOf[MemberEvent])`, `Unsubscribe`, `GetCurrentState` | `Cluster(system).subscriptions.tell(Subscribe(ref, MemberEvent))`; initial state always arrives as events |
+| `Cluster(system).selfMember / state / selfUniqueAddress / isTerminated` | `self_member`, `state`, `self_unique_address`, `is_terminated` |
+| `MemberEvent`, `ReachabilityEvent`, `LeaderChanged`, `SelfUp`, `SelfRemoved`, `CurrentClusterState` | same; `MemberRemoved(member, previous_status)` |
+| `MemberStatus.Joining / WeaklyUp / Up / Leaving / Exiting / Down / Removed` | `member.status` is the string `"joining"`, `"weakly_up"`, ... |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
@@ -385,6 +416,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.
 - Remoting is Artery narrowed to one layer: TCP with length-prefixed JSON frames, `@remotable` dataclasses instead of serializer ids and manifests, an unsendable message raises at `tell` instead of being logged and dropped, a restarted peer is served instead of quarantined, and there is no remote `watch`, no membership and no system-message delivery guarantee. `ask` across nodes works because the reply ref is given a temporary path on the asking node for exactly as long as the ask is pending.
+- The cluster is Pekko Cluster narrowed to one data center and no roles: the gossip, vector clock, reachability table, convergence rule, leader election, member lifecycle, seed-node join processes, phi-accrual failure detector and heartbeat ring are ports of the Scala code, function for function. Left out: the app-version and config-compatibility checks on join, `PreparingForShutdown`, the split-brain resolver (downing is manual, as Pekko without an SBR), quarantine, and the cluster-wide Receptionist. The heartbeat sender, the seed-node processes and the event publisher are state inside the one core daemon instead of separate actors, and the heartbeat receiver is its child. `ClusterSettings` replaces HOCON, with `allow_weakly_up_members` as a duration or `None` instead of a flag plus `weakly-up-after`. `Address` has no protocol field. Terminating an ActorSystem does not `Leave` first; Pekko's `CoordinatedShutdown` does, and its cluster-exiting phase gives singletons and shards a hand-off window before the node confirms its exit, whereas here an Exiting node confirms and shuts down at once. The seed-node processes retry on a fixed-delay timer (the first seed every `min(1s, seed_node_timeout)`, the others every `seed_node_timeout`) rather than on Pekko's one-second task and `ReceiveTimeout`. The gossip target selector prefers nodes that have not seen the gossip with probability `gossip_different_view_probability` (0.8) up to `reduce_gossip_different_view_probability` members, which is what Pekko's settings document; Pekko's code passes the member count into the probability slot, so it always prefers such nodes in clusters of that size or smaller.
 - `ctx.stop(child, after_pending=True)` queues the stop behind the child's pending messages, like classic Pekko's `PoisonPill`; Pekko Typed has no public equivalent. `Sharding` uses it so passivation never drops a message the region already forwarded.
 - Persistence is pekko-py's own shape, not `DurableStateBehavior`, and there is no event sourcing; see "How this differs from Apache Pekko persistence" in the Tour. The default codec is pickle; Pekko uses its serialization extension.
 - `Sharding` is the region layer of `ClusterSharding` on one node: no coordinator, rebalancing or remembered entities. The region ref is passed to `entity_ref_for` explicitly since there is no extension registry; `with_passivate_after` and `with_buffer_size` replace Pekko's passivation and buffer-size settings, with idle checked on a tick of half the timeout as in Pekko, so an entity passivates between one and one and a half timeouts after its last message; and the region answers `GetShardRegionState` itself rather than through a separate query ref.
@@ -400,6 +432,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | `examples/counter.py` | the functional style, `ask`, supervision with `resume` |
 | `examples/chatroom.py` | the ChatRoom from the Apache Pekko docs: sessions as children, narrowed refs, DeathWatch |
 | `examples/remoting/` | two processes: `greeter_node.py` listens on 2552, `client_node.py` resolves it by path, tells and asks across the wire |
+| `examples/cluster/` | `node.py NAME PORT [SEED_PORT ...]`: start three in three terminals, watch them join, go Up and elect a leader, then stop one and see it reported unreachable |
 | `examples/persisted_counter.py` | `Behaviors.persisted` with `SqliteStore`: the total survives a supervised restart and a new actor system; run it twice and it keeps counting |
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
 | `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |

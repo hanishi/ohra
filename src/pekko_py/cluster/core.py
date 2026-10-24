@@ -746,7 +746,8 @@ class _CoreDaemon:
         if signal is PostStop:
             self.publish_changes(self.empty_state)  # ClusterDomainEventPublisher.postStop: everyone is Removed now
         elif isinstance(signal, Terminated) and self.is_downing_provider(signal.ref):
-            self.subscribers.pop(signal.ref, None)
+            for ref in [r for r in self.subscribers if r.path == signal.ref.path]:  # refs compare by identity
+                del self.subscribers[ref]
             # The downing provider is vital to a working cluster: its failure, or its stop before this member is
             # Removed or Down, ends the daemon and with it the node. Its stop on self Removed is the normal exit.
             self_status = self.latest_gossip.member(self.self_unique_address).status if self.latest_gossip.has_member(self.self_unique_address) else "removed"
@@ -771,7 +772,7 @@ class _CoreDaemon:
             from .sbr import split_brain_resolver  # the resolver imports this module's events
 
             self.downing_provider = self.ctx.spawn(
-                split_brain_resolver(s.downing, self.self_unique_address, self.ctx.self, self.ctx.self), "downingProvider"
+                split_brain_resolver(s.downing, self.self_unique_address, self.ctx.self), "downingProvider"
             )
             self.ctx.watch(self.downing_provider)
         return self.initialized

@@ -150,10 +150,9 @@ class _DowningStrategy:
 
     # --- members --------------------------------------------------------------------------------------------------
 
-    def _key(self, m: Member) -> tuple[int, Address] | Address:
-        if isinstance(self.config, KeepOldest):
-            return (m.up_number, m.address)
-        return m.address
+    def _key(self, m: Member) -> tuple[int, Address, int]:
+        """Pekko's Member.ordering (address, then uid), or ageOrdering (up number first) for KeepOldest."""
+        return (m.up_number if isinstance(self.config, KeepOldest) else 0, m.address, m.unique_address.uid)
 
     @property
     def all_members(self) -> list[Member]:
@@ -163,7 +162,7 @@ class _DowningStrategy:
         self._remove_from_all_members(m)
         key = self._key(m)
         i = 0
-        while i < len(self._all_members) and self._key(self._all_members[i]) < key:  # type: ignore[operator]
+        while i < len(self._all_members) and self._key(self._all_members[i]) < key:
             i += 1
         self._all_members.insert(i, m)
 
@@ -647,15 +646,13 @@ class _Resolver:
         self._down(node.address)
 
 
-def split_brain_resolver(
-    settings: SplitBrainResolverSettings, self_unique_address: UniqueAddress, core: ActorRef[Any], subscriptions: ActorRef[Any]
-) -> Behavior[Any]:
-    """The resolver actor: subscribes to every cluster event, ticks every ``settings.tick_interval``, downs through
-    the core daemon's ``Down``, and stops when this member is removed."""
+def split_brain_resolver(settings: SplitBrainResolverSettings, self_unique_address: UniqueAddress, core: ActorRef[Any]) -> Behavior[Any]:
+    """The resolver actor: subscribes to every cluster event through the core daemon, ticks every
+    ``settings.tick_interval``, downs through the daemon's ``Down``, and stops when this member is removed."""
 
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         resolver = _Resolver(settings, self_unique_address, lambda a: core.tell(Down(a)), asyncio.get_running_loop().time, ctx.log)
-        subscriptions.tell(Subscribe(ctx.self, ClusterDomainEvent))
+        core.tell(Subscribe(ctx.self, ClusterDomainEvent))
         ctx.timers.start_timer_with_fixed_delay("tick", _Tick(), settings.tick_interval)
 
         def on_message(msg: Any) -> Behavior[Any]:

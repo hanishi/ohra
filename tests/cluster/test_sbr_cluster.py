@@ -155,7 +155,7 @@ async def test_shards_of_a_crashed_region_move_only_after_the_removal_margin():
         removed_at = removal_times(nodes[0])
         await crash(nodes[2])
         await eventually(lambda: bool(removed_at), timeout=5)  # downed by the resolver and removed by the leader
-        with pytest.raises(AskTimeoutError):  # the shard stays c's for the margin: nothing is answered
+        with pytest.raises(AskTimeoutError):  # nothing answers during the margin; the >= 0.9 below is what pins it to the margin
             await ask(ref(nodes[0], on_c), lambda r: Count(0, r), timeout=0.5)
         assert await ask(ref(nodes[0], on_c), lambda r: Count(1, r), timeout=8) == 1  # a fresh entity elsewhere
         assert asyncio.get_running_loop().time() - removed_at[0] >= 0.9

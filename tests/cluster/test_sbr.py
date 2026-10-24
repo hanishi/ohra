@@ -546,3 +546,12 @@ def test_double_decision_becomes_down_all():
     d.r.handle(SeenChanged(False, frozenset(m.address for m in (A, B, C))))
     d.advance(11)
     assert set(d.downed) == {m.address for m in (A, B, C, D, E, F, G)} and d.downed[-1] == A.address
+
+
+def test_two_incarnations_at_one_address_order_by_uid():
+    """Pekko's Member.ordering is by UniqueAddress: address, then uid."""
+    old, new = Member(UniqueAddress("a", 7355, 1, "sys"), 1, "up"), Member(UniqueAddress("a", 7355, 2, "sys"), 2, "up")
+    s = _DowningStrategy(B.unique_address, KeepMajority())
+    for m in (old, new):  # inserted oldest first: only the uid in the key keeps this order
+        s.add(m)
+    assert s.all_members == [old, new]

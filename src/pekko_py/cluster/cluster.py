@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..behavior import Behavior, Behaviors
 from ..context import ActorContext
-from ..ref import ActorRef
+from ..ref import ActorRef, LocalRef
 from ..remote import Address, UniqueAddress
 from ..serialization import remotable
 from ..signals import PostStop, Signal
@@ -58,6 +58,31 @@ class ClusterSettings:
     reduce_gossip_different_view_probability: int = 400
     max_gossips_before_shutting_down_myself: int = 5
     max_ticks_before_shutting_down_myself: int = 4
+    receptionist_resend_interval: float = 1.0
+    """How often a node re-sends its receptionist row to the others (anti-entropy); not a Pekko setting."""
+
+    def __post_init__(self) -> None:
+        positive = (
+            "seed_node_timeout", "retry_unsuccessful_join_after", "gossip_interval", "leader_actions_interval",
+            "unreachable_nodes_reaper_interval", "heartbeat_interval", "heartbeat_expected_response_after",
+            "failure_detector_threshold", "failure_detector_min_std_deviation", "prune_gossip_tombstones_after",
+            "monitored_by_nr_of_members", "failure_detector_max_sample_size", "min_nr_of_members",
+            "reduce_gossip_different_view_probability", "receptionist_resend_interval",
+        )  # fmt: skip
+        non_negative = (
+            "periodic_tasks_initial_delay", "acceptable_heartbeat_pause", "max_gossips_before_shutting_down_myself",
+            "max_ticks_before_shutting_down_myself",
+        )  # fmt: skip
+        for name in positive:
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be > 0")
+        for name in non_negative:
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0")
+        if not 0.0 < self.gossip_different_view_probability <= 1.0:
+            raise ValueError("gossip_different_view_probability must be in (0, 1]")
+        if self.allow_weakly_up_members is not None and self.allow_weakly_up_members < 0:
+            raise ValueError("allow_weakly_up_members must be >= 0 or None")
 
 
 # --- commands and subscriptions (Pekko Typed's ClusterCommand and ClusterStateSubscription) ---------------
@@ -335,7 +360,7 @@ class Cluster:
     @classmethod
     def _start(cls, system: ActorSystem[Any], settings: ClusterSettings) -> Cluster:
         self = object.__new__(cls)
-        assert system.address is not None and system._system_root is not None  # pyright: ignore[reportPrivateUsage]
+        assert system.address is not None
         self.system = system
         self.settings = settings
         self.self_unique_address = system.address
@@ -351,6 +376,7 @@ class Cluster:
         self._membership_state = MembershipState(Gossip.empty(), system.address)
         self._terminated = False
         core = system._system_root.spawn_child(_core(self), "cluster", None)  # pyright: ignore[reportPrivateUsage]
+        core.done.add_done_callback(lambda _: self.shutdown())  # ClusterCoreSupervisor: a dead daemon ends the node
         self.manager = core.ref
         self.subscriptions = core.ref
         return self
@@ -1222,6 +1248,8 @@ class _CoreDaemon:
     def subscription(self, msg: ClusterStateSubscription) -> None:
         match msg:
             case Subscribe(subscriber, event_class):
+                if isinstance(subscriber, LocalRef):  # a stopped subscriber drops out, as from Pekko's event stream
+                    self.ctx.watch_with(subscriber, Unsubscribe(subscriber))
                 self.subscribers.setdefault(subscriber, set()).add(event_class)
                 publish_diff(self.empty_state, self.published_state, lambda e: subscriber.tell(e) if isinstance(e, event_class) else None)
             case Unsubscribe(subscriber):

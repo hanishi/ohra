@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from ..remote import UniqueAddress
+from ..remote import Address, UniqueAddress
 from ..serialization import remotable
 from .reachability import Reachability
 from .vector_clock import VectorClock
@@ -60,7 +60,7 @@ class Member:
         return self.unique_address.address < other.unique_address.address
 
     @property
-    def address(self):  # noqa: ANN201  # Address, imported lazily by callers through remote
+    def address(self) -> Address:
         return self.unique_address.address
 
     def is_older_than(self, other: Member) -> bool:

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any
+import logging
+from dataclasses import dataclass
+from typing import Any, cast
 
 import pytest
 
-from pekko_py import ActorSystem, Behaviors
+from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
 from pekko_py.cluster.cluster import (
     Cluster,
     ClusterDomainEvent,
@@ -236,11 +238,15 @@ async def test_new_incarnation_replaces_the_old():
         b = await stack.enter_async_context(cluster_node("c", p2, [p1], retry_unsuccessful_join_after=0.1))
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
         old_uid = Cluster(b).self_unique_address.uid
+        events: list[ClusterDomainEvent] = []
+        Cluster(a).subscriptions.tell(Subscribe(probe(events), MemberRemoved))
         await crash(b)
         b2 = await stack.enter_async_context(cluster_node("c", p2, [p1], retry_unsuccessful_join_after=0.1))
         await eventually(lambda: all_up(a, 2) and all_up(b2, 2), timeout=8)
         uids = {m.unique_address.port: m.unique_address.uid for m in Cluster(a).state.members}
         assert uids[p2] == Cluster(b2).self_unique_address.uid != old_uid
+        removed = [e for e in events if isinstance(e, MemberRemoved)]
+        assert [(e.member.unique_address.uid, e.previous_status) for e in removed] == [(old_uid, "down")]
 
 
 async def test_weakly_up_when_convergence_is_blocked():
@@ -339,3 +345,81 @@ def test_gossip_speedup_uses_integer_division_as_pekko():
     assert is_gossip_speedup_needed(gossip.seen(nodes[0])) is False  # 1 seen of 3: 1 < 3 // 2 is false
     assert is_gossip_speedup_needed(gossip) is True
     assert is_gossip_speedup_needed(gossip.seen(nodes[0]).seen(nodes[1]).mark_as_down(gossip.member(nodes[2]))) is True
+
+
+# --- deferred minors from the final review ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SpawnSubscriber:
+    reply_to: ActorRef[ActorRef[object]]
+
+
+def spawning_guardian(ctx: ActorContext[SpawnSubscriber], msg: SpawnSubscriber) -> Behavior[SpawnSubscriber]:
+    def subscriber(event: object) -> Behavior[object]:
+        return Behaviors.stopped() if event == "stop" else Behaviors.same
+
+    msg.reply_to.tell(ctx.spawn(Behaviors.receive_message(subscriber), "subscriber"))
+    return Behaviors.same
+
+
+async def test_a_stopped_local_subscriber_is_forgotten(caplog: pytest.LogCaptureFixture):
+    p1, p2 = free_port(), free_port()
+    seeds = (Address("c", "127.0.0.1", p1),)
+    a = ActorSystem(
+        Behaviors.receive(spawning_guardian), "c", address=("127.0.0.1", p1), cluster=ClusterSettings(seed_nodes=seeds, **FAST)
+    )
+    async with a:
+        await eventually(lambda: all_up(a, 1), timeout=3)
+        subscriber = await ask(a, SpawnSubscriber, timeout=1)
+        Cluster(a).subscriptions.tell(Subscribe(subscriber, ClusterDomainEvent))
+        subscriber.tell("stop")
+        await eventually(lambda: a.resolve(subscriber.path) is None if False else _gone(a, subscriber.path), timeout=2)
+        with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
+            async with cluster_node("c", p2, [p1]) as b:
+                await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        assert not [r for r in caplog.records if subscriber.path in r.getMessage()]
+
+
+def _gone(system: ActorSystem[Any], path: str) -> bool:
+    try:
+        system.resolve(path)
+    except LookupError:
+        return True
+    return False
+
+
+async def test_a_failing_cluster_daemon_shuts_the_system_down():
+    port = free_port()
+    async with cluster_node("c", port, [port]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=3)
+        # a reply ref that is not a ref makes the daemon raise; Pekko's ClusterCoreSupervisor then shuts the cluster down
+        Cluster(a).subscriptions.tell(GetCurrentState(cast(Any, "not a ref")))
+        await asyncio.wait_for(a.when_terminated(), timeout=3)
+        assert Cluster(a).is_terminated
+
+
+def test_cluster_settings_are_validated():
+    for bad in (
+        dict(heartbeat_interval=0.0),
+        dict(gossip_interval=-1.0),
+        dict(monitored_by_nr_of_members=0),
+        dict(min_nr_of_members=0),
+        dict(failure_detector_threshold=0.0),
+        dict(gossip_different_view_probability=1.5),
+        dict(allow_weakly_up_members=-1.0),
+    ):
+        with pytest.raises(ValueError):
+            ClusterSettings(**cast(Any, bad))
+    assert ClusterSettings(periodic_tasks_initial_delay=0.0, acceptable_heartbeat_pause=0.0, allow_weakly_up_members=None)
+
+
+async def test_tearing_down_in_forward_order_leaks_nothing():
+    p1, p2, p3 = free_port(), free_port(), free_port()
+    nodes = [cluster_node("c", p, [p1]) for p in (p1, p2, p3)]
+    for n in nodes:
+        await n.__aenter__()
+    await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+    for n in nodes:  # the seed and leader goes first
+        await n.__aexit__(None, None, None)
+    assert all(n.is_terminated for n in nodes)

@@ -32,6 +32,7 @@ from .cluster.gossip import Member
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
+from .receptionist import Deregister, Deregistered, Find, Listing, Receptionist, Register, Registered, ServiceKey
 from .persistence import InMemoryStore, Persist, Persisted, PersistenceError, RevisionConflictError, SqliteStore, Store
 from .ref import ActorRef
 from .remote import Address, RemoteRef, UniqueAddress
@@ -69,12 +70,15 @@ __all__ = [
     "CurrentClusterState",
     "CurrentShardRegionState",
     "DeathPactError",
+    "Deregister",
+    "Deregistered",
     "Down",
     "Entity",
     "EntityContext",
     "EntityRef",
     "EntityTypeKey",
     "Failure",
+    "Find",
     "GetCurrentState",
     "GetShardRegionState",
     "InMemoryStore",
@@ -82,6 +86,7 @@ __all__ = [
     "JoinSeedNodes",
     "LeaderChanged",
     "Leave",
+    "Listing",
     "MailboxOverflowError",
     "MailboxSelector",
     "Member",
@@ -103,6 +108,9 @@ __all__ = [
     "ReachabilityEvent",
     "ReachableMember",
     "Receive",
+    "Receptionist",
+    "Register",
+    "Registered",
     "RemoteRef",
     "Replyable",
     "RevisionConflictError",
@@ -111,6 +119,7 @@ __all__ = [
     "SelfUp",
     "Serialization",
     "SerializationError",
+    "ServiceKey",
     "ShardCommand",
     "Sharding",
     "ShardingEnvelope",

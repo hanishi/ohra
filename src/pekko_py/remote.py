@@ -140,16 +140,14 @@ def resolve_local(system: ActorSystem[Any], path: str) -> ActorRef[Any]:
     if not path.startswith(root + "/"):
         raise LookupError(f"{path} is not on this system ({root})")
     segments = path[len(root) + 1 :].split("/")
-    cell: ActorCell[Any] | None
+    cell: ActorCell[Any]
     match segments[0]:
         case "user":
             cell = system._root  # pyright: ignore[reportPrivateUsage]
         case "system":
             cell = system._system_root  # pyright: ignore[reportPrivateUsage]
         case _:
-            cell = None
-    if cell is None:
-        raise LookupError(f"{path}: only /user and /system paths resolve")
+            raise LookupError(f"{path}: only /user and /system paths resolve")
     for name in segments[1:]:
         child = cell.children.get(name)
         if child is None:
@@ -215,7 +213,7 @@ class _Association:
         try:
             reader, writer = await asyncio.open_connection(self.host, self.port)
         except OSError as e:
-            _log.info("cannot connect to %s:%s: %s", self.host, self.port, e)
+            _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)  # every tick to a dead peer: keep it quiet
             for path, msg, _ in self.pending:
                 self.remoting.system.dead_letter(msg, RemoteRef(path, self.remoting))
             self.pending.clear()

@@ -16,6 +16,7 @@ from .remote import Remoting, UniqueAddress, resolve_local, unique_address
 
 if TYPE_CHECKING:
     from .cluster.cluster import Cluster, ClusterSettings
+    from .receptionist import Receptionist
 
 
 class ActorSystem[T](ActorRef[T]):
@@ -45,17 +46,19 @@ class ActorSystem[T](ActorRef[T]):
         self._root: ActorCell[T] = ActorCell(self, None, "user", f"{root}/user", guardian, mailbox or MailboxSelector())
         self.ignore_ref: ActorRef[Any] = FunctionRef(f"{root}/ignore", lambda _: None)
         """A ref that drops everything: pass it as reply_to when you do not want the reply."""
-        self._system_root: ActorCell[Any] | None = None
-        """Pekko's /system guardian: hosts the cluster daemon. Only when a cluster is configured."""
+        self._system_root: ActorCell[Any] = ActorCell(self, None, "system", f"{root}/system", Behaviors.empty)
+        """Pekko's /system guardian: hosts the receptionist and the cluster daemon."""
+        self.receptionist: Receptionist | None = None
+        """The receptionist extension, created on first ``Receptionist(system)``."""
         self.cluster: Cluster | None = None
         """The cluster extension, reached as ``Cluster(system)``."""
         if cluster is not None:
             from .cluster.cluster import Cluster as _Cluster
 
-            self._system_root = ActorCell(self, None, "system", f"{root}/system", Behaviors.empty)
             self.cluster = _Cluster._start(self, cluster)  # pyright: ignore[reportPrivateUsage]
         # Shutdown order: user root, then system root, then remoting, however the user root went.
         self._root.done.add_done_callback(lambda _: self._user_root_stopped())
+        self._system_root.done.add_done_callback(lambda _: self._close_remoting())
 
     @property
     def path(self) -> str:
@@ -84,20 +87,16 @@ class ActorSystem[T](ActorRef[T]):
     def _user_root_stopped(self) -> None:
         if self.remoting is not None:
             self.remoting.listening.set()  # a cluster daemon still waiting to listen must not block the stop
-        if self._system_root is not None:
-            self._system_root.done.add_done_callback(lambda _: self._close_remoting())
-            self._system_root.send_sys(_stop_msg())
-        elif self.remoting is not None:
-            self._close_remoting()
+        self._system_root.send_sys(_stop_msg())
 
     def _close_remoting(self) -> None:
-        if self.remoting is not None:
+        if self.remoting is not None and self._shutdown is None:
             self._shutdown = asyncio.get_running_loop().create_task(self.remoting.close())
 
     async def when_terminated(self) -> None:
         await asyncio.shield(self._root.done)
-        if self._system_root is not None:
-            await asyncio.shield(self._system_root.done)
+        await asyncio.shield(self._system_root.done)
+        self._close_remoting()  # the done callback above may still be queued behind this very resumption
         if self._shutdown is not None:
             await asyncio.shield(self._shutdown)
 

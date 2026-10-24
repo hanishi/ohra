@@ -406,7 +406,91 @@ async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
         a.tell(Add(1))
         a.tell(Add(2))
         a.tell(Add(3))  # beyond the buffer: a dead letter
+        await eventually(lambda: any("Add(n=3)" in r.getMessage() for r in caplog.records))  # the shard has seen all three
         gate.set()
         await eventually(lambda: log.count("start a") == 2)  # until then the full buffer rejects even a Get
         assert await ask(a, Get, timeout=1) == 3
     assert any(r.getMessage() == "dead letter to pekko://s/user/a: Add(n=3)" for r in caplog.records)
+
+
+# --- the Shard actor between region and entities (cluster sharding plan, Task 1) ---------------------------
+
+import zlib  # noqa: E402
+
+from pekko_py.ref import FunctionRef  # noqa: E402
+from pekko_py.sharding import ClusterShardingSettings, HandOff, ShardStopped, shard_id_of  # noqa: E402
+
+
+def test_shard_id_is_stable_and_bounded():
+    assert shard_id_of("cart-42", 10) == str(zlib.crc32(b"cart-42") % 10)
+    assert shard_id_of("cart-42", 10) == shard_id_of("cart-42", 10)
+    assert {int(shard_id_of(f"id{i}", 10)) for i in range(200)} <= set(range(10))
+
+
+async def test_entities_live_under_shard_actors():
+    log: list[str] = []
+    async with ActorSystem(region(log), "s") as system:
+        Sharding.entity_ref_for(system, "a").tell(Add(1))
+        await eventually(lambda: "start a" in log)
+        shard = shard_id_of("a", ClusterShardingSettings().number_of_shards)
+        assert system.resolve(f"{system.path}/{shard}/a").path == f"{system.path}/{shard}/a"
+        with pytest.raises(LookupError):
+            system.resolve(f"{system.path}/a")  # not a direct child of the region any more
+
+
+def _id_in_another_shard_than(entity_id: str, n: int) -> str:
+    return next(f"x{i}" for i in range(10_000) if shard_id_of(f"x{i}", n) != shard_id_of(entity_id, n))
+
+
+async def test_region_state_aggregates_over_shards():
+    log: list[str] = []
+    async with ActorSystem(region(log), "s") as system:
+        other = _id_in_another_shard_than("a", ClusterShardingSettings().number_of_shards)
+        Sharding.entity_ref_for(system, "a").tell(Add(1))
+        Sharding.entity_ref_for(system, other).tell(Add(1))
+        await eventually(lambda: f"start {other}" in log and "start a" in log)
+        assert await live(system) == frozenset({"a", other})
+
+
+async def test_hand_off_stops_a_shard_and_its_entities():
+    log: list[str] = []
+    async with ActorSystem(region(log, stop_message=Halt()), "s") as system:
+        Sharding.entity_ref_for(system, "a").tell(Add(1))
+        await eventually(lambda: "start a" in log)
+        shard = shard_id_of("a", ClusterShardingSettings().number_of_shards)
+        shard_ref = system.resolve(f"{system.path}/{shard}")
+        replies: list[ShardStopped] = []
+        shard_ref.tell(HandOff(shard, FunctionRef("probe", replies.append)))
+        await eventually(lambda: replies == [ShardStopped(shard)])
+        assert "got halt a" in log and "stop a" in log
+        with pytest.raises(LookupError):
+            system.resolve(f"{system.path}/{shard}")  # the shard stopped with its entities
+
+
+async def test_hand_off_times_out_on_an_entity_that_ignores_its_stop_message():
+    log: list[str] = []
+    entity = Entity(Counter, counter(log)).with_stop_message(Note("ignored")).with_settings(ClusterShardingSettings(handoff_timeout=6.0))
+    async with ActorSystem(Sharding.init(entity), "s") as system:
+        Sharding.entity_ref_for(system, "a").tell(Add(1))
+        await eventually(lambda: "start a" in log)
+        shard = shard_id_of("a", ClusterShardingSettings().number_of_shards)
+        replies: list[ShardStopped] = []
+        began = asyncio.get_running_loop().time()
+        system.resolve(f"{system.path}/{shard}").tell(HandOff(shard, FunctionRef("probe", replies.append)))
+        await eventually(lambda: replies == [ShardStopped(shard)], timeout=3)
+        assert asyncio.get_running_loop().time() - began >= 0.9  # max(handoff_timeout - 5, 1) seconds
+        assert "note ignored a" in log and "stop a" in log
+
+
+def test_cluster_sharding_settings_are_validated():
+    for bad in (dict(number_of_shards=0), dict(buffer_size=0), dict(rebalance_relative_limit=0.0), dict(handoff_timeout=0.0)):
+        with pytest.raises(ValueError):
+            ClusterShardingSettings(**bad)  # pyright: ignore[reportArgumentType]
+    assert ClusterShardingSettings().number_of_shards == 1000
+
+
+def test_fluent_setters_apply_on_top_of_settings():
+    entity = Entity(Counter, counter([])).with_settings(ClusterShardingSettings(number_of_shards=5)).with_passivate_after(2.0).with_buffer_size(7)
+    assert entity.effective_settings.number_of_shards == 5
+    assert entity.effective_settings.passivate_after == 2.0
+    assert entity.effective_settings.buffer_size == 7

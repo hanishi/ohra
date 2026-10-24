@@ -29,6 +29,7 @@ from .cluster.cluster import (
     Unsubscribe,
 )
 from .cluster.gossip import Member
+from .cluster.sharding import ClusterSharding
 from .cluster.singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
@@ -41,6 +42,7 @@ from .serialization import Serialization, SerializationError, remotable
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
 from .sharding import (
+    ClusterShardingSettings,
     CurrentShardRegionState,
     Entity,
     EntityContext,
@@ -68,6 +70,8 @@ __all__ = [
     "Cluster",
     "ClusterDomainEvent",
     "ClusterSettings",
+    "ClusterSharding",
+    "ClusterShardingSettings",
     "ClusterSingleton",
     "ClusterSingletonSettings",
     "CurrentClusterState",

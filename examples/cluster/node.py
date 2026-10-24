@@ -1,7 +1,9 @@
 """A cluster node: joins through the seed nodes, registers a greeter service, runs a cluster-wide singleton
-counter, and prints every member event, every change of the greeter listing, and the count it gets back from the
-singleton each second. The listing on each node holds refs to the greeters on all nodes; the counter runs on the
-oldest node only and moves when that node stops.
+counter, hosts sharded per-id counters, and prints every member event, every change of the greeter listing, and
+what the singleton and the sharded counters answer each second. The listing on each node holds refs to the
+greeters on all nodes; the singleton runs on the oldest node only and moves when that node stops; the sharded
+counters for "alice", "bob" and "carol" live wherever the coordinator put their shards, spread over the nodes as
+they join.
 
     uv run python examples/cluster/node.py NAME PORT [SEED_PORT ...]
 
@@ -18,6 +20,7 @@ import asyncio
 import logging
 import signal
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,7 +36,11 @@ from pekko_py import (  # noqa: E402
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
+    ClusterSharding,
     ClusterSingleton,
+    Entity,
+    EntityContext,
+    EntityTypeKey,
     LeaderChanged,
     Leave,
     Listing,
@@ -76,7 +83,31 @@ class Counted:
     text: str
 
 
+@remotable
+@dataclass(frozen=True)
+class CountUp:
+    reply_to: ActorRef[str]
+
+
+PER_ID = EntityTypeKey[CountUp]("PerIdCounter")
+
 type Event = ClusterDomainEvent | Listing[Greet] | Tick | Counted
+
+
+def per_id_counter(node_name: str) -> Callable[[EntityContext[CountUp]], Behavior[CountUp]]:
+    """A sharded entity: one per id, created on its first message, hosted by whichever node owns its shard."""
+
+    def create(entity: EntityContext[CountUp]) -> Behavior[CountUp]:
+        def active(n: int) -> Behavior[CountUp]:
+            def on_message(msg: CountUp) -> Behavior[CountUp]:
+                msg.reply_to.tell(f"{entity.entity_id} = {n + 1} (on {node_name})")
+                return active(n + 1)
+
+            return Behaviors.receive_message(on_message)
+
+        return active(0)
+
+    return create
 
 
 def counter(node_name: str) -> Behavior[Hit]:
@@ -114,6 +145,7 @@ def listener(name: str) -> Behavior[Event]:
         receptionist.tell(Register(GREETER, ctx.spawn(greeter(name), "greeter")))
         receptionist.tell(SubscribeToKey(GREETER, ctx.self))
         proxy = ClusterSingleton(ctx.system).init(SingletonActor(counter(name), "counter"))  # the same on every node
+        ClusterSharding(ctx.system).init(Entity(PER_ID, per_id_counter(name)))  # the same on every node
         counted = ctx.message_adapter(Counted)
         ctx.timers.start_timer_with_fixed_delay("tick", Tick(), 1.0)
 
@@ -121,6 +153,8 @@ def listener(name: str) -> Behavior[Event]:
             match event:
                 case Tick():
                     proxy.tell(Hit(counted))  # buffered by the proxy until it has found the singleton
+                    for entity_id in ("alice", "bob", "carol"):
+                        ClusterSharding(ctx.system).entity_ref_for(PER_ID, entity_id).tell(CountUp(counted))
                 case Counted(text):
                     print(f"[{name}] count {text}")
                 case Listing(service_instances=refs):

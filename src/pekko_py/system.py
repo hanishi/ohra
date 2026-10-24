@@ -16,6 +16,7 @@ from .remote import Remoting, UniqueAddress, resolve_local, unique_address
 
 if TYPE_CHECKING:
     from .cluster.cluster import Cluster, ClusterSettings
+    from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
 
@@ -55,6 +56,8 @@ class ActorSystem[T](ActorRef[T]):
         """The cluster extension, reached as ``Cluster(system)``."""
         self.cluster_singleton: ClusterSingleton | None = None
         """The singleton extension, reached as ``ClusterSingleton(system)``."""
+        self.cluster_sharding: ClusterSharding | None = None
+        """The cluster sharding extension, reached as ``ClusterSharding(system)``."""
         if cluster is not None:
             from .cluster.cluster import Cluster as _Cluster
 

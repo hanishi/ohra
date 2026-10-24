@@ -158,3 +158,27 @@ async def test_plain_system_still_stops_cleanly():
     async with ActorSystem(Behaviors.ignore, "r") as system:
         Receptionist(system)
     assert system.is_terminated
+
+
+async def test_receptionist_exists_from_the_start():
+    async with ActorSystem(Behaviors.ignore, "r") as system:
+        assert system.receptionist is not None  # created with the system, as Pekko's library extension
+        assert system.resolve("pekko://r/system/receptionist") is Receptionist(system).ref
+
+
+async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(caplog: pytest.LogCaptureFixture):
+    def subscribing(ctx: ActorContext[Any]) -> Behavior[Any]:
+        Receptionist(ctx.system).ref.tell(Subscribe(GREETER, ctx.message_adapter(lambda listing: ("listing", listing))))
+        return Behaviors.receive_message(lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same)
+
+    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+        svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
+        actor = await ask(system, lambda r: Spawn(Behaviors.setup(subscribing), "subscriber", r), timeout=1)
+        rec = Receptionist(system).ref
+        await asyncio.sleep(0.05)
+        actor.tell("stop")
+        await eventually(lambda: gone(system, actor.path))
+        with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
+            rec.tell(Register(GREETER, svc))
+            assert (await ask(rec, lambda r: Find(GREETER, r), timeout=1)).service_instances == frozenset({svc})
+        assert not [r for r in caplog.records if actor.path in r.getMessage()]

@@ -10,6 +10,7 @@ from pekko_py.cluster.failure_detector import (
     HeartbeatNodeRing,
     HeartbeatSenderState,
     PhiAccrualFailureDetector,
+    phi,
 )
 from pekko_py.remote import Address, UniqueAddress
 
@@ -73,6 +74,20 @@ def test_phi_is_small_right_after_a_heartbeat_and_grows_with_silence():
     clock.now += 2.0  # far past mean + acceptable pause + many std deviations (std is min 0.1)
     assert fd.phi > 8.0
     assert not fd.is_available
+
+
+def test_phi_is_zero_right_after_a_heartbeat_at_default_settings():
+    # mean 1s + 3s acceptable pause with the 0.1s std floor: y is about -40 and exp overflows in Python where
+    # the JVM gives Infinity; the answer is 0 either way
+    assert phi(0.0, 4.0, 0.1) == 0.0
+    assert phi(0.05, 4.0, 0.1) == 0.0
+    clock = Clock(0.0)
+    fd = PhiAccrualFailureDetector(clock=clock)  # Pekko's defaults
+    for _ in range(3):
+        clock.now += 1.0
+        fd.heartbeat()
+    clock.now += 0.05
+    assert fd.is_available and fd.phi == 0.0
 
 
 def test_acceptable_pause_delays_the_verdict():

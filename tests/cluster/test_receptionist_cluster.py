@@ -9,6 +9,7 @@ from typing import Any
 from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, RemoteRef, ask, remotable
 from pekko_py.cluster.cluster import Cluster, ClusterSettings, Down, Join, Leave
 from pekko_py.receptionist import Find, Listing, Receptionist, ReceptionistRow, Register, ServiceKey, Subscribe
+from pekko_py.serialization import Json
 from pekko_py.remote import Address
 
 from ..util import eventually, free_port
@@ -201,3 +202,70 @@ async def test_a_restarted_node_replaces_its_old_row():
         await eventually(lambda: all_up(a, 2) and all_up(b2, 2), timeout=8)
         await eventually_async(lambda: instances_seen_on(a, 1), timeout=5)
         assert {r.path.rsplit("/", 1)[1] for r in (await find(a)).all_service_instances} == {"new"}
+
+
+# --- from the final review -----------------------------------------------------------------------------------
+
+
+def receptionist_path(system: ActorSystem[Any]) -> str:
+    return f"{Cluster(system).self_address.root}/system/receptionist"
+
+
+async def test_find_from_another_node_over_the_wire():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        svc = await spawn(a, Behaviors.receive_message(greeter), "svc")
+        Receptionist(a).ref.tell(Register(GREETER, svc))
+        listing: Listing[SayHello] = await ask(b.resolve(receptionist_path(a)), lambda r: Find(GREETER, r), timeout=2)
+        assert listing.key == GREETER and {r.path for r in listing.service_instances} == {svc.path}
+
+
+async def test_a_remote_subscriber_is_ignored_and_the_receptionist_survives():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        sub_on_b = await spawn(b, recorder([]), "sub")
+        b.resolve(receptionist_path(a)).tell(Subscribe(GREETER, sub_on_b))  # a RemoteRef subscriber on a's side
+        await asyncio.sleep(0.1)
+        assert (await find(a)).service_instances == frozenset()  # still answering
+
+
+async def test_a_late_joiner_gets_existing_rows_within_one_exchange():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a = await stack.enter_async_context(node(p1, [p1], receptionist_resend_interval=10.0))
+        await eventually(lambda: all_up(a, 1), timeout=3)
+        Receptionist(a).ref.tell(Register(GREETER, await spawn(a, Behaviors.receive_message(greeter), "svc")))
+        b = await stack.enter_async_context(node(p2, [p1], receptionist_resend_interval=10.0))
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        await eventually_async(lambda: instances_seen_on(b, 1), timeout=2)  # the member-event push, not a resend
+
+
+async def test_a_service_comes_back_when_its_node_is_reachable_again():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        Receptionist(a).ref.tell(Register(GREETER, await spawn(a, Behaviors.receive_message(greeter), "svc")))
+        events: list[Listing[SayHello]] = []
+        Receptionist(b).ref.tell(Subscribe(GREETER, await spawn(b, recorder(events), "sub")))
+        await eventually(lambda: bool(events) and len(events[-1].service_instances) == 1, timeout=3)
+        remoting = a.remoting
+        assert remoting is not None
+        deliver = remoting._handle  # pyright: ignore[reportPrivateUsage]
+
+        def dropping_heartbeats(frame: Json) -> None:  # a stops answering b's heartbeats
+            message = frame.get("message") if isinstance(frame, dict) else None
+            if isinstance(message, dict) and message.get("$type") == "Heartbeat":
+                return
+            deliver(frame)
+
+        remoting._handle = dropping_heartbeats  # pyright: ignore[reportPrivateUsage]
+        await eventually(lambda: events[-1].service_instances == frozenset(), timeout=5)
+        assert len(events[-1].all_service_instances) == 1 and not events[-1].services_were_added_or_removed
+        remoting._handle = deliver  # pyright: ignore[reportPrivateUsage]
+        await eventually(lambda: len(events[-1].service_instances) == 1, timeout=5)
+        assert not events[-1].services_were_added_or_removed

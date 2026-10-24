@@ -123,7 +123,10 @@ class PhiAccrualFailureDetector:
 def phi(time_diff: float, mean: float, std_deviation: float) -> float:
     """Pekko's logistic approximation of -log10(1 - CDF)."""
     y = (time_diff - mean) / std_deviation
-    e = math.exp(-y * (1.5976 + 0.070566 * y * y))
+    try:
+        e = math.exp(-y * (1.5976 + 0.070566 * y * y))
+    except OverflowError:  # the JVM's exp gives Infinity here: long before the mean, phi is 0
+        e = math.inf
     if time_diff > mean:
         return math.inf if e == 0.0 else -math.log10(e / (1.0 + e))  # the JVM's log10(0) is -Infinity
     return -math.log10(1.0 - 1.0 / (1.0 + e))

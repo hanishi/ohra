@@ -4,14 +4,14 @@ A message type is sendable once registered, with ``@remotable`` on a frozen data
 ``Serialization.register(cls)``, as Pekko's serialization bindings. Encoding is self-describing JSON:
 a dataclass is ``{"$type": manifest, ...fields}``, an ``ActorRef`` is ``{"$ref": path}``, scalars pass
 through, lists and tuples become lists, string-keyed dicts become objects. Decoding needs no type hints,
-so union-typed fields and nested messages work; a field annotated ``tuple[...]`` is rebuilt as a tuple.
+so union-typed fields and nested messages work; a field annotated ``tuple[...]`` or ``frozenset[...]`` is rebuilt as one.
 """
 from __future__ import annotations
 
 import dataclasses
 import types
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 
 from .ref import ActorRef
@@ -59,8 +59,8 @@ class Serialization:
                 entity = cast(EntityRef[Any], value)
                 return {"$entity": entity.entity_id, "$region": ref_path(entity.region)}
             return {"$ref": ref_path(cast(ActorRef[Any], value))}
-        if isinstance(value, list | tuple):
-            return [Serialization.encode(v, ref_path) for v in cast(Sequence[object], value)]
+        if isinstance(value, list | tuple | frozenset | set):
+            return [Serialization.encode(v, ref_path) for v in cast(Iterable[object], value)]
         if isinstance(value, dict):
             out: dict[str, Json] = {}
             for k, v in cast(dict[object, object], value).items():
@@ -117,6 +117,10 @@ def _is_tuple(hint: Any) -> bool:
     return hint is tuple or typing.get_origin(hint) is tuple
 
 
+def _is_frozenset(hint: Any) -> bool:
+    return hint is frozenset or typing.get_origin(hint) is frozenset
+
+
 def _rebuild(value: object, hint: Any) -> object:
     """JSON has no tuples: rebuild them where the field annotation says tuple, including inside
     unions, lists and dict values, so a decoded message equals and hashes like the original."""
@@ -127,11 +131,13 @@ def _rebuild(value: object, hint: Any) -> object:
         candidates: list[Any] = [a for a in args if a is not type(None)]
         if isinstance(value, list):
             for a in candidates:
-                if _is_tuple(a) or a is list or typing.get_origin(a) is list:
+                if _is_tuple(a) or _is_frozenset(a) or a is list or typing.get_origin(a) is list:
                     return _rebuild(cast(list[object], value), a)
         return cast(object, value)
     if isinstance(value, list):
         items: list[object] = cast(list[object], value)
+        if _is_frozenset(hint):
+            return frozenset(_rebuild(v, args[0]) if args else v for v in items)
         if _is_tuple(hint):
             if args and args[-1] is Ellipsis:
                 return tuple(_rebuild(v, args[0]) for v in items)

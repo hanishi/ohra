@@ -49,13 +49,16 @@ class ActorSystem[T](ActorRef[T]):
         self._system_root: ActorCell[Any] = ActorCell(self, None, "system", f"{root}/system", Behaviors.empty)
         """Pekko's /system guardian: hosts the receptionist and the cluster daemon."""
         self.receptionist: Receptionist | None = None
-        """The receptionist extension, created on first ``Receptionist(system)``."""
+        """The receptionist extension, reached as ``Receptionist(system)``; started below, as Pekko's."""
         self.cluster: Cluster | None = None
         """The cluster extension, reached as ``Cluster(system)``."""
         if cluster is not None:
             from .cluster.cluster import Cluster as _Cluster
 
             self.cluster = _Cluster._start(self, cluster)  # pyright: ignore[reportPrivateUsage]
+        from .receptionist import Receptionist as _Receptionist
+
+        _Receptionist(self)  # after the cluster, so a cluster node's receptionist replicates from the start
         # Shutdown order: user root, then system root, then remoting, however the user root went.
         self._root.done.add_done_callback(lambda _: self._user_root_stopped())
         self._system_root.done.add_done_callback(lambda _: self._close_remoting())

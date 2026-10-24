@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from ..behavior import Behavior, Behaviors
 from ..context import ActorContext
-from ..ref import ActorRef, LocalRef
+from ..cell import is_local_actor
+from ..ref import ActorRef
 from ..remote import Address, UniqueAddress
 from ..serialization import remotable
 from ..signals import PostStop, Signal
@@ -1248,7 +1249,7 @@ class _CoreDaemon:
     def subscription(self, msg: ClusterStateSubscription) -> None:
         match msg:
             case Subscribe(subscriber, event_class):
-                if isinstance(subscriber, LocalRef):  # a stopped subscriber drops out, as from Pekko's event stream
+                if is_local_actor(subscriber):  # a stopped subscriber drops out, as from Pekko's event stream
                     self.ctx.watch_with(subscriber, Unsubscribe(subscriber))
                 self.subscribers.setdefault(subscriber, set()).add(event_class)
                 publish_diff(self.empty_state, self.published_state, lambda e: subscriber.tell(e) if isinstance(e, event_class) else None)

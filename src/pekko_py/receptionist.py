@@ -18,15 +18,17 @@ from .cluster.cluster import (
     UnreachableMember,
 )
 from .cluster.cluster import Subscribe as ClusterSubscribe
+from .cell import is_local_actor
 from .context import ActorContext
 from .ref import ActorRef, LocalRef
-from .remote import Address, UniqueAddress
+from .remote import Address, RemoteRef, UniqueAddress
 from .serialization import remotable
 
 if TYPE_CHECKING:
     from .system import ActorSystem
 
 
+@remotable
 @dataclass(frozen=True)
 class ServiceKey[T]:
     """A name for a kind of service; ``T`` is the service's message type and is checked statically only."""
@@ -34,18 +36,21 @@ class ServiceKey[T]:
     id: str
 
 
+@remotable
 @dataclass(frozen=True)
 class Registered[T]:
     key: ServiceKey[T]
     service_instance: ActorRef[T]
 
 
+@remotable
 @dataclass(frozen=True)
 class Deregistered[T]:
     key: ServiceKey[T]
     service_instance: ActorRef[T]
 
 
+@remotable
 @dataclass(frozen=True)
 class Listing[T]:
     """``service_instances`` are the reachable ones; ``all_service_instances`` include those on unreachable nodes.
@@ -57,6 +62,7 @@ class Listing[T]:
     services_were_added_or_removed: bool
 
 
+@remotable
 @dataclass(frozen=True)
 class Register[T]:
     key: ServiceKey[T]
@@ -64,6 +70,7 @@ class Register[T]:
     reply_to: ActorRef[Registered[T]] | None = None
 
 
+@remotable
 @dataclass(frozen=True)
 class Deregister[T]:
     key: ServiceKey[T]
@@ -71,12 +78,14 @@ class Deregister[T]:
     reply_to: ActorRef[Deregistered[T]] | None = None
 
 
+@remotable
 @dataclass(frozen=True)
 class Find[T]:
     key: ServiceKey[T]
     reply_to: ActorRef[Listing[T]]
 
 
+@remotable
 @dataclass(frozen=True)
 class Subscribe[T]:
     """The current Listing at once, then one per change of the key."""
@@ -116,7 +125,7 @@ type _Msg = Command | _ServiceTerminated | _SubscriberTerminated | ReceptionistR
 
 
 class Receptionist:
-    """``Receptionist(system)``: the extension, created on first use. Send commands to ``ref``."""
+    """``Receptionist(system)``: the extension, started with the system as Pekko's. Send commands to ``ref``."""
 
     system: ActorSystem[Any]
     ref: ActorRef[Command]
@@ -194,7 +203,10 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                 case Find(key, reply_to):
                     reply_to.tell(listing(key))
                 case Subscribe(key, subscriber):
-                    if subscriber not in subscriptions_per_actor and isinstance(subscriber, LocalRef):
+                    if isinstance(subscriber, RemoteRef):  # as ClusterReceptionist: subscribers are local
+                        ctx.log.warning("Receptionist only accepts local subscribers, ignoring [%s] for [%s]", subscriber.path, key.id)
+                        return Behaviors.same
+                    if subscriber not in subscriptions_per_actor and is_local_actor(subscriber):
                         ctx.watch_with(subscriber, _SubscriberTerminated(subscriber))
                     subscriber.tell(listing(key))
                     subscriptions_per_actor.setdefault(subscriber, set()).add(key)

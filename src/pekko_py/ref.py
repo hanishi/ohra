@@ -6,7 +6,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .cell import ActorCell
@@ -71,13 +71,15 @@ class PromiseRef[T](ActorRef[T]):
 
 
 class FunctionRef[T](ActorRef[T]):
-    """A ref that runs a callback on tell. Used for message adapters."""
+    """A ref that runs a callback on tell. Used for message adapters, which name the actor they belong to in
+    ``owner`` so that watching the adapter watches that actor."""
 
-    __slots__ = ("_fn", "_path")
+    __slots__ = ("_fn", "_path", "owner")
 
-    def __init__(self, path: str, fn: Callable[[T], None]) -> None:
+    def __init__(self, path: str, fn: Callable[[T], None], owner: ActorCell[Any] | None = None) -> None:
         self._path = path
         self._fn = fn
+        self.owner = owner
 
     @property
     def path(self) -> str:

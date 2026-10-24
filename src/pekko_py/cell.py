@@ -32,7 +32,7 @@ from .behavior import (
 )
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
-from .ref import ActorRef, LocalRef
+from .ref import ActorRef, FunctionRef, LocalRef
 from .result import Failure, Success, Try
 from .routers import PoolRouter
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
@@ -644,6 +644,13 @@ class ActorCell[T]:
 
 
 def _cell_of(ref: ActorRef[Any]) -> ActorCell[Any]:
-    if not isinstance(ref, LocalRef):
-        raise TypeError(f"{ref!r} is not a local actor")
-    return ref._cell  # pyright: ignore[reportPrivateUsage]
+    if isinstance(ref, LocalRef):
+        return ref._cell  # pyright: ignore[reportPrivateUsage]
+    if isinstance(ref, FunctionRef) and ref.owner is not None:  # a message adapter: watch its actor
+        return ref.owner
+    raise TypeError(f"{ref!r} is not a local actor")
+
+
+def is_local_actor(ref: ActorRef[Any]) -> bool:
+    """True for a ref that can be watched: a local actor, or a message adapter of one."""
+    return isinstance(ref, LocalRef) or (isinstance(ref, FunctionRef) and ref.owner is not None)

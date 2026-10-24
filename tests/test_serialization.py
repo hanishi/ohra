@@ -94,9 +94,22 @@ def test_manifest_collision_raises_unless_same_class():
 
 def test_unsupported_value_raises():
     with pytest.raises(SerializationError):
-        Serialization.encode({1, 2}, lambda r: r.path)
+        Serialization.encode(object(), lambda r: r.path)
     with pytest.raises(SerializationError):
         Serialization.encode({1: "non-string key"}, lambda r: r.path)
+
+
+@remotable
+@dataclass(frozen=True)
+class WithFrozenset:
+    names: frozenset[str]
+    pairs: frozenset[tuple[str, int]]
+
+
+def test_frozensets_round_trip():
+    original = WithFrozenset(frozenset({"a", "b"}), frozenset({("x", 1), ("y", 2)}))
+    encoded = Serialization.encode(original, lambda r: r.path)
+    assert Serialization.decode(encoded, lambda _p: None) == original  # pyright: ignore[reportArgumentType]
 
 
 @remotable

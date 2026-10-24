@@ -16,6 +16,7 @@ from .remote.remoting import Remoting, UniqueAddress, resolve_local, unique_addr
 
 if TYPE_CHECKING:
     from .cluster.core import Cluster, ClusterSettings
+    from .coordinated_shutdown import CoordinatedShutdownSettings
     from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
@@ -34,6 +35,7 @@ class ActorSystem[T](ActorRef[T]):
         mailbox: MailboxSelector | None = None,
         address: tuple[str, int] | None = None,
         cluster: ClusterSettings | None = None,
+        shutdown: CoordinatedShutdownSettings | None = None,
     ) -> None:
         self.name = name
         self.log = logging.getLogger(f"pekko_py.system.{name}")
@@ -58,6 +60,11 @@ class ActorSystem[T](ActorRef[T]):
         """The singleton extension, reached as ``ClusterSingleton(system)``."""
         self.cluster_sharding: ClusterSharding | None = None
         """The cluster sharding extension, reached as ``ClusterSharding(system)``."""
+        from .coordinated_shutdown import CoordinatedShutdown as _CoordinatedShutdown
+        from .coordinated_shutdown import CoordinatedShutdownSettings as _CSSettings
+
+        self.coordinated_shutdown = _CoordinatedShutdown._start(self, shutdown or _CSSettings())  # pyright: ignore[reportPrivateUsage]
+        """Pekko's CoordinatedShutdown, reached as ``CoordinatedShutdown(system)``; before the cluster, which adds its tasks."""
         if cluster is not None:
             from .cluster.core import Cluster as _Cluster
 
@@ -68,6 +75,11 @@ class ActorSystem[T](ActorRef[T]):
         # Shutdown order: user root, then system root, then remoting, however the user root went.
         self._root.done.add_done_callback(lambda _: self._user_root_stopped())
         self._system_root.done.add_done_callback(lambda _: self._close_remoting())
+        loop = asyncio.get_running_loop()
+        for sig in self.coordinated_shutdown.settings.run_on_signals:
+            loop.add_signal_handler(sig, self._on_signal)
+        if self.coordinated_shutdown.settings.run_on_signals:
+            self._system_root.done.add_done_callback(lambda _: self._remove_signal_handlers())
 
     @property
     def path(self) -> str:
@@ -90,8 +102,31 @@ class ActorSystem[T](ActorRef[T]):
         return resolve_local(self, path)
 
     def terminate(self) -> None:
-        """Stop the guardian and its subtree, then the system root. Complete the shutdown with when_terminated."""
+        """Run the coordinated shutdown, whose last phase stops the guardian and its subtree, then the system root;
+        complete it with when_terminated. With ``run_by_actor_system_terminate=False`` the roots stop at once."""
+        if self._system_root.done.done():
+            return
+        if self.coordinated_shutdown.settings.run_by_actor_system_terminate:
+            from .coordinated_shutdown import ActorSystemTerminateReason
+
+            self.coordinated_shutdown.run(ActorSystemTerminateReason())
+        else:
+            self._final_terminate()
+
+    def _final_terminate(self) -> None:
+        """Stop the guardian and its subtree, then the system root (Pekko's finalTerminate)."""
         self._root.send_sys(_stop_msg())
+
+    def _on_signal(self) -> None:
+        from .coordinated_shutdown import JvmExitReason
+
+        if not self._system_root.done.done():
+            self.coordinated_shutdown.run(JvmExitReason())
+
+    def _remove_signal_handlers(self) -> None:
+        loop = asyncio.get_running_loop()
+        for sig in self.coordinated_shutdown.settings.run_on_signals:
+            loop.remove_signal_handler(sig)
 
     def _user_root_stopped(self) -> None:
         if self.remoting is not None:
@@ -108,6 +143,9 @@ class ActorSystem[T](ActorRef[T]):
         self._close_remoting()  # the done callback above may still be queued behind this very resumption
         if self._shutdown is not None:
             await asyncio.shield(self._shutdown)
+        run = self.coordinated_shutdown._run  # pyright: ignore[reportPrivateUsage]
+        if run is not None:
+            await asyncio.shield(run)  # the phases after the stop are only the run's own bookkeeping; no task outlives us
 
     @property
     def is_terminated(self) -> bool:

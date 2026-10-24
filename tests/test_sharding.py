@@ -14,6 +14,7 @@ from pekko_py import (
     ActorSystem,
     Behavior,
     Behaviors,
+    CoordinatedShutdownSettings,
     CurrentShardRegionState,
     Entity,
     EntityContext,
@@ -359,7 +360,8 @@ async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_enti
     caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()
-    async with ActorSystem(region(log, gate), "s") as system:
+    direct = CoordinatedShutdownSettings(run_by_actor_system_terminate=False)  # the stop must reach the region before the gate opens
+    async with ActorSystem(region(log, gate), "s", shutdown=direct) as system:
         a = Sharding.entity_ref_for(system, "a")
         a.tell(Stop())
         await eventually(lambda: "got stop a" in log)

@@ -46,6 +46,15 @@ from .cluster.sharding import (
 from .cluster.sbr import DownAll, KeepMajority, KeepOldest, SplitBrainResolverSettings, StaticQuorum
 from .cluster.singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .context import ActorContext
+from .coordinated_shutdown import (
+    ActorSystemTerminateReason,
+    ClusterDowningReason,
+    ClusterLeavingReason,
+    CoordinatedShutdown,
+    CoordinatedShutdownSettings,
+    JvmExitReason,
+    Reason,
+)
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
 from .receptionist import Deregister, Deregistered, Find, Listing, Receptionist, Register, Registered, ServiceKey
@@ -63,6 +72,7 @@ __all__ = [
     "ActorContext",
     "ActorRef",
     "ActorSystem",
+    "ActorSystemTerminateReason",
     "Address",
     "AskTimeoutError",
     "Behavior",
@@ -70,11 +80,15 @@ __all__ = [
     "ChildFailed",
     "Cluster",
     "ClusterDomainEvent",
+    "ClusterDowningReason",
+    "ClusterLeavingReason",
     "ClusterSettings",
     "ClusterSharding",
     "ClusterShardingSettings",
     "ClusterSingleton",
     "ClusterSingletonSettings",
+    "CoordinatedShutdown",
+    "CoordinatedShutdownSettings",
     "CurrentClusterState",
     "CurrentShardRegionState",
     "DeathPactError",
@@ -93,6 +107,7 @@ __all__ = [
     "InMemoryStore",
     "Join",
     "JoinSeedNodes",
+    "JvmExitReason",
     "KeepMajority",
     "KeepOldest",
     "LeaderChanged",
@@ -118,6 +133,7 @@ __all__ = [
     "PreRestart",
     "ReachabilityEvent",
     "ReachableMember",
+    "Reason",
     "Receive",
     "Receptionist",
     "Register",

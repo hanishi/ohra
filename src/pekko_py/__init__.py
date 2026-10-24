@@ -29,6 +29,7 @@ from .cluster.cluster import (
     Unsubscribe,
 )
 from .cluster.gossip import Member
+from .cluster.singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .context import ActorContext
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
@@ -67,6 +68,8 @@ __all__ = [
     "Cluster",
     "ClusterDomainEvent",
     "ClusterSettings",
+    "ClusterSingleton",
+    "ClusterSingletonSettings",
     "CurrentClusterState",
     "CurrentShardRegionState",
     "DeathPactError",
@@ -124,6 +127,7 @@ __all__ = [
     "Sharding",
     "ShardingEnvelope",
     "Signal",
+    "SingletonActor",
     "SpawnProtocol",
     "SqliteStore",
     "StashBuffer",

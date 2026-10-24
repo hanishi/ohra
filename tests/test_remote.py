@@ -275,6 +275,7 @@ async def test_shutdown_closes_everything():
         b.resolve(a.path).tell(Greet("x", b.ignore_ref))
         await eventually(lambda: log == ["x"])
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:  # the listener released its port
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as a new listener would; TIME_WAIT pairs do not count
         s.bind(("127.0.0.1", port_a))
 
 

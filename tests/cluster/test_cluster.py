@@ -423,3 +423,57 @@ async def test_tearing_down_in_forward_order_leaks_nothing():
     for n in nodes:  # the seed and leader goes first
         await n.__aexit__(None, None, None)
     assert all(n.is_terminated for n in nodes)
+
+
+# --- the exiting phase (cluster singleton plan, Task 1) ------------------------------------------------------
+
+
+async def test_exiting_tasks_run_before_the_node_exits():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(cluster_node("c", p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        done: list[str] = []
+
+        async def task() -> None:
+            await asyncio.sleep(0.1)
+            done.append("done")
+
+        Cluster(b).add_exiting_task(task)
+        events: list[ClusterDomainEvent] = []
+        Cluster(a).subscriptions.tell(Subscribe(probe(events), MemberEvent))
+        Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
+        await asyncio.wait_for(b.when_terminated(), timeout=5)
+        assert done == ["done"]  # the task finished before the node went away
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        names = [type(e).__name__ for e in events if isinstance(e, MemberEvent) and e.member.unique_address.port == p2]
+        assert names.index("MemberExited") < names.index("MemberRemoved")
+
+
+async def test_a_slow_exiting_task_is_bounded_by_exiting_timeout():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a = await stack.enter_async_context(cluster_node("c", p1, [p1], exiting_timeout=0.2))
+        b = await stack.enter_async_context(cluster_node("c", p2, [p1], exiting_timeout=0.2))
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+
+        async def slow() -> None:
+            await asyncio.sleep(5)
+
+        Cluster(b).add_exiting_task(slow)
+        Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
+        await asyncio.wait_for(b.when_terminated(), timeout=2)
+
+
+async def test_a_failing_exiting_task_does_not_block_the_exit():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(cluster_node("c", p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+
+        async def failing() -> None:
+            raise RuntimeError("boom")
+
+        Cluster(b).add_exiting_task(failing)
+        Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
+        await asyncio.wait_for(b.when_terminated(), timeout=2)

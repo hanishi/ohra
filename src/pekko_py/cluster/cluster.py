@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +14,7 @@ from ..context import ActorContext
 from ..cell import is_local_actor
 from ..ref import ActorRef
 from ..remote import Address, UniqueAddress
+from ..result import Failure, Try
 from ..serialization import remotable
 from ..signals import PostStop, Signal
 from .failure_detector import FailureDetectorRegistry, HeartbeatNodeRing, HeartbeatSenderState, PhiAccrualFailureDetector
@@ -61,6 +62,8 @@ class ClusterSettings:
     max_ticks_before_shutting_down_myself: int = 4
     receptionist_resend_interval: float = 1.0
     """How often a node re-sends its receptionist row to the others (anti-entropy); not a Pekko setting."""
+    exiting_timeout: float = 10.0
+    """How long an Exiting node waits for its exiting tasks (Pekko's cluster-exiting phase timeout)."""
 
     def __post_init__(self) -> None:
         positive = (
@@ -68,7 +71,7 @@ class ClusterSettings:
             "unreachable_nodes_reaper_interval", "heartbeat_interval", "heartbeat_expected_response_after",
             "failure_detector_threshold", "failure_detector_min_std_deviation", "prune_gossip_tombstones_after",
             "monitored_by_nr_of_members", "failure_detector_max_sample_size", "min_nr_of_members",
-            "reduce_gossip_different_view_probability", "receptionist_resend_interval",
+            "reduce_gossip_different_view_probability", "receptionist_resend_interval", "exiting_timeout",
         )  # fmt: skip
         non_negative = (
             "periodic_tasks_initial_delay", "acceptable_heartbeat_pause", "max_gossips_before_shutting_down_myself",
@@ -350,6 +353,7 @@ class Cluster:
     failure_detector: FailureDetectorRegistry
     manager: ActorRef[ClusterCommand]
     subscriptions: ActorRef[ClusterStateSubscription]
+    exiting_tasks: list[Callable[[], Awaitable[None]]]
     _membership_state: MembershipState
     _terminated: bool
 
@@ -376,6 +380,7 @@ class Cluster:
         )
         self._membership_state = MembershipState(Gossip.empty(), system.address)
         self._terminated = False
+        self.exiting_tasks = []
         core = system._system_root.spawn_child(_core(self), "cluster", None)  # pyright: ignore[reportPrivateUsage]
         core.done.add_done_callback(lambda _: self.shutdown())  # ClusterCoreSupervisor: a dead daemon ends the node
         self.manager = core.ref
@@ -397,6 +402,11 @@ class Cluster:
     @property
     def is_terminated(self) -> bool:
         return self._terminated or self.system.is_terminated
+
+    def add_exiting_task(self, fn: Callable[[], Awaitable[None]]) -> None:
+        """Run ``fn()`` when this node is Exiting, before it confirms its exit: Pekko's cluster-exiting phase,
+        where singletons hand over and shards are handed off. Bounded by ``exiting_timeout``."""
+        self.exiting_tasks.append(fn)
 
     def shutdown(self) -> None:
         """Leave the cluster for good: terminates the ActorSystem, as Pekko's coordinated shutdown would."""
@@ -864,6 +874,28 @@ class _CoreDaemon:
             self.publish_membership_state()
             self.gossip()
 
+    def start_exiting(self) -> None:
+        """The cluster-exiting phase: run the registered tasks, bounded by exiting_timeout, then complete."""
+        tasks = self.cluster.exiting_tasks
+        if not tasks:
+            self.ctx.self.tell(_ExitingCompleted())
+            return
+
+        async def run_all() -> None:
+            results = await asyncio.wait_for(
+                asyncio.gather(*(fn() for fn in tasks), return_exceptions=True), self.settings.exiting_timeout
+            )
+            for r in results:
+                if isinstance(r, BaseException):
+                    self.log.warning("exiting task failed: %r", r)
+
+        def done(result: Try[None]) -> _Msg:
+            if isinstance(result, Failure):
+                self.log.warning("exiting tasks did not complete: %r", result.exception)
+            return _ExitingCompleted()
+
+        self.ctx.pipe_to_self(run_all(), done)
+
     def exiting_completed(self) -> None:
         self.log.info("Exiting completed")
         self.exiting_tasks_in_progress = False
@@ -974,7 +1006,7 @@ class _CoreDaemon:
         if self_status == "exiting" and not self.exiting_tasks_in_progress:
             self.exiting_tasks_in_progress = True
             self.log.info("Exiting, starting coordinated shutdown")
-            self.ctx.self.tell(_ExitingCompleted())
+            self.start_exiting()
         if self_status == "down" and local_gossip.member(self.self_unique_address).status != "down":
             self.log.warning("Received gossip where this member has been downed, from [%s]", from_.address)
             self.shutdown_self_when_down()
@@ -1097,7 +1129,7 @@ class _CoreDaemon:
             if not self.exiting_tasks_in_progress and new_gossip.member(self.self_unique_address).status == "exiting":
                 self.exiting_tasks_in_progress = True
                 self.log.info("Exiting (leader), starting coordinated shutdown")
-                self.ctx.self.tell(_ExitingCompleted())
+                self.start_exiting()
             self.exiting_confirmed -= removed_exiting_confirmed
             for m in changed:
                 self.log.info("Leader is moving node [%s] to [%s]", m.address, m.status)

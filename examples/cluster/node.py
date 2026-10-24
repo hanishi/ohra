@@ -1,5 +1,7 @@
-"""A cluster node: joins through the seed nodes, registers a greeter service, and prints every member event and
-every change of the greeter listing it sees. The listing on each node holds refs to the greeters on all nodes.
+"""A cluster node: joins through the seed nodes, registers a greeter service, runs a cluster-wide singleton
+counter, and prints every member event, every change of the greeter listing, and the count it gets back from the
+singleton each second. The listing on each node holds refs to the greeters on all nodes; the counter runs on the
+oldest node only and moves when that node stops.
 
     uv run python examples/cluster/node.py NAME PORT [SEED_PORT ...]
 
@@ -8,11 +10,13 @@ every change of the greeter listing it sees. The listing on each node holds refs
     uv run python examples/cluster/node.py three 2553 2551 2552   # terminal 3: either seed will do
 
 Every node must run under the same system name, so NAME is only used for the log lines; the system is "cluster".
-Stop a node with ctrl-c and the others report it unreachable and drop its greeter from `service_instances`; a
-node that is `Down`ed or that leaves is removed, and its greeter leaves the listing for good.
+Ctrl-c makes a node leave the cluster gracefully: its greeter leaves every listing and, if it hosted the counter,
+the counter is handed over before the node exits and starts again at 1 on the next oldest node. Kill a node
+instead (kill -9) and the others report it unreachable until you `Down` it.
 """
 import asyncio
 import logging
+import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,13 +33,16 @@ from pekko_py import (  # noqa: E402
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
+    ClusterSingleton,
     LeaderChanged,
+    Leave,
     Listing,
     MemberEvent,
     ReachabilityEvent,
     Receptionist,
     Register,
     ServiceKey,
+    SingletonActor,
     Subscribe,
     remotable,
 )
@@ -53,7 +60,41 @@ class Greet:
 
 GREETER = ServiceKey[Greet]("greeter")
 
-type Event = ClusterDomainEvent | Listing[Greet]
+
+@remotable
+@dataclass(frozen=True)
+class Hit:
+    reply_to: ActorRef[str]
+
+
+@dataclass(frozen=True)
+class Tick: ...
+
+
+@dataclass(frozen=True)
+class Counted:
+    text: str
+
+
+type Event = ClusterDomainEvent | Listing[Greet] | Tick | Counted
+
+
+def counter(node_name: str) -> Behavior[Hit]:
+    """The singleton: one of these runs in the whole cluster, on the oldest node."""
+
+    def setup(ctx: ActorContext[Hit]) -> Behavior[Hit]:
+        count = 0
+        print(f"[{node_name}] counter singleton started here")
+
+        def on_hit(msg: Hit) -> Behavior[Hit]:
+            nonlocal count
+            count += 1
+            msg.reply_to.tell(f"{count} (counted on {node_name})")
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_hit)
+
+    return Behaviors.setup(setup)
 
 
 def greeter(node_name: str) -> Behavior[Greet]:
@@ -72,9 +113,16 @@ def listener(name: str) -> Behavior[Event]:
         receptionist = Receptionist(ctx.system).ref
         receptionist.tell(Register(GREETER, ctx.spawn(greeter(name), "greeter")))
         receptionist.tell(SubscribeToKey(GREETER, ctx.self))
+        proxy = ClusterSingleton(ctx.system).init(SingletonActor(counter(name), "counter"))  # the same on every node
+        counted = ctx.message_adapter(Counted)
+        ctx.timers.start_timer_with_fixed_delay("tick", Tick(), 1.0)
 
         def on_event(event: Event) -> Behavior[Event]:
             match event:
+                case Tick():
+                    proxy.tell(Hit(counted))  # buffered by the proxy until it has found the singleton
+                case Counted(text):
+                    print(f"[{name}] count {text}")
                 case Listing(service_instances=refs):
                     print(f"[{name}] greeters: {sorted(r.path for r in refs)}")
                 case MemberEvent(member=m):
@@ -101,8 +149,11 @@ def node(name: str, port: int, seed_ports: list[int]) -> ActorSystem[Event]:
 
 async def main(name: str, port: int, seed_ports: list[int]) -> None:
     async with node(name, port, seed_ports) as system:
-        print(f"[{name}] {Cluster(system).self_address.root} joining through {seed_ports}; ctrl-c to stop")
-        await system.when_terminated()
+        cluster = Cluster(system)
+        print(f"[{name}] {cluster.self_address.root} joining through {seed_ports}; ctrl-c to leave")
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, lambda: cluster.manager.tell(Leave(cluster.self_address)))  # as CoordinatedShutdown's JVM hook
+        await system.when_terminated()  # the exiting phase hands the singleton over, then the node terminates itself
 
 
 if __name__ == "__main__":

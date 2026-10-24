@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from ..remote import Address, UniqueAddress
-from ..serialization import remotable
+from ..remote.serialization import remotable
 from .reachability import Reachability
 from .vector_clock import VectorClock
 

@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, RemoteRef, ask, remotable
-from pekko_py.cluster.cluster import Cluster, ClusterSettings, Down, Join, Leave
+from pekko_py.cluster.core import Cluster, ClusterSettings, Down, Join, Leave
 from pekko_py.receptionist import Find, Listing, Receptionist, ReceptionistRow, Register, ServiceKey, Subscribe
-from pekko_py.serialization import Json
+from pekko_py.remote.serialization import Json
 from pekko_py.remote import Address
 
 from ..util import eventually, free_port

@@ -18,9 +18,9 @@ from typing import cast
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .behavior import Behavior
-from .patterns import AskTimeoutError
-from .system import ActorSystem
+from ..behavior import Behavior
+from ..patterns import AskTimeoutError
+from ..system import ActorSystem
 
 
 class Actors[T]:

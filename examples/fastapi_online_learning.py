@@ -45,7 +45,7 @@ from pekko_py import (
     Try,
     batching,
 )
-from pekko_py.fastapi import Actors
+from pekko_py.ext.fastapi import Actors
 
 N_FEATURES = 4
 BATCH_MAX_N, BATCH_MAX_WAIT = 64, 0.005  # prediction micro-batches

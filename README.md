@@ -54,7 +54,7 @@ If you know Apache Pekko or Akka Typed, the names are the same in snake_case, an
 ```
 pip install -e .            # the library
 pip install -e '.[numpy]'   # plus numpy, for the examples that use it
-pip install -e '.[web]'     # plus FastAPI and uvicorn, for pekko_py.fastapi and the fastapi_* examples
+pip install -e '.[web]'     # plus FastAPI and uvicorn, for pekko_py.ext.fastapi and the fastapi_* examples
 pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 ```
 
@@ -371,17 +371,17 @@ Entities are in memory: a moved or handed-off entity starts fresh on its new nod
 
 ### numpy and parallelism
 
-A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. For another process, `pekko_py.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
+A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. For another process, `pekko_py.ext.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
 
 Messages are shared by reference and never copied. Keep them immutable: frozen dataclasses, and for arrays either copy before sending or set `arr.flags.writeable = False`.
 
 ### FastAPI
 
-`pekko_py.fastapi.Actors` owns an `ActorSystem` for the life of a FastAPI app and hands it to routes as a typed dependency, so `ask` replies are type-checked all the way to the response. An `AskTimeoutError` that escapes a route becomes a 504. Needs the `web` extra.
+`pekko_py.ext.fastapi.Actors` owns an `ActorSystem` for the life of a FastAPI app and hands it to routes as a typed dependency, so `ask` replies are type-checked all the way to the response. An `AskTimeoutError` that escapes a route becomes a 504. Needs the `web` extra.
 
 ```python
 from fastapi import FastAPI
-from pekko_py.fastapi import Actors
+from pekko_py.ext.fastapi import Actors
 
 actors = Actors(counter(), "web")
 app = FastAPI(lifespan=actors.lifespan)
@@ -444,7 +444,7 @@ Inside a WebSocket route the same dependency works, and the connection actor pat
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
 | `system.ignoreRef` | `system.ignore_ref` |
 | (none) | `batching(max_n, max_wait, handle)` |
-| (none) | `pekko_py.shm.SharedArray`, a picklable handle to an array in shared memory |
+| (none) | `pekko_py.ext.shm.SharedArray`, a picklable handle to an array in shared memory |
 
 ## Runtime model
 
@@ -492,7 +492,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - `ctx.stop(child, after_pending=True)` queues the stop behind the child's pending messages, like classic Pekko's `PoisonPill`; Pekko Typed has no public equivalent. `Sharding` uses it so passivation never drops a message the region already forwarded.
 - Persistence is pekko-py's own shape, not `DurableStateBehavior`, and there is no event sourcing; see "How this differs from Apache Pekko persistence" in the Tour. The default codec is pickle; Pekko uses its serialization extension.
 - `Sharding.init` is `ClusterSharding`'s region and Shard on one node, with no coordinator; `ClusterSharding(system).init` adds the coordinator, remote homes and rebalancing. The single-node region ref is passed to `entity_ref_for` explicitly since there is no extension registry; `with_passivate_after` and `with_buffer_size` replace Pekko's passivation and buffer-size settings, with idle checked on a tick of half the timeout as in Pekko, so an entity passivates between one and one and a half timeouts after its last message; and the region answers `GetShardRegionState` itself rather than through a separate query ref.
-- `pekko_py.fastapi` is not in Pekko; it is the lifespan, dependency and 504 mapping that every FastAPI app over actors otherwise writes by hand.
+- `pekko_py.ext.fastapi` is not in Pekko; it is the lifespan, dependency and 504 mapping that every FastAPI app over actors otherwise writes by hand.
 - `batching` is not in Pekko. It flushes a pending batch in `PostStop` and keeps the batch in a closure-local list.
 - Only local refs can be watched. A bridge to a JVM Apache Pekko system over TCP is possible but deferred until there is a caller for it.
 - `SharedArray` ownership is a convention: whoever holds the handle owns the segment, sending it transfers ownership, and the owner calls `unlink()` once. A process that crashes while owning a segment leaks it. On Python 3.13+ the resource tracker is bypassed; on 3.12 expect its warnings.
@@ -521,6 +521,8 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra and run under uvicorn: `uv run --extra web uvicorn examples.fastapi_carts:app --port 8000`.
 
 ## Development
+
+Layout follows Apache Pekko's modules: `pekko_py` is the actor core, `pekko_py.remote` the transport and serialization, `pekko_py.cluster` membership and the singleton, `pekko_py.cluster.sharding` the Shard, region and coordinator, `pekko_py.ext` the FastAPI and shared-memory integrations. Every public name is importable from `pekko_py` and from its own subpackage.
 
 ```
 pytest      # every test fails if any asyncio task outlives it

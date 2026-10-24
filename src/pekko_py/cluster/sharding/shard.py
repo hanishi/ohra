@@ -16,11 +16,11 @@ from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import quote
 
-from .behavior import Behavior, Behaviors
-from .context import ActorContext
-from .ref import ActorRef
-from .serialization import remotable
-from .signals import PostStop, Signal, Terminated
+from ...behavior import Behavior, Behaviors
+from ...context import ActorContext
+from ...ref import ActorRef
+from ...remote.serialization import remotable
+from ...signals import PostStop, Signal, Terminated
 
 
 def _child_name(entity_id: str) -> str:

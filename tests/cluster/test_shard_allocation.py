@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pekko_py.cluster.cluster import CurrentClusterState
+from pekko_py.cluster.core import CurrentClusterState
 from pekko_py.cluster.gossip import Member, MemberStatus
 from pekko_py.cluster.sharding import (
     CoordinatorState,

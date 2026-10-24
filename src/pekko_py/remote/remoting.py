@@ -21,7 +21,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .ref import ActorRef, LocalRef
+from ..ref import ActorRef, LocalRef
 from .serialization import Json, Serialization, SerializationError, remotable
 
 _log = logging.getLogger("pekko_py.remote")
@@ -29,8 +29,8 @@ MAX_FRAME = 16 * 2**20
 QUEUE_BOUND = 1000  # frames held for a peer while its connection is being opened
 
 if TYPE_CHECKING:
-    from .cell import ActorCell
-    from .system import ActorSystem
+    from ..cell import ActorCell
+    from ..system import ActorSystem
 
 
 @remotable

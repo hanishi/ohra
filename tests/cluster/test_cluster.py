@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 
 from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
-from pekko_py.cluster.cluster import (
+from pekko_py.cluster.core import (
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
@@ -35,7 +35,7 @@ from pekko_py.patterns import ask
 from pekko_py.ref import FunctionRef
 from pekko_py.cluster.gossip import Gossip, Member
 from pekko_py.remote import Address, UniqueAddress
-from pekko_py.serialization import Json
+from pekko_py.remote.serialization import Json
 
 from ..util import eventually, free_port
 

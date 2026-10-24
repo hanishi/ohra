@@ -14,7 +14,7 @@ import typing
 from collections.abc import Callable, Iterable
 from typing import Any, cast
 
-from .ref import ActorRef
+from ..ref import ActorRef
 
 type Json = None | bool | int | float | str | list["Json"] | dict[str, "Json"]
 
@@ -53,7 +53,7 @@ class Serialization:
         if value is None or isinstance(value, bool | int | float | str):
             return value
         if isinstance(value, ActorRef):
-            from .sharding import EntityRef  # an EntityRef is a region plus an id; the other node rebuilds it
+            from ..cluster.sharding.shard import EntityRef  # an EntityRef is a region plus an id; the other node rebuilds it
 
             if isinstance(value, EntityRef):
                 entity = cast(EntityRef[Any], value)
@@ -88,7 +88,7 @@ class Serialization:
             return resolve(ref)
         entity_id, region = data.get("$entity"), data.get("$region")
         if isinstance(entity_id, str) and isinstance(region, str):
-            from .sharding import EntityRef
+            from ..cluster.sharding.shard import EntityRef
 
             return cast(object, EntityRef[Any](resolve(region), entity_id))
         manifest = data.get("$type")

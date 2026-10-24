@@ -15,7 +15,7 @@ from ..cell import is_local_actor
 from ..ref import ActorRef
 from ..remote import Address, UniqueAddress
 from ..result import Failure, Try
-from ..serialization import remotable
+from ..remote.serialization import remotable
 from ..signals import PostStop, Signal
 from .failure_detector import FailureDetectorRegistry, HeartbeatNodeRing, HeartbeatSenderState, PhiAccrualFailureDetector
 from .gossip import (

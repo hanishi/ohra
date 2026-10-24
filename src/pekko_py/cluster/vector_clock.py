@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ..serialization import remotable
+from ..remote.serialization import remotable
 
 type Ordering = Literal["same", "before", "after", "concurrent"]
 

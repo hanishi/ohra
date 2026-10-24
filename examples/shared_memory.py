@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py.shm import SharedArray
+from pekko_py.ext.shm import SharedArray
 
 N = 50_000_000  # doubles: 400MB
 

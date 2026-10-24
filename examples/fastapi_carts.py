@@ -37,7 +37,7 @@ from pekko_py import (
     SqliteStore,
     ask,
 )
-from pekko_py.fastapi import Actors
+from pekko_py.ext.fastapi import Actors
 
 IDLE_TIMEOUT = 30.0  # seconds without a request before a cart entity is passivated
 store = SqliteStore[dict[str, int]](os.environ.get("CARTS_DB", str(Path(__file__).with_name("carts.db"))))

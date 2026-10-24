@@ -10,7 +10,7 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Success, Try
-from pekko_py.shm import SharedArray
+from pekko_py.ext.shm import SharedArray
 
 
 def total_in_worker(handle: SharedArray) -> float:

@@ -8,7 +8,7 @@ from functools import cached_property
 from typing import Literal
 
 from ..remote import UniqueAddress
-from ..serialization import remotable
+from ..remote.serialization import remotable
 
 type ReachabilityStatus = Literal["reachable", "unreachable", "terminated"]
 

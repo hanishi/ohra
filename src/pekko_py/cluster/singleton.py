@@ -13,10 +13,10 @@ from ..behavior import Behavior, Behaviors, Stopped
 from ..context import ActorContext
 from ..ref import ActorRef
 from ..remote import Address, UniqueAddress
-from ..serialization import remotable
+from ..remote.serialization import remotable
 from ..signals import PostStop, Signal
 from ..supervision import SupervisorStrategy
-from .cluster import (
+from .core import (
     Cluster,
     ClusterDomainEvent,
     MemberDowned,
@@ -26,7 +26,7 @@ from .cluster import (
     MemberUp,
     SelfUp,
 )
-from .cluster import Subscribe as ClusterSubscribe
+from .core import Subscribe as ClusterSubscribe
 from .gossip import UP_NUMBER_UNSET, Member
 
 if TYPE_CHECKING:

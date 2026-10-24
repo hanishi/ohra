@@ -24,10 +24,10 @@ from pekko_py import (
     ask,
     remotable,
 )
-from pekko_py.cluster.cluster import Cluster, Down, Leave, MemberRemoved, Subscribe
+from pekko_py.cluster.core import Cluster, Down, Leave, MemberRemoved, Subscribe
 from pekko_py.ref import FunctionRef
 from pekko_py.remote import Address
-from pekko_py.serialization import Json
+from pekko_py.remote.serialization import Json
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node, unreachable_ports

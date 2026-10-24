@@ -418,7 +418,7 @@ async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
 import zlib  # noqa: E402
 
 from pekko_py.ref import FunctionRef  # noqa: E402
-from pekko_py.sharding import ClusterShardingSettings, HandOff, ShardStopped, shard_id_of  # noqa: E402
+from pekko_py.cluster.sharding import ClusterShardingSettings, HandOff, ShardStopped, shard_id_of  # noqa: E402
 
 
 def test_shard_id_is_stable_and_bounded():

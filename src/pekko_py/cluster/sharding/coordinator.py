@@ -4,52 +4,33 @@ coordinator rebuilds its state from the regions' registrations instead of distri
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
-from ..behavior import Behavior, Behaviors
-from ..context import ActorContext
-from ..ref import ActorRef
-from ..remote import Address, UniqueAddress
-from ..serialization import Serialization
-from ..cell import is_local_actor
-from ..signals import PostStop, Signal
-from ..supervision import SupervisorStrategy
-from ..sharding import (
+from ...behavior import Behavior, Behaviors
+from ...context import ActorContext
+from ...ref import ActorRef
+from ...remote import Address, UniqueAddress
+from ...remote.serialization import Serialization
+from ...cell import is_local_actor
+from ...signals import PostStop, Signal
+from .shard import (
     ClusterShardingSettings,
-    CurrentShardRegionState,
-    Entity,
-    EntityRef,
-    EntityTypeKey,
-    GetShardRegionState,
     HandOff,
-    ShardingEnvelope,
     ShardStopped,
-    _aggregate_shard_states,  # pyright: ignore[reportPrivateUsage]
-    shard_behavior,
-    shard_id_of,
 )
-from .cluster import (
+from ..core import (
     Cluster,
     ClusterDomainEvent,
     CurrentClusterState,
-    MemberDowned,
-    MemberEvent,
     MemberExited,
     MemberLeft,
     MemberRemoved,
     MemberUp,
 )
-from .cluster import Subscribe as ClusterSubscribe
-from .gossip import Member
-from .singleton import ClusterSingleton, SingletonActor
-from .singleton import _manager_name  # pyright: ignore[reportPrivateUsage]
-
-if TYPE_CHECKING:
-    from ..cell import ActorCell
-    from ..system import ActorSystem
+from ..core import Subscribe as ClusterSubscribe
+from ..gossip import Member
 
 _LEAVING_STATUSES = frozenset({"leaving", "exiting", "down"})
 _JOINING_STATUSES = frozenset({"joining", "weakly_up"})
@@ -272,6 +253,7 @@ for _cls in (Register, RegisterAck, GetShardHome, ShardHome, ShardHomes, HostSha
     Serialization.register(_cls, f"Sharding.{_cls.__name__}")  # the Receptionist already owns the manifest "Register"
 
 
+
 # --- internal messages -----------------------------------------------------------------------------------------
 
 
@@ -296,23 +278,6 @@ class _RebalanceDone:
 
 
 @dataclass(frozen=True)
-class _Retry: ...
-
-
-@dataclass(frozen=True)
-class _RegisterRetry: ...
-
-
-@dataclass(frozen=True)
-class _ShardTerminated:
-    shard: str
-
-
-@dataclass(frozen=True)
-class _SelfExiting: ...
-
-
-@dataclass(frozen=True)
 class _RegionTerminatedForWorker:
     region: str
 
@@ -331,23 +296,6 @@ class _RegionStopped:
 class _HandOffTimeout: ...
 
 
-class _ExitingProgress:
-    """The region's exiting task: ask the region to shut down gracefully and wait until it holds nothing."""
-
-    def __init__(self) -> None:
-        self.future: asyncio.Future[None] | None = None
-
-    def task(self, cluster: Cluster, region: ActorRef[Any]) -> Callable[[], Awaitable[None]]:
-        async def run() -> None:
-            if cluster.is_terminated or cluster.self_member.status == "down":
-                return
-            region.tell(_SelfExiting())
-            if self.future is not None:
-                await asyncio.shield(self.future)
-
-        return run
-
-
 _OF_INTEREST = frozenset({"up", "leaving", "exiting"})  # Pekko's memberStatusOfInterest for coordinator placement
 
 
@@ -356,7 +304,7 @@ def _is_at(ref_or_path: ActorRef[Any] | str, address: Address) -> bool:
     return path.startswith(address.root + "/")
 
 
-def _by_age(members: Iterable[Member]) -> list[Member]:
+def by_age(members: Iterable[Member]) -> list[Member]:
     ordered: list[Member] = []
     for m in members:
         i = 0
@@ -687,290 +635,9 @@ class _Coordinator:
             self.get_shard_home(shard, asker)
 
 
-def _coordinator(type_name: str, settings: ClusterShardingSettings) -> Behavior[Any]:
+def coordinator_behavior(type_name: str, settings: ClusterShardingSettings) -> Behavior[Any]:
     return Behaviors.setup(lambda ctx: _Coordinator(ctx, type_name, settings).behavior())
 
 
 # --- the region (ShardRegion) -----------------------------------------------------------------------------------
 
-
-class _Region:
-    def __init__(self, ctx: ActorContext[Any], entity: Entity[Any], settings: ClusterShardingSettings, progress: _ExitingProgress) -> None:
-        self.ctx = ctx
-        self.entity = entity
-        self.settings = settings
-        self.progress = progress
-        progress.future = asyncio.get_running_loop().create_future()
-        self.type_name = entity.type_key.name
-        self.log = ctx.log
-        self.cluster = Cluster(ctx.system)
-        self.members_by_age: list[Member] = []
-        self.coordinator: ActorRef[Any] | None = None
-        self.shards: dict[str, ActorRef[Any]] = {}
-        self.region_by_shard: dict[str, ActorRef[Any]] = {}
-        self.shard_buffers: dict[str, deque[ShardingEnvelope[Any]]] = {}
-        self.buffered = 0
-        self.next_registration_delay = max(0.1, settings.retry_interval / 8)
-        self.graceful_shutdown_in_progress = False
-        self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
-        ctx.timers.start_timer_with_fixed_delay("retry", _Retry(), settings.retry_interval)
-
-    # --- coordinator location -----------------------------------------------------------------------------------------
-
-    def coordinator_path(self, member: Member) -> str:
-        return f"{member.address.root}/system/{_manager_name(f'{self.type_name}Coordinator')}/singleton"
-
-    def change_members(self, new_members: list[Member]) -> None:
-        before = self.members_by_age[0].unique_address if self.members_by_age else None
-        self.members_by_age = new_members
-        after = new_members[0].unique_address if new_members else None
-        if before != after:
-            self.log.info("%s: Coordinator moved from [%s] to [%s]", self.type_name, before, after)
-            self.coordinator = None
-            self.start_registration()
-
-    def start_registration(self) -> None:
-        self.next_registration_delay = max(0.1, self.settings.retry_interval / 8)
-        self.register()
-        self.schedule_next_registration()
-
-    def schedule_next_registration(self) -> None:
-        if self.next_registration_delay < self.settings.retry_interval:
-            self.ctx.timers.start_single_timer("register-retry", _RegisterRetry(), self.next_registration_delay)
-            self.next_registration_delay *= 2
-
-    def coordinator_selection(self) -> list[Member]:
-        """Pekko's coordinatorSelection: the members by age up to and including the first Up one, since the
-        coordinator may still be on an older member that is leaving."""
-        selected: list[Member] = []
-        for m in self.members_by_age:
-            selected.append(m)
-            if m.status == "up":
-                break
-        return selected
-
-    def register(self) -> None:
-        for m in self.coordinator_selection():
-            try:
-                coordinator = self.ctx.system.resolve(self.coordinator_path(m))
-            except LookupError:  # the local singleton instance is not up yet: the next retry asks again
-                continue
-            coordinator.tell(Register(self.ctx.self, tuple(self.shards)))
-
-    # --- delivery -----------------------------------------------------------------------------------------------------
-
-    def shard_for(self, shard: str) -> ActorRef[Any]:
-        ref = self.shards.get(shard)
-        if ref is None:
-            ref = self.ctx.spawn(shard_behavior(self.entity, shard, self.ctx.self), shard)
-            self.ctx.watch_with(ref, _ShardTerminated(shard))
-            self.shards[shard] = ref
-        return ref
-
-    def deliver(self, envelope: ShardingEnvelope[Any]) -> None:
-        shard = shard_id_of(envelope.entity_id, self.settings.number_of_shards)
-        home = self.region_by_shard.get(shard)
-        if home is None:
-            self.buffer(shard, envelope)
-            if self.coordinator is not None and len(self.shard_buffers[shard]) == 1:
-                self.coordinator.tell(GetShardHome(shard, self.ctx.self))
-        elif home.path == self.ctx.self.path:
-            self.shard_for(shard).tell(envelope)
-        else:
-            home.tell(envelope)
-
-    def buffer(self, shard: str, envelope: ShardingEnvelope[Any]) -> None:
-        if self.buffered >= self.settings.buffer_size:
-            self.log.warning("%s: buffer is full, dropping message for shard [%s]", self.type_name, shard)
-            self.ctx.system.dead_letter(envelope, self.ctx.self)
-            return
-        self.shard_buffers.setdefault(shard, deque()).append(envelope)
-        self.buffered += 1
-
-    def deliver_buffered(self, shard: str, receiver: ActorRef[Any]) -> None:
-        for envelope in self.shard_buffers.pop(shard, ()):
-            self.buffered -= 1
-            receiver.tell(envelope)
-
-    def receive_shard_home(self, shard: str, region: ActorRef[Any]) -> None:
-        current = self.region_by_shard.get(shard)
-        if current is not None and current.path == self.ctx.self.path and region.path != self.ctx.self.path:
-            # Pekko throws here because distributed data makes it impossible; without it a registration that
-            # arrives after the coordinator's gate opened can lose a shard it hosts: hand the local copy off
-            self.log.error("%s: shard [%s] moved from self to [%s]; stopping the local copy", self.type_name, shard, region.path)
-            local = self.shards.get(shard)
-            if local is not None:
-                local.tell(HandOff(shard, self.ctx.system.ignore_ref))
-            for envelope in self.shard_buffers.pop(shard, ()):
-                self.buffered -= 1
-                self.ctx.system.dead_letter(envelope, self.ctx.self)
-        self.region_by_shard[shard] = region
-        if region.path == self.ctx.self.path:
-            self.deliver_buffered(shard, self.shard_for(shard))
-        else:
-            self.deliver_buffered(shard, region)
-
-    def request_shard_buffer_homes(self) -> None:
-        if self.coordinator is not None:
-            for shard in self.shard_buffers:
-                self.coordinator.tell(GetShardHome(shard, self.ctx.self))
-
-    # --- the behavior ---------------------------------------------------------------------------------------------
-
-    def behavior(self) -> Behavior[Any]:
-        def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
-            if isinstance(msg, ShardingEnvelope):
-                envelope = cast(ShardingEnvelope[Any], msg)
-                if not envelope.entity_id:
-                    self.ctx.system.dead_letter(envelope.message, self.ctx.self)
-                else:
-                    self.deliver(envelope)
-                return Behaviors.stopped() if self.try_complete_graceful_shutdown() else Behaviors.same
-            match msg:
-                case GetShardRegionState(reply_to):
-                    if not self.shards:
-                        reply_to.tell(CurrentShardRegionState(frozenset()))
-                    else:
-                        self.ctx.spawn_anonymous(_aggregate_shard_states(list(self.shards.values()), reply_to, self.settings.shard_region_query_timeout))
-                case MemberUp(member=m) | MemberLeft(member=m) | MemberExited(member=m):
-                    self.change_members(_by_age([x for x in self.members_by_age if x.unique_address != m.unique_address] + [m]))
-                case MemberRemoved(member=m) if m.unique_address == self.cluster.self_unique_address:
-                    return Behaviors.stopped()
-                case MemberDowned(member=m) if m.unique_address == self.cluster.self_unique_address:
-                    return Behaviors.stopped()
-                case MemberRemoved(member=m):
-                    for shard in [s for s, r in self.region_by_shard.items() if r.path != self.ctx.self.path and _is_at(r, m.address)]:
-                        del self.region_by_shard[shard]
-                    self.change_members([x for x in self.members_by_age if x.unique_address != m.unique_address])
-                case MemberEvent():
-                    pass
-                case RegisterAck(coordinator):
-                    self.coordinator = coordinator
-                    self.ctx.timers.cancel("register-retry")
-                    self.request_shard_buffer_homes()
-                case CoordinatorStopped(coordinator):
-                    if self.coordinator is not None and self.coordinator.path == coordinator.path:
-                        self.coordinator = None
-                        self.start_registration()
-                case HostShard(shard, reply_to):
-                    if self.graceful_shutdown_in_progress:
-                        self.send_graceful_shutdown_to_coordinator()
-                    else:
-                        self.region_by_shard[shard] = self.ctx.self
-                        self.shard_for(shard)
-                        reply_to.tell(ShardStarted(shard))
-                        self.deliver_buffered(shard, self.shards[shard])
-                case ShardHome(shard, region):
-                    self.receive_shard_home(shard, region)
-                case ShardHomes(homes):
-                    for region, shards in homes:
-                        for shard in shards:
-                            self.receive_shard_home(shard, region)
-                case BeginHandOff(shard, reply_to):
-                    self.region_by_shard.pop(shard, None)
-                    reply_to.tell(BeginHandOffAck(shard, self.ctx.self))
-                case HandOff(shard, reply_to):
-                    dropped = self.shard_buffers.pop(shard, None)
-                    if dropped:  # Pekko: avoid reordering buffered messages across a hand-off
-                        self.buffered -= len(dropped)
-                        for envelope in dropped:
-                            self.ctx.system.dead_letter(envelope, self.ctx.self)
-                    local = self.shards.get(shard)
-                    if local is not None:
-                        local.tell(msg)
-                    else:
-                        reply_to.tell(ShardStopped(shard))
-                case _ShardTerminated(shard):
-                    self.shards.pop(shard, None)
-                    if self.region_by_shard.get(shard) is not None and self.region_by_shard[shard].path == self.ctx.self.path:
-                        del self.region_by_shard[shard]
-                case _Retry():
-                    if self.coordinator is None:
-                        self.register()
-                    else:
-                        self.request_shard_buffer_homes()
-                    if self.graceful_shutdown_in_progress:
-                        self.send_graceful_shutdown_to_coordinator()
-                case _RegisterRetry():
-                    if self.coordinator is None:
-                        self.register()
-                        self.schedule_next_registration()
-                case _SelfExiting():
-                    self.graceful_shutdown_in_progress = True
-                    self.send_graceful_shutdown_to_coordinator()
-                case _:
-                    pass
-            return Behaviors.stopped() if self.try_complete_graceful_shutdown() else Behaviors.same
-
-        def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
-            if sig is PostStop:
-                self.exiting_done()
-            return Behaviors.same
-
-        return Behaviors.receive(on_message).receive_signal(on_signal)
-
-    def send_graceful_shutdown_to_coordinator(self) -> None:
-        if self.graceful_shutdown_in_progress and self.coordinator is not None:
-            self.coordinator.tell(GracefulShutdownReq(self.ctx.self))
-
-    def try_complete_graceful_shutdown(self) -> bool:
-        """Pekko's tryCompleteGracefulShutdownIfInProgress: every shard handed off and nothing buffered."""
-        if self.graceful_shutdown_in_progress and not self.shards and not self.shard_buffers:
-            self.exiting_done()
-            return True
-        return False
-
-    def exiting_done(self) -> None:
-        if self.progress.future is not None and not self.progress.future.done():
-            self.progress.future.set_result(None)
-
-
-def _region(entity: Entity[Any], settings: ClusterShardingSettings, progress: _ExitingProgress) -> Behavior[Any]:
-    behavior: Behavior[Any] = Behaviors.setup(lambda ctx: _Region(ctx, entity, settings, progress).behavior())
-    return Behaviors.supervise(behavior).on_failure(SupervisorStrategy.restart())  # as under Pekko's system guardian
-
-
-# --- the extension -------------------------------------------------------------------------------------------------
-
-
-class ClusterSharding:
-    """``ClusterSharding(system).init(Entity(key, create))`` returns the region ref; ``entity_ref_for(key, id)``
-    addresses an entity wherever it lives, as Pekko Typed."""
-
-    system: ActorSystem[Any]
-    _regions: dict[str, ActorRef[Any]]
-    _parent: ActorCell[Any] | None
-
-    def __new__(cls, system: ActorSystem[Any]) -> ClusterSharding:
-        if system.cluster is None:
-            raise RuntimeError(f"system {system.name!r} has no cluster: pass cluster=ClusterSettings(...) to ActorSystem")
-        if system.cluster_sharding is None:
-            self = object.__new__(cls)
-            self.system = system
-            self._regions = {}
-            self._parent = None
-            system.cluster_sharding = self
-        return system.cluster_sharding
-
-    def init[M](self, entity: Entity[M]) -> ActorRef[ShardingEnvelope[M]]:
-        name = entity.type_key.name
-        existing = self._regions.get(name)
-        if existing is not None:
-            return existing
-        settings = entity.effective_settings
-        if self._parent is None:
-            self._parent = self.system._system_root.spawn_child(Behaviors.empty, "sharding", None)  # pyright: ignore[reportPrivateUsage]
-        progress = _ExitingProgress()
-        region = self._parent.spawn_child(_region(entity, settings, progress), name, None)
-        Cluster(self.system).add_exiting_task(progress.task(Cluster(self.system), region.ref))
-        ClusterSingleton(self.system).init(SingletonActor(_coordinator(name, settings), f"{name}Coordinator").with_stop_message(_Terminate()))
-        self._regions[name] = region.ref
-        return region.ref
-
-    def entity_ref_for[M](self, key: EntityTypeKey[M], entity_id: str) -> EntityRef[M]:
-        region = self._regions.get(key.name)
-        if region is None:
-            raise LookupError(f"ClusterSharding.init was not called for {key.name!r} on this node")
-        if not entity_id:
-            raise ValueError("entity id must not be empty")
-        return EntityRef(region, entity_id)

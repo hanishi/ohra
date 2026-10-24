@@ -80,7 +80,7 @@ async def ask_infers_the_reply_type(pinger: ActorRef[Ping]) -> None:
 
 
 def fastapi_dependency_is_typed() -> None:
-    from pekko_py.fastapi import Actors
+    from pekko_py.ext.fastapi import Actors
 
     actors = Actors(_b, "web")
     system: ActorSystem[Ping] = actors.depends()

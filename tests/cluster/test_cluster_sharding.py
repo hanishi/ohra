@@ -28,9 +28,9 @@ from pekko_py import (
     ask,
     remotable,
 )
-from pekko_py.cluster.cluster import Cluster, Down, Leave
+from pekko_py.cluster.core import Cluster, Down, Leave
 from pekko_py.remote import Address
-from pekko_py.serialization import Json
+from pekko_py.remote.serialization import Json
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node, unreachable_ports
@@ -258,7 +258,7 @@ async def test_shards_of_an_unreachable_node_wait_for_its_removal():
 
 # --- rebalance, hand-off and graceful leave (Task 4) --------------------------------------------------------
 
-from pekko_py.sharding import shard_id_of  # noqa: E402
+from pekko_py.cluster.sharding import shard_id_of  # noqa: E402
 
 
 async def shards_on(region: ActorRef[Any]) -> frozenset[str]:
@@ -471,7 +471,7 @@ async def test_late_registration_after_a_coordinator_move_is_resolved():
 async def test_a_failed_region_restarts_and_recovers():
     from typing import cast
 
-    from pekko_py.cluster.sharding import HostShard
+    from pekko_py.cluster.sharding.coordinator import HostShard
 
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:

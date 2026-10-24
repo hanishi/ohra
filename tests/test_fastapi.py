@@ -1,4 +1,4 @@
-"""pekko_py.fastapi: an ActorSystem owned by the app's lifespan, reached through a typed dependency."""
+"""pekko_py.ext.fastapi: an ActorSystem owned by the app's lifespan, reached through a typed dependency."""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +13,7 @@ from fastapi import FastAPI  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors  # noqa: E402
-from pekko_py.fastapi import Actors  # noqa: E402
+from pekko_py.ext.fastapi import Actors  # noqa: E402
 
 
 @dataclass(frozen=True)

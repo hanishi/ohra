@@ -12,10 +12,10 @@ from .cell import ActorCell
 from .mailbox import MailboxSelector
 from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
-from .remote import Remoting, UniqueAddress, resolve_local, unique_address
+from .remote.remoting import Remoting, UniqueAddress, resolve_local, unique_address
 
 if TYPE_CHECKING:
-    from .cluster.cluster import Cluster, ClusterSettings
+    from .cluster.core import Cluster, ClusterSettings
     from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
@@ -59,7 +59,7 @@ class ActorSystem[T](ActorRef[T]):
         self.cluster_sharding: ClusterSharding | None = None
         """The cluster sharding extension, reached as ``ClusterSharding(system)``."""
         if cluster is not None:
-            from .cluster.cluster import Cluster as _Cluster
+            from .cluster.core import Cluster as _Cluster
 
             self.cluster = _Cluster._start(self, cluster)  # pyright: ignore[reportPrivateUsage]
         from .receptionist import Receptionist as _Receptionist

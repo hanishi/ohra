@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .behavior import Behavior, Behaviors
-from .cluster.cluster import (
+from .cluster.core import (
     ClusterDomainEvent,
     MemberEvent,
     MemberRemoved,
@@ -17,12 +17,12 @@ from .cluster.cluster import (
     ReachableMember,
     UnreachableMember,
 )
-from .cluster.cluster import Subscribe as ClusterSubscribe
+from .cluster.core import Subscribe as ClusterSubscribe
 from .cell import is_local_actor
 from .context import ActorContext
 from .ref import ActorRef, LocalRef
 from .remote import Address, RemoteRef, UniqueAddress
-from .serialization import remotable
+from .remote.serialization import remotable
 
 if TYPE_CHECKING:
     from .system import ActorSystem
@@ -235,7 +235,7 @@ class _Replication:
     """The cluster part: rows by owner, pushed to the other members and pruned by membership events."""
 
     def __init__(self, ctx: ActorContext[_Msg], system: ActorSystem[Any]) -> None:
-        from .cluster.cluster import Cluster
+        from .cluster.core import Cluster
 
         self.ctx = ctx
         self.system = system

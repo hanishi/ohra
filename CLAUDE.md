@@ -15,10 +15,15 @@ Pekko Typed semantics on asyncio. Read README.md first, especially the runtime m
 - Public API names follow Pekko's Scala DSL in snake_case. Document every intentional deviation in the README.
 
 ## Layout
+`src/pekko_py/` is the core, Pekko's actor-typed module; subpackages follow Pekko's module split.
 - `behavior.py`: behavior values and the `Behaviors` factory.
 - `cell.py`: the runtime, including the message loop, interpretation, supervision, and lifecycle. Most work happens here.
 - `context.py`: `ActorContext`, a thin facade over the cell.
-- `ref.py`, `patterns.py`, `system.py`, `signals.py`, `supervision.py`, `result.py`.
+- `ref.py`, `patterns.py`, `routers.py`, `system.py`, `signals.py`, `supervision.py`, `mailbox.py`, `result.py`, `receptionist.py`, `persistence.py`.
+- `remote/`: `remoting.py` (transport, addresses, `RemoteRef`) and `serialization.py` (`@remotable`).
+- `cluster/`: `core.py` (the membership daemon and the `Cluster` extension), its internals `gossip.py`, `reachability.py`, `vector_clock.py`, `failure_detector.py`, then `singleton.py` and `sharding/` (`shard.py`: the Shard actor and the single-node `Sharding`; `coordinator.py`; `region.py`; the `ClusterSharding` extension in `__init__.py`).
+- `ext/`: `fastapi.py` and `shm.py`, integrations that are not part of Pekko.
+- Public names are importable from `pekko_py`, and also from the subpackage they belong to (`pekko_py.cluster`, `pekko_py.cluster.sharding`, `pekko_py.remote`).
 
 ## Style
 - Python 3.12 generics syntax (`class X[T]`, `type A = ...`).

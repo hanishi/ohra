@@ -8,7 +8,7 @@ import pytest
 
 from pekko_py import ActorRef
 from pekko_py.ref import FunctionRef
-from pekko_py.serialization import Serialization, SerializationError, remotable
+from pekko_py.remote.serialization import Serialization, SerializationError, remotable
 
 
 @remotable

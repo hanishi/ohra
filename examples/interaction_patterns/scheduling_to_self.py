@@ -30,6 +30,7 @@ class Batch:
 
 def buncher(target: ActorRef[Batch], after: float, max_size: int) -> Behavior[Command]:
     def with_timers(timers: TimerScheduler[Command]) -> Behavior[Command]:
+        @Behaviors.receive_message
         def idle(msg: Command) -> Behavior[Command]:
             match msg:
                 case ExcitingMessage():
@@ -39,22 +40,23 @@ def buncher(target: ActorRef[Batch], after: float, max_size: int) -> Behavior[Co
                     return Behaviors.same
 
         def active(buffer: tuple[ExcitingMessage, ...]) -> Behavior[Command]:
+            @Behaviors.receive_message
             def on_message(msg: Command) -> Behavior[Command]:
                 match msg:
                     case _Timeout():
                         target.tell(Batch(buffer))
-                        return Behaviors.receive_message(idle)
+                        return idle
                     case ExcitingMessage():
                         new_buffer = (*buffer, msg)
                         if len(new_buffer) == max_size:
                             timers.cancel("timeout")
                             target.tell(Batch(new_buffer))
-                            return Behaviors.receive_message(idle)
+                            return idle
                         return active(new_buffer)
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        return Behaviors.receive_message(idle)
+        return idle
 
     return Behaviors.with_timers(with_timers)
 
@@ -71,11 +73,12 @@ def ticker(period: float) -> Behavior[Tick]:
     def with_timers(timers: TimerScheduler[Tick]) -> Behavior[Tick]:
         timers.start_timer_with_fixed_delay("tick", Tick(), period)
 
+        @Behaviors.receive_message
         def on_tick(_: Tick) -> Behavior[Tick]:
             print("tick")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_tick)
+        return on_tick
 
     return Behaviors.with_timers(with_timers)
 
@@ -83,11 +86,12 @@ def ticker(period: float) -> Behavior[Tick]:
 async def main() -> None:
     received: list[Batch] = []
 
+    @Behaviors.receive_message
     def collect(batch: Batch) -> Behavior[Batch]:
         received.append(batch)
         return Behaviors.same
 
-    sink = Behaviors.receive_message(collect)
+    sink = collect
     async with ActorSystem(sink, "sink") as sink_system, ActorSystem(buncher(sink_system, 0.1, 10), "buncher") as b:
         b.tell(ExcitingMessage("one"))
         b.tell(ExcitingMessage("two"))

@@ -104,6 +104,7 @@ type PredictorCmd = Predict | UseModel
 
 
 def predictor(learner: ActorRef["Predicted"]) -> Behavior[PredictorCmd]:
+    @Behaviors.setup
     def setup(_ctx: ActorContext[PredictorCmd]) -> Behavior[PredictorCmd]:
         current = [untrained()]  # the batching handler is a closure, so the live model lives in a cell
         ids = itertools.count(1)
@@ -133,7 +134,7 @@ def predictor(learner: ActorRef["Predicted"]) -> Behavior[PredictorCmd]:
 
         return batching(BATCH_MAX_N, BATCH_MAX_WAIT, handle)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- learner: closes the loop --------------------------------------------------------------------
@@ -197,6 +198,7 @@ class Stats:
 
 
 def learner(predict_ref: Callable[[], ActorRef[UseModel]]) -> Behavior[LearnerCmd]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[LearnerCmd]) -> Behavior[LearnerCmd]:
         ctx.timers.start_timer_with_fixed_delay("step", _Step(), STEP_EVERY)
         # Per-message state that is updated in place; everything else is in behavior parameters.
@@ -204,6 +206,7 @@ def learner(predict_ref: Callable[[], ActorRef[UseModel]]) -> Behavior[LearnerCm
         minibatch: list[tuple[tuple[float, ...], int]] = []
 
         def learning(model: Model, stats: Stats, stepping: bool) -> Behavior[LearnerCmd]:
+            @Behaviors.receive_message
             def on_message(msg: LearnerCmd) -> Behavior[LearnerCmd]:
                 match msg:
                     case Predicted(pid, features, prob):
@@ -238,11 +241,11 @@ def learner(predict_ref: Callable[[], ActorRef[UseModel]]) -> Behavior[LearnerCm
                         pass
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         return learning(untrained(), Stats(), stepping=False)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- guardian: wires predictor and learner, exposes one protocol to HTTP -------------------------
@@ -252,12 +255,14 @@ type Cmd = Predict | Feedback | GetModel
 
 
 def service() -> Behavior[Cmd]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         refs: dict[str, ActorRef[Any]] = {}
         lrn = ctx.spawn(learner(lambda: refs["predictor"]), "learner")  # the two refer to each other
         refs["predictor"] = ctx.spawn(predictor(lrn), "predictor")
         pred: ActorRef[Predict] = refs["predictor"]
 
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Predict():
@@ -266,9 +271,9 @@ def service() -> Behavior[Cmd]:
                     lrn.tell(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- HTTP ---------------------------------------------------------------------------------------------

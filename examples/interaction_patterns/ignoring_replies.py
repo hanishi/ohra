@@ -17,12 +17,13 @@ class Request:
 
 
 def cookie_fabric() -> Behavior[Request]:
+    @Behaviors.receive_message
     def on_message(msg: Request) -> Behavior[Request]:
         print("fabric: baking for", msg.query)
         msg.reply_to.tell(f"cookies for {msg.query}")  # goes nowhere
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def main() -> None:

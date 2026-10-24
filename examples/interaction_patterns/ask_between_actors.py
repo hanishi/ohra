@@ -22,11 +22,12 @@ class HalResponse:
 
 
 def hal() -> Behavior[OpenThePodBayDoorsPlease]:
+    @Behaviors.receive_message
     def on_message(msg: OpenThePodBayDoorsPlease) -> Behavior[OpenThePodBayDoorsPlease]:
         msg.reply_to.tell(HalResponse("I'm sorry, Dave. I'm afraid I can't do that."))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class _AdaptedResponse:  # internal to Dave
 
 
 def dave(hal_ref: ActorRef[OpenThePodBayDoorsPlease]) -> Behavior[_AdaptedResponse]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[_AdaptedResponse]) -> Behavior[_AdaptedResponse]:
         def adapt(r: Try[HalResponse]) -> _AdaptedResponse:
             match r:
@@ -53,23 +55,25 @@ def dave(hal_ref: ActorRef[OpenThePodBayDoorsPlease]) -> Behavior[_AdaptedRespon
 
         ctx.ask(hal_ref, OpenThePodBayDoorsPlease, adapt_with_id, timeout=3)
 
+        @Behaviors.receive_message
         def on_message(msg: _AdaptedResponse) -> Behavior[_AdaptedResponse]:
             ctx.log.info("Got response from hal: %s", msg.message)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")
 
+    @Behaviors.setup
     def app(ctx: ActorContext[None]) -> Behavior[None]:
         ctx.spawn(dave(ctx.spawn(hal(), "hal")), "dave")
         return Behaviors.ignore
 
-    async with ActorSystem(Behaviors.setup(app), "ask"):
+    async with ActorSystem(app, "ask"):
         await asyncio.sleep(0.01)
 
 

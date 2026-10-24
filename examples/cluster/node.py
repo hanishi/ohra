@@ -99,11 +99,12 @@ def per_id_counter(node_name: str) -> Callable[[EntityContext[CountUp]], Behavio
 
     def create(entity: EntityContext[CountUp]) -> Behavior[CountUp]:
         def active(n: int) -> Behavior[CountUp]:
+            @Behaviors.receive_message
             def on_message(msg: CountUp) -> Behavior[CountUp]:
                 msg.reply_to.tell(f"{entity.entity_id} = {n + 1} (on {node_name})")
                 return active(n + 1)
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         return active(0)
 
@@ -113,33 +114,37 @@ def per_id_counter(node_name: str) -> Callable[[EntityContext[CountUp]], Behavio
 def counter(node_name: str) -> Behavior[Hit]:
     """The singleton: one of these runs in the whole cluster, on the oldest node."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Hit]) -> Behavior[Hit]:
         count = 0
         print(f"[{node_name}] counter singleton started here")
 
+        @Behaviors.receive_message
         def on_hit(msg: Hit) -> Behavior[Hit]:
             nonlocal count
             count += 1
             msg.reply_to.tell(f"{count} (counted on {node_name})")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_hit)
+        return on_hit
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def greeter(node_name: str) -> Behavior[Greet]:
+    @Behaviors.receive_message
     def on_greet(msg: Greet) -> Behavior[Greet]:
         msg.reply_to.tell(f"hello {msg.name} from {node_name}")
         return Behaviors.same
 
-    return Behaviors.receive_message(on_greet)
+    return on_greet
 
 
 def listener(name: str) -> Behavior[Event]:
     """Registers this node's greeter, then prints what the cluster and the receptionist tell it, as the
     ClusterListener in the Apache Pekko docs."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Event]) -> Behavior[Event]:
         receptionist = Receptionist(ctx.system).ref
         receptionist.tell(Register(GREETER, ctx.spawn(greeter(name), "greeter")))
@@ -149,6 +154,7 @@ def listener(name: str) -> Behavior[Event]:
         counted = ctx.message_adapter(Counted)
         ctx.timers.start_timer_with_fixed_delay("tick", Tick(), 1.0)
 
+        @Behaviors.receive_message
         def on_event(event: Event) -> Behavior[Event]:
             match event:
                 case Tick():
@@ -169,9 +175,9 @@ def listener(name: str) -> Behavior[Event]:
                     pass
             return Behaviors.same
 
-        return Behaviors.receive_message(on_event)
+        return on_event
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def node(name: str, port: int, seed_ports: list[int]) -> ActorSystem[Event]:

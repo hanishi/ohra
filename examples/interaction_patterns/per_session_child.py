@@ -35,19 +35,21 @@ class GetWallet:
 
 
 def key_cabinet() -> Behavior[GetKeys]:
+    @Behaviors.receive_message
     def on_message(msg: GetKeys) -> Behavior[GetKeys]:
         msg.reply_to.tell(Keys())
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def drawer() -> Behavior[GetWallet]:
+    @Behaviors.receive_message
     def on_message(msg: GetWallet) -> Behavior[GetWallet]:
         msg.reply_to.tell(Wallet())
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 @dataclass(frozen=True)
@@ -64,17 +66,19 @@ class ReadyToLeaveHome:
 
 
 def home() -> Behavior[LeaveHome]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[LeaveHome]) -> Behavior[LeaveHome]:
         cabinet = ctx.spawn(key_cabinet(), "key-cabinet")
         drw = ctx.spawn(drawer(), "drawer")
 
+        @Behaviors.receive_message
         def on_message(msg: LeaveHome) -> Behavior[LeaveHome]:
             ctx.spawn(prepare_to_leave_home(msg.who, msg.reply_to, cabinet, drw), f"leaving-{msg.who}")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def prepare_to_leave_home(
@@ -83,6 +87,7 @@ def prepare_to_leave_home(
     """The session actor accepts anything, since only the replies it asked for will arrive.
     ActorRef is contravariant, so ActorRef[Any] narrows to ActorRef[Keys] and ActorRef[Wallet]."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         cabinet.tell(GetKeys(who, ctx.self))
         drw.tell(GetWallet(who, ctx.self))
@@ -92,6 +97,7 @@ def prepare_to_leave_home(
                 reply_to.tell(ReadyToLeaveHome(who, keys, wallet))
                 return Behaviors.stopped()
 
+            @Behaviors.receive_message
             def on_message(msg: Any) -> Behavior[Any]:
                 match msg:
                     case Keys():
@@ -101,11 +107,11 @@ def prepare_to_leave_home(
                     case _:
                         return Behaviors.unhandled
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         return collecting(None, None)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def main() -> None:

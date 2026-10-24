@@ -15,6 +15,7 @@ from messages import Greet, Greeted  # noqa: E402
 from pekko_py import ActorContext, ActorSystem, Behavior, Behaviors  # noqa: E402
 
 
+@Behaviors.receive
 def greeter(ctx: ActorContext[Greet], msg: Greet) -> Behavior[Greet]:
     ctx.log.info("greeting %s for %s", msg.name, msg.reply_to.path)
     msg.reply_to.tell(Greeted(f"hello {msg.name}", served_by=ctx.self.path))  # reply_to is a RemoteRef
@@ -22,7 +23,7 @@ def greeter(ctx: ActorContext[Greet], msg: Greet) -> Behavior[Greet]:
 
 
 async def main() -> None:
-    async with ActorSystem(Behaviors.receive(greeter), "greeter", address=("127.0.0.1", 2552)) as system:
+    async with ActorSystem(greeter, "greeter", address=("127.0.0.1", 2552)) as system:
         print(f"listening as {system.path}; ctrl-c to stop")
         await system.when_terminated()
 

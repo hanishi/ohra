@@ -53,6 +53,7 @@ MAX_OPERATIONS_IN_PROGRESS = 10
 
 def customer_repository(data_access: Callable[[Customer], Awaitable[None]]) -> Behavior[Command]:
     def next_behavior(in_progress: int) -> Behavior[Command]:
+        @Behaviors.receive
         def on_message(ctx: ActorContext[Command], msg: Command) -> Behavior[Command]:
             match msg:
                 case Update(value, reply_to):
@@ -73,7 +74,7 @@ def customer_repository(data_access: Callable[[Customer], Awaitable[None]]) -> B
                     reply_to.tell(result)
                     return next_behavior(in_progress - 1)
 
-        return Behaviors.receive(on_message)
+        return on_message
 
     return next_behavior(0)
 

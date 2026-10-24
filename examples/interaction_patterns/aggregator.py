@@ -42,12 +42,14 @@ def aggregator[Reply, Aggregate](
     timeout: float,
 ) -> Behavior[Command[Reply]]:
     def with_timers(timers: TimerScheduler[Command[Reply]]) -> Behavior[Command[Reply]]:
+        @Behaviors.setup
         def setup(ctx: ActorContext[Command[Reply]]) -> Behavior[Command[Reply]]:
             timers.start_single_timer("deadline", _Timeout(), timeout)
             send_requests(ctx.message_adapter(_Reply[Reply]))
             return collecting([])
 
         def collecting(replies: list[Reply]) -> Behavior[Command[Reply]]:
+            @Behaviors.receive_message
             def on_message(msg: Command[Reply]) -> Behavior[Command[Reply]]:
                 match msg:
                     case _Reply(reply):
@@ -59,9 +61,9 @@ def aggregator[Reply, Aggregate](
                 reply_to.tell(aggregate(collected))
                 return Behaviors.stopped()
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        return Behaviors.setup(setup)
+        return setup
 
     return Behaviors.with_timers(with_timers)
 
@@ -92,20 +94,22 @@ class Price:
 
 
 def hotel1(name: str, price: float, delay: float = 0.0) -> Behavior[RequestQuote]:
+    @Behaviors.receive_message
     async def on_message(msg: RequestQuote) -> Behavior[RequestQuote]:
         await asyncio.sleep(delay)
         msg.reply_to.tell(Quote(name, price))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def hotel2(name: str, cents: int) -> Behavior[RequestPrice]:
+    @Behaviors.receive_message
     def on_message(msg: RequestPrice) -> Behavior[RequestPrice]:
         msg.reply_to.tell(Price(name, cents))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,7 @@ type CustomerCmd = FindCheapest | AggregatedQuotes
 def customer(
     a: ActorRef[RequestQuote], b: ActorRef[RequestPrice], c: ActorRef[RequestQuote]
 ) -> Behavior[CustomerCmd]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[CustomerCmd], msg: CustomerCmd) -> Behavior[CustomerCmd]:
         match msg:
             case FindCheapest():
@@ -142,25 +147,27 @@ def customer(
                 ctx.log.info("%d of 3 answered in time; cheapest: %s", len(quotes), quotes[0] if quotes else "none")
         return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
+@Behaviors.setup
 def app(ctx: ActorContext[FindCheapest]) -> Behavior[FindCheapest]:
     a = ctx.spawn(hotel1("Grand", 120.0), "grand")
     b = ctx.spawn(hotel2("Budget", 7950), "budget")
     c = ctx.spawn(hotel1("Slow", 50.0, delay=1.0), "slow")  # misses the deadline
     cust = ctx.spawn(customer(a, b, c), "customer")
 
+    @Behaviors.receive_message
     def forward(msg: FindCheapest) -> Behavior[FindCheapest]:
         cust.tell(msg)
         return Behaviors.same
 
-    return Behaviors.receive_message(forward)
+    return forward
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")
-    async with ActorSystem(Behaviors.setup(app), "quotes") as system:
+    async with ActorSystem(app, "quotes") as system:
         system.tell(FindCheapest())
         await asyncio.sleep(0.3)
 

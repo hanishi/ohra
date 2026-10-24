@@ -42,9 +42,11 @@ class Ping:
 
 
 def database(up_after: float) -> Behavior[Query | Ping]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Query | Ping]) -> Behavior[Query | Ping]:
         started = asyncio.get_running_loop().time()
 
+        @Behaviors.receive_message
         async def on_message(msg: Query | Ping) -> Behavior[Query | Ping]:
             up = asyncio.get_running_loop().time() - started > up_after
             match msg:
@@ -55,9 +57,9 @@ def database(up_after: float) -> Behavior[Query | Ping]:
                     reply_to.tell(f"rows for {sql!r}")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- the client ------------------------------------------------------------------------
@@ -90,12 +92,14 @@ type Cmd = Run | Connected | Heartbeat | Answer
 
 def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
     def supervised(timers: TimerScheduler[Cmd], buffer: StashBuffer[Cmd]) -> Behavior[Cmd]:
+        @Behaviors.setup
         def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
             ctx.log.info("connecting")
             ctx.ask(db, Ping, Connected, timeout=0.2)
             return connecting(ctx)
 
         def connecting(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+            @Behaviors.receive_message
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Connected(Success(True)):
@@ -112,9 +116,10 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
                         pass
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         def ready(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+            @Behaviors.receive_message
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Run(sql, reply_to):
@@ -127,11 +132,11 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
                         pass
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         # Only the part inside supervise is restarted. The stash and timers sit outside, so
         # queries stashed before a failed connection attempt survive the restart.
-        return Behaviors.supervise(Behaviors.setup(setup)).on_failure(
+        return Behaviors.supervise(setup).on_failure(
             SupervisorStrategy.restart_with_backoff(0.1, 1.0), exc_type=ConnectionError
         )
 
@@ -140,20 +145,22 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
     )
 
 
+@Behaviors.setup
 def app(ctx: ActorContext[Run]) -> Behavior[Run]:
     db = ctx.spawn(database(up_after=0.35), "db")
     c = ctx.spawn(client(db), "client")
 
+    @Behaviors.receive_message
     def forward(msg: Run) -> Behavior[Run]:
         c.tell(msg)
         return Behaviors.same
 
-    return Behaviors.receive_message(forward)
+    return forward
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(relativeCreated)6.0fms %(name)s %(message)s")
-    async with ActorSystem(Behaviors.setup(app), "app") as system:
+    async with ActorSystem(app, "app") as system:
         asks = (system.ask(lambda r, sql=sql: Run(sql, r), timeout=5) for sql in ("select 1", "select 2", "select 3"))
         print(*await asyncio.gather(*asks), sep="\n")
         await asyncio.sleep(0.7)  # a couple of heartbeats

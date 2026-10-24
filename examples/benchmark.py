@@ -25,21 +25,24 @@ class Done:
 def counter(total: int = 0) -> Behavior[int | Done]:
     """The functional style: a new behavior per message."""
 
+    @Behaviors.receive_message
     def on_message(msg: int | Done) -> Behavior[int | Done]:
         if isinstance(msg, Done):
             msg.reply_to.tell(total)
             return Behaviors.same
         return counter(total + msg)
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def counter_in_place() -> Behavior[int | Done]:
     """State in a per-actor cell, handler returns same: nothing allocated per message."""
 
+    @Behaviors.setup
     def setup(_ctx: ActorContext[int | Done]) -> Behavior[int | Done]:
         total = [0]
 
+        @Behaviors.receive_message
         def on_message(msg: int | Done) -> Behavior[int | Done]:
             if isinstance(msg, Done):
                 msg.reply_to.tell(total[0])
@@ -47,9 +50,9 @@ def counter_in_place() -> Behavior[int | Done]:
                 total[0] += msg
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def row(name: str, count: int, seconds: float, unit: str) -> None:
@@ -93,16 +96,19 @@ async def ping_pong() -> None:
     done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     def ponger() -> Behavior[Ping]:
+        @Behaviors.receive_message
         def on_message(msg: Ping) -> Behavior[Ping]:
             msg.reply_to.tell(Pong(msg.n))
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
+    @Behaviors.setup
     def pinger(ctx: ActorContext[Pong]) -> Behavior[Pong]:
         other = ctx.spawn(ponger(), "ponger")
         other.tell(Ping(0, ctx.self))
 
+        @Behaviors.receive_message
         def on_message(msg: Pong) -> Behavior[Pong]:
             if msg.n + 1 == rounds:
                 done.set_result(None)
@@ -110,10 +116,10 @@ async def ping_pong() -> None:
                 other.tell(Ping(msg.n + 1, ctx.self))
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     t0 = time.perf_counter()
-    async with ActorSystem(Behaviors.setup(pinger), "pp"):
+    async with ActorSystem(pinger, "pp"):
         await done
     row("ping-pong between two actors", rounds, time.perf_counter() - t0, "round trip")
 
@@ -130,13 +136,14 @@ async def ask_latency() -> None:
 async def spawn_cost() -> None:
     n = 20_000
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[Done]) -> Behavior[Done]:
         for i in range(n):
             ctx.spawn(Behaviors.ignore, str(i))
         return Behaviors.receive_message(lambda m: Behaviors.same)
 
     t0 = time.perf_counter()
-    async with ActorSystem(Behaviors.setup(guardian), "s"):
+    async with ActorSystem(guardian, "s"):
         pass
     row("spawn and stop an actor", n, time.perf_counter() - t0, "actor")
 

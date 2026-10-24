@@ -22,6 +22,7 @@ type Command = Increment | GetTotal
 
 
 def counter(total: int = 0) -> Behavior[Command]:
+    @Behaviors.receive_message
     def on_message(msg: Command) -> Behavior[Command]:
         match msg:
             case Increment(by) if by < 0:
@@ -32,7 +33,7 @@ def counter(total: int = 0) -> Behavior[Command]:
                 reply_to.tell(total)
                 return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def main() -> None:

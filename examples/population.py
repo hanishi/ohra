@@ -43,6 +43,7 @@ type Cmd = Reward | Sample
 
 
 def arm(arm_id: int, applied: list[int], count: int = 0, total: float = 0.0) -> Behavior[Cmd]:
+    @Behaviors.receive_message
     def on_message(msg: Cmd) -> Behavior[Cmd]:
         match msg:
             case Reward(_, value):
@@ -53,26 +54,29 @@ def arm(arm_id: int, applied: list[int], count: int = 0, total: float = 0.0) -> 
                 reply_to.tell((arm_id, random.gauss(mean, 1 / (count + 1) ** 0.5)))
                 return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def population(arms: list[ActorRef[Cmd]], applied: list[int]) -> Behavior[Reward]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Reward]) -> Behavior[Reward]:
         arms.extend(ctx.spawn(arm(i, applied), str(i)) for i in range(N_ARMS))
 
+        @Behaviors.receive_message
         def route(msg: Reward) -> Behavior[Reward]:
             arms[msg.arm].tell(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(route)
+        return route
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- shards: struct of arrays, batched updates -----------------------------------------------
 
 
 def shard(applied: list[int]) -> Behavior[Cmd]:
+    @Behaviors.setup
     def setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:  # per-actor arrays: the pool spawns this value 16 times
         size = -(-N_ARMS // N_SHARDS)
         counts = np.zeros(size)
@@ -95,7 +99,7 @@ def shard(applied: list[int]) -> Behavior[Cmd]:
 
         return batching(1000, 0.001, handle)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def shard_pool(applied: list[int]) -> Behavior[Cmd]:

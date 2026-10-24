@@ -64,7 +64,7 @@ pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 
 Messages are frozen dataclasses, a command protocol is a union, and a handler dispatches with `match`. A handler returns the next behavior: a new one carrying new state, `Behaviors.same`, `Behaviors.stopped()`, or `Behaviors.unhandled`. Handlers may be `async def`; an awaiting handler keeps the actor busy, and the next message waits.
 
-`Behaviors.setup`, `receive`, `receive_message` and `receive_signal` each take one function and return a behavior, so they work as decorators. The decorator form and the call form are the same thing and can be mixed freely: `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`. The decorator form is new in pekko-py, since Apache Pekko has no equivalent; the snippets below use it, and the ported examples use the call form. `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context.
+`Behaviors.setup`, `receive`, `receive_message` and `receive_signal` each take one function and return a behavior, so they work as decorators. The decorator form and the call form are the same thing and can be mixed freely: `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`. The decorator form is new in pekko-py, since Apache Pekko has no equivalent; the snippets below and the examples use it. `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context.
 
 ### Ask and reply
 

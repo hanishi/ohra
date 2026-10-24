@@ -64,6 +64,7 @@ type SessionCommand = PostMessage | NotifyClient
 
 
 def chat_room(sessions: tuple[ActorRef[SessionCommand], ...] = ()) -> Behavior[RoomCommand]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[RoomCommand], msg: RoomCommand) -> Behavior[RoomCommand]:
         match msg:
             case GetSession(screen_name, client):
@@ -78,12 +79,13 @@ def chat_room(sessions: tuple[ActorRef[SessionCommand], ...] = ()) -> Behavior[R
                     s.tell(NotifyClient(MessagePosted(screen_name, message)))
                 return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
 def session(
     room: ActorRef[PublishSessionMessage], screen_name: str, client: ActorRef[SessionEvent]
 ) -> Behavior[SessionCommand]:
+    @Behaviors.receive_message
     def on_message(msg: SessionCommand) -> Behavior[SessionCommand]:
         match msg:
             case PostMessage(message):
@@ -92,13 +94,14 @@ def session(
                 client.tell(event)
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 # --- a client that says one thing and leaves ---------------------------------------------
 
 
 def gabbler() -> Behavior[SessionEvent]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[SessionEvent], msg: SessionEvent) -> Behavior[SessionEvent]:
         match msg:
             case SessionDenied(reason):
@@ -111,9 +114,10 @@ def gabbler() -> Behavior[SessionEvent]:
                 print(f"[{ctx.self.path.rsplit('/', 1)[-1]}] {screen_name}: {message}")
                 return Behaviors.stopped()
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
+@Behaviors.setup
 def main_actor(ctx: ActorContext[None]) -> Behavior[None]:
     room = ctx.spawn(chat_room(), "chatroom")
     for name in ("alice", "bob", "alice"):  # the second alice is denied
@@ -121,16 +125,17 @@ def main_actor(ctx: ActorContext[None]) -> Behavior[None]:
         ctx.watch(g)
         room.tell(GetSession(name, g))
 
+    @Behaviors.receive_signal
     def on_signal(ctx: ActorContext[None], sig: Signal) -> Behavior[None]:
         if isinstance(sig, Terminated):
             return Behaviors.same if len(ctx.children) > 1 else Behaviors.stopped()  # only the room left
         return Behaviors.unhandled
 
-    return Behaviors.receive_signal(on_signal)
+    return on_signal
 
 
 async def main() -> None:
-    system = ActorSystem(Behaviors.setup(main_actor), "chat")
+    system = ActorSystem(main_actor, "chat")
     await system.when_terminated()
 
 

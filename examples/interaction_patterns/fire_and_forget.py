@@ -16,11 +16,12 @@ class PrintMe:
 
 
 def printer() -> Behavior[PrintMe]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[PrintMe], msg: PrintMe) -> Behavior[PrintMe]:
         ctx.log.info(msg.message)
         return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
 async def main() -> None:

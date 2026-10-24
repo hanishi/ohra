@@ -53,12 +53,14 @@ type ShardCmd = Observe | Propose
 def shard() -> Behavior[ShardCmd]:
     # The pool spawns this one behavior value N_SHARDS times. State created inside setup
     # is per actor; state created out here would be shared by every routee.
+    @Behaviors.setup
     def setup(_ctx: ActorContext[ShardCmd]) -> Behavior[ShardCmd]:
         size = -(-N_ARMS // N_SHARDS)
         successes = np.ones(size)  # Beta(1, 1) prior
         failures = np.ones(size)
         rng = np.random.default_rng()
 
+        @Behaviors.receive_message
         def on_message(msg: ShardCmd) -> Behavior[ShardCmd]:
             match msg:
                 case Observe(arm, reward):
@@ -73,9 +75,9 @@ def shard() -> Behavior[ShardCmd]:
                     reply_to.tell((best * N_SHARDS + k, float(draws[best])))
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def shard_pool() -> Behavior[ShardCmd]:
@@ -97,11 +99,12 @@ class Pull:
 def environment(means: np.ndarray) -> Behavior[Pull]:
     rng = np.random.default_rng(1)
 
+    @Behaviors.receive_message
     def on_message(msg: Pull) -> Behavior[Pull]:
         msg.reply_to.tell(int(rng.random() < means[msg.arm]))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 # --- agent: one step = ask all shards, pull the best, observe ----------------------------
@@ -148,10 +151,12 @@ class Progress:
 def agent(means: np.ndarray) -> Behavior[AgentCmd]:
     best_arm, best_mean = int(means.argmax()), float(means.max())
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[AgentCmd]) -> Behavior[AgentCmd]:
         shards = ctx.spawn(shard_pool(), "shards")
         env = ctx.spawn(environment(means), "env")
 
+        @Behaviors.receive_message
         def idle(msg: AgentCmd) -> Behavior[AgentCmd]:
             match msg:
                 case Run(steps, reply_to):
@@ -168,6 +173,7 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
         def collecting(
             steps: int, reply_to: ActorRef[Summary], p: Progress, got: tuple[tuple[int, float], ...]
         ) -> Behavior[AgentCmd]:
+            @Behaviors.receive_message
             def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
                 match msg:
                     case Proposal(Success(candidate)):
@@ -185,9 +191,10 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
                     case _:
                         return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         def pulling(steps: int, reply_to: ActorRef[Summary], p: Progress, arm: int) -> Behavior[AgentCmd]:
+            @Behaviors.receive_message
             def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
                 match msg:
                     case Rewarded(Success(reward)):
@@ -200,7 +207,7 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
                         if p2.step == steps:
                             ctx.timers.cancel("report")
                             reply_to.tell(Summary(p2.step, p2.regret, p2.pulls_of_best))
-                            return Behaviors.receive_message(idle)
+                            return idle
                         return propose(steps, reply_to, p2)
                     case Rewarded(_):
                         raise RuntimeError("the environment did not answer")
@@ -210,11 +217,11 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
                     case _:
                         return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        return Behaviors.receive_message(idle)
+        return idle
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def main() -> None:

@@ -41,6 +41,7 @@ type BackendResponse = JobStarted | JobProgress | JobCompleted
 
 
 def backend() -> Behavior[StartTranslationJob]:
+    @Behaviors.receive_message
     def on_message(msg: StartTranslationJob) -> Behavior[StartTranslationJob]:
         msg.reply_to.tell(JobStarted(msg.task_id))
         for p in (0.25, 0.5, 0.75):
@@ -48,7 +49,7 @@ def backend() -> Behavior[StartTranslationJob]:
         msg.reply_to.tell(JobCompleted(msg.task_id, msg.site.replace("/docs/", "/docs/sv/")))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 # --- frontend: its own protocol, plus a private wrapper for backend responses -------------
@@ -69,10 +70,12 @@ type Command = Translate | _WrappedBackendResponse
 
 
 def frontend(backend_ref: ActorRef[StartTranslationJob]) -> Behavior[Command]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Command]) -> Behavior[Command]:
         response_mapper: ActorRef[BackendResponse] = ctx.message_adapter(_WrappedBackendResponse)
 
         def active(in_progress: dict[int, ActorRef[str]], count: int) -> Behavior[Command]:
+            @Behaviors.receive_message
             def on_message(msg: Command) -> Behavior[Command]:
                 match msg:
                     case Translate(site, reply_to):
@@ -91,26 +94,28 @@ def frontend(backend_ref: ActorRef[StartTranslationJob]) -> Behavior[Command]:
                                 return active({k: v for k, v in in_progress.items() if k != task_id}, count)
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         return active({}, 0)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")
 
+    @Behaviors.setup
     def app(ctx: ActorContext[Translate]) -> Behavior[Translate]:
         fe = ctx.spawn(frontend(ctx.spawn(backend(), "backend")), "frontend")
 
+        @Behaviors.receive_message
         def forward(msg: Translate) -> Behavior[Translate]:
             fe.tell(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(forward)
+        return forward
 
-    async with ActorSystem(Behaviors.setup(app), "adapted") as system:
+    async with ActorSystem(app, "adapted") as system:
         print("translated:", await system.ask(lambda r: Translate("https://pekko.apache.org/docs/", r), timeout=1))
 
 

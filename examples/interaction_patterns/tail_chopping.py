@@ -42,6 +42,7 @@ def tail_chopping[Reply](
     timeout_reply: Reply,
 ) -> Behavior[Command[Reply]]:
     def with_timers(timers: TimerScheduler[Command[Reply]]) -> Behavior[Command[Reply]]:
+        @Behaviors.setup
         def setup(ctx: ActorContext[Command[Reply]]) -> Behavior[Command[Reply]]:
             reply_adapter = ctx.message_adapter(_WrappedReply[Reply])
 
@@ -53,6 +54,7 @@ def tail_chopping[Reply](
                 return waiting(attempt)
 
             def waiting(attempt: int) -> Behavior[Command[Reply]]:
+                @Behaviors.receive_message
                 def on_message(msg: Command[Reply]) -> Behavior[Command[Reply]]:
                     match msg:
                         case _WrappedReply(reply):
@@ -64,11 +66,11 @@ def tail_chopping[Reply](
                             reply_to.tell(timeout_reply)
                             return Behaviors.stopped()
 
-                return Behaviors.receive_message(on_message)
+                return on_message
 
             return send_next(1)
 
-        return Behaviors.setup(setup)
+        return setup
 
     return Behaviors.with_timers(with_timers)
 
@@ -83,12 +85,13 @@ class Lookup:
 
 
 def replica(name: str) -> Behavior[Lookup]:
+    @Behaviors.receive_message
     async def on_message(msg: Lookup) -> Behavior[Lookup]:
         await asyncio.sleep(random.choice([0.01, 0.01, 0.01, 0.5]))  # one in four is slow
         msg.reply_to.tell(f"{msg.key} from {name}")
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 @dataclass(frozen=True)
@@ -97,9 +100,11 @@ class Find:
     reply_to: ActorRef[str]
 
 
+@Behaviors.setup
 def app(ctx: ActorContext[Find]) -> Behavior[Find]:
     replicas = [ctx.spawn(replica(f"r{i}"), f"r{i}") for i in range(3)]
 
+    @Behaviors.receive_message
     def on_message(msg: Find) -> Behavior[Find]:
         def send_request(attempt: int, reply_to: ActorRef[str]) -> bool:
             if attempt > len(replicas):
@@ -110,12 +115,12 @@ def app(ctx: ActorContext[Find]) -> Behavior[Find]:
         ctx.spawn_anonymous(tail_chopping(send_request, 0.05, msg.reply_to, 1.0, "timed out"))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def main() -> None:
     random.seed(3)
-    async with ActorSystem(Behaviors.setup(app), "tail") as system:
+    async with ActorSystem(app, "tail") as system:
         loop = asyncio.get_running_loop()
         for key in ("a", "b", "c", "d"):
             t0 = loop.time()

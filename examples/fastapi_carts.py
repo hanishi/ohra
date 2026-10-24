@@ -72,6 +72,7 @@ Cart = EntityTypeKey[CartCmd]("Cart")
 def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
     @Behaviors.persisted(store)
     def cart(items: dict[str, int]) -> Behavior[CartCmd]:
+        @Behaviors.receive
         def on_message(ctx: ActorContext[CartCmd], msg: CartCmd) -> Behavior[CartCmd]:
             match msg:
                 case AddItem(sku, qty, reply_to):
@@ -86,7 +87,7 @@ def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
                     passivate = lambda: entity.shard.tell(Passivate(ctx.self))  # noqa: E731
                     return cart({}).then_reply(reply_to, items).then_run(passivate)
 
-        return Behaviors.receive(on_message)
+        return on_message
 
     return cart.recover(entity.entity_id, empty={})  # one read; the first message creates the row
 

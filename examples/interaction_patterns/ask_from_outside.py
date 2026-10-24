@@ -30,6 +30,7 @@ type Reply = Cookies | InvalidRequest
 
 
 def cookie_fabric() -> Behavior[GiveMeCookies]:
+    @Behaviors.receive_message
     def on_message(msg: GiveMeCookies) -> Behavior[GiveMeCookies]:
         if msg.count >= 5:
             msg.reply_to.tell(InvalidRequest("Too many cookies."))
@@ -37,7 +38,7 @@ def cookie_fabric() -> Behavior[GiveMeCookies]:
             msg.reply_to.tell(Cookies(msg.count))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def main() -> None:

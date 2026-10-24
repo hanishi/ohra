@@ -59,6 +59,7 @@ JOBS = {"numpy": numpy_job, "python": python_job}
 
 def worker() -> Behavior[Cmd]:
     def with_stash(buffer: StashBuffer[Cmd]) -> Behavior[Cmd]:
+        @Behaviors.receive
         def idle(ctx: ActorContext[Cmd], msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Compute(job, seed, reply_to):
@@ -68,21 +69,22 @@ def worker() -> Behavior[Cmd]:
                     return Behaviors.same
 
         def computing(reply_to: ActorRef[float]) -> Behavior[Cmd]:
+            @Behaviors.receive_message
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Done(Success(value)):
                         reply_to.tell(value)
-                        return buffer.unstash_all(Behaviors.receive(idle))
+                        return buffer.unstash_all(idle)
                     case Done(_):
                         reply_to.tell(float("nan"))
-                        return buffer.unstash_all(Behaviors.receive(idle))
+                        return buffer.unstash_all(idle)
                     case _:
                         buffer.stash(msg)
                         return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        return Behaviors.receive(idle)
+        return idle
 
     return Behaviors.with_stash(1000, with_stash)
 
@@ -101,11 +103,13 @@ class Report:
 
 
 def probe(period: float = 0.005) -> Behavior[Tick | Report]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Tick | Report]) -> Behavior[Tick | Report]:
         ctx.timers.start_timer_with_fixed_delay("tick", Tick(), period)
         loop = asyncio.get_running_loop()
 
         def ticking(last: float, lateness: list[float]) -> Behavior[Tick | Report]:
+            @Behaviors.receive_message
             def on_message(msg: Tick | Report) -> Behavior[Tick | Report]:
                 match msg:
                     case Tick():
@@ -116,11 +120,11 @@ def probe(period: float = 0.005) -> Behavior[Tick | Report]:
                         ctx.timers.start_timer_with_fixed_delay("tick", Tick(), period)  # drops a queued stale Tick
                         return ticking(loop.time(), [])
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         return ticking(loop.time(), [])
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- driver --------------------------------------------------------------------------------
@@ -137,10 +141,12 @@ class Collected:
     value: float
 
 
+@Behaviors.setup
 def guardian(ctx: ActorContext[Run | Collected]) -> Behavior[Run | Collected]:
     workers = [ctx.spawn(worker(), f"w{i}") for i in range(WORKERS)]
     collector = ctx.message_adapter(Collected)
 
+    @Behaviors.receive_message
     def idle(msg: Run | Collected) -> Behavior[Run | Collected]:
         match msg:
             case Run(job, reply_to):
@@ -151,19 +157,20 @@ def guardian(ctx: ActorContext[Run | Collected]) -> Behavior[Run | Collected]:
                 return Behaviors.same
 
     def collecting(reply_to: ActorRef[None], remaining: int) -> Behavior[Run | Collected]:
+        @Behaviors.receive_message
         def on_message(msg: Run | Collected) -> Behavior[Run | Collected]:
             match msg:
                 case Collected() if remaining == 1:
                     reply_to.tell(None)
-                    return Behaviors.receive_message(idle)
+                    return idle
                 case Collected():
                     return collecting(reply_to, remaining - 1)
                 case Run():
                     raise RuntimeError("one run at a time")
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.receive_message(idle)
+    return idle
 
 
 async def timed_parallel(system: ActorSystem[Run | Collected], job: str) -> float:
@@ -183,7 +190,7 @@ async def main() -> None:
     gil = getattr(sys, "_is_gil_enabled", lambda: True)()
     print(f"python {sys.version.split()[0]}  GIL {'on' if gil else 'off'}  workers {WORKERS}  cores {os.cpu_count()}")
     print("job      sequential  parallel  speedup  5ms-timer lateness meanwhile (median / max)")
-    async with ActorSystem(Behaviors.setup(guardian), "bench") as system, ActorSystem(probe(), "probe") as p:
+    async with ActorSystem(guardian, "bench") as system, ActorSystem(probe(), "probe") as p:
         await p.ask(Report, timeout=1)  # reset the probe
         await asyncio.sleep(0.2)
         late = await p.ask(Report, timeout=1)

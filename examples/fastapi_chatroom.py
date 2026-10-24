@@ -92,6 +92,7 @@ def chat_room(members: tuple[Member, ...] = ()) -> Behavior[RoomCmd]:
         for m in to:
             m.session.tell(NotifyClient(event))
 
+    @Behaviors.receive
     def on_message(ctx: ActorContext[RoomCmd], msg: RoomCmd) -> Behavior[RoomCmd]:
         match msg:
             case GetSession(screen_name, client):
@@ -118,12 +119,13 @@ def chat_room(members: tuple[Member, ...] = ()) -> Behavior[RoomCmd]:
             return chat_room(rest)
         return Behaviors.unhandled
 
-    return Behaviors.receive(on_message).receive_signal(on_signal)
+    return on_message.receive_signal(on_signal)
 
 
 def session(
     room: ActorRef[PublishSessionMessage], screen_name: str, client: ActorRef[SessionEvent]
 ) -> Behavior[SessionCmd]:
+    @Behaviors.receive_message
     def on_message(msg: SessionCmd) -> Behavior[SessionCmd]:
         match msg:
             case PostMessage(message):
@@ -132,7 +134,7 @@ def session(
                 client.tell(event)
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 # --- one actor per WebSocket connection --------------------------------------------------------
@@ -156,6 +158,7 @@ def connection(ws: WebSocket, reply_to: ActorRef[JoinResult]) -> Behavior[Sessio
     """Forwards room events to the socket. The handler is async, so sending is just an await;
     the actor stays busy during it and later events wait in the mailbox, in order."""
 
+    @Behaviors.receive
     async def on_message(ctx: ActorContext[SessionEvent], msg: SessionEvent) -> Behavior[SessionEvent]:
         match msg:
             case SessionGranted(handle):
@@ -169,7 +172,7 @@ def connection(ws: WebSocket, reply_to: ActorRef[JoinResult]) -> Behavior[Sessio
                 await ws.send_json({"type": "notice", "text": text})
         return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
 # --- lobby: rooms by name, connections as children -----------------------------------------------
@@ -192,6 +195,7 @@ type LobbyCmd = Join | Leave
 
 
 def lobby() -> Behavior[LobbyCmd]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[LobbyCmd], msg: LobbyCmd) -> Behavior[LobbyCmd]:
         match msg:
             case Join(room_name, screen_name, ws, reply_to):
@@ -202,7 +206,7 @@ def lobby() -> Behavior[LobbyCmd]:
                 ctx.stop(conn)  # the room is watching it and will drop the session
         return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
 # --- HTTP and WebSocket ------------------------------------------------------------------------------

@@ -256,6 +256,35 @@ Apache Pekko offers two persistence styles. `EventSourcedBehavior` stores the ev
 
 The stores are small by design: a `Store` protocol with `load`, `save` and `delete`, an in-memory store for tests, and a SQLite store over the stdlib with writes in a thread and a pluggable codec. Pekko's durable state plugs into JDBC or R2DBC through its serialization extension.
 
+### Remoting
+
+Give a system an address and its actors are reachable from other pekko-py processes by path. `system.resolve(path)` returns a `RemoteRef`, an `ActorRef` whose `tell` serializes the message and sends it over a TCP connection opened on first use. `ask` works unchanged, because the reply ref crosses the wire as a path too. A message type is sendable once it is marked `@remotable`, which derives a JSON codec from the frozen dataclass; an `ActorRef` field becomes a path, and nested or union-typed fields work because the encoding is self-describing.
+
+```python
+from pekko_py import remotable
+
+
+@remotable
+@dataclass(frozen=True)
+class Greeted:
+    text: str
+
+
+@remotable
+@dataclass(frozen=True)
+class Greet:
+    name: str
+    reply_to: ActorRef[Greeted]
+
+
+async def client() -> None:
+    async with ActorSystem(Behaviors.ignore, "client", address=("127.0.0.1", 2553)) as system:
+        greeter: ActorRef[Greet] = system.resolve("pekko://greeter@127.0.0.1:2552/user")
+        print(await ask(greeter, lambda r: Greet("pekko", r), timeout=3))
+```
+
+A `tell` to a node that is down never blocks or raises; once the connection attempt fails the message is a dead letter, as in Pekko. Sending an unregistered type, or a message over 16 MiB, raises `SerializationError` at `tell`. A message for a path nobody owns, or one that fails to decode, is a dead letter on the receiving node and the connection stays up. Replies travel on the replying node's own connection back, so the asking side must be listening too (`async with` does that) and `address=` must be a host its peers can reach: it is both the bind and the advertised address, and `127.0.0.1` and `localhost` are different authorities. Message adapters are kept for the actor's lifetime, so create them in `setup` rather than per message. This is the first cluster layer, remoting only: no membership, no remote `watch`, and a peer that restarts is served rather than quarantined. The listener accepts any peer, so run it on a private network or behind a tunnel; TLS is out of scope, as it is for Apache Pekko's Artery without TLS configured.
+
 ### numpy and parallelism
 
 A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. For another process, `pekko_py.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
@@ -307,6 +336,9 @@ Inside a WebSocket route the same dependency works, and the connection actor pat
 | `DurableStateBehavior(persistenceId, emptyState, commandHandler)` | `@Behaviors.persisted(store)` on a state-to-behavior factory, started with `factory.recover(id, empty)` |
 | `Effect.persist(state).thenReply(replyTo)(f)`, `Effect.none` | `factory(state).then_reply(ref, msg)` / `.then_run(callback)`; any plain behavior, including `same`, writes nothing |
 | durable state stores (JDBC, R2DBC) | `InMemoryStore`, `SqliteStore(path, codec=...)` |
+| `pekko.remote.artery.canonical.hostname / port` | `ActorSystem(..., address=(host, port))`; paths read `pekko://name@host:port/user/...` |
+| `ActorRefResolver.resolveActorRef(path)` | `system.resolve(path)`: a local ref, or a `RemoteRef` for another node |
+| serialization bindings and manifests | `@remotable` on a frozen dataclass; self-describing JSON with `$type` and `$ref` |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
@@ -352,6 +384,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.
 - `with_consistent_hashing_routing(mapping)` takes no virtual-nodes factor and routes with `hash(mapping(msg)) % size`, since a pool has a fixed size. The mapping may return any hashable.
+- Remoting is Artery narrowed to one layer: TCP with length-prefixed JSON frames, `@remotable` dataclasses instead of serializer ids and manifests, an unsendable message raises at `tell` instead of being logged and dropped, a restarted peer is served instead of quarantined, and there is no remote `watch`, no membership and no system-message delivery guarantee. `ask` across nodes works because the reply ref is given a temporary path on the asking node for exactly as long as the ask is pending.
 - `ctx.stop(child, after_pending=True)` queues the stop behind the child's pending messages, like classic Pekko's `PoisonPill`; Pekko Typed has no public equivalent. `Sharding` uses it so passivation never drops a message the region already forwarded.
 - Persistence is pekko-py's own shape, not `DurableStateBehavior`, and there is no event sourcing; see "How this differs from Apache Pekko persistence" in the Tour. The default codec is pickle; Pekko uses its serialization extension.
 - `Sharding` is the region layer of `ClusterSharding` on one node: no coordinator, rebalancing or remembered entities. The region ref is passed to `entity_ref_for` explicitly since there is no extension registry; `with_passivate_after` and `with_buffer_size` replace Pekko's passivation and buffer-size settings, with idle checked on a tick of half the timeout as in Pekko, so an entity passivates between one and one and a half timeouts after its last message; and the region answers `GetShardRegionState` itself rather than through a separate query ref.
@@ -366,6 +399,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 |---|---|
 | `examples/counter.py` | the functional style, `ask`, supervision with `resume` |
 | `examples/chatroom.py` | the ChatRoom from the Apache Pekko docs: sessions as children, narrowed refs, DeathWatch |
+| `examples/remoting/` | two processes: `greeter_node.py` listens on 2552, `client_node.py` resolves it by path, tells and asks across the wire |
 | `examples/persisted_counter.py` | `Behaviors.persisted` with `SqliteStore`: the total survives a supervised restart and a new actor system; run it twice and it keeps counting |
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
 | `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |

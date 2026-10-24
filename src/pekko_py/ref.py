@@ -15,7 +15,7 @@ _dead_letters = logging.getLogger("pekko_py.dead_letters")
 
 
 class ActorRef[T](ABC):
-    __slots__ = ()
+    __slots__ = ("__weakref__",)  # refs can be weakly held, e.g. by remoting's temp table
 
     @property
     @abstractmethod

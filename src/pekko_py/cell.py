@@ -191,6 +191,7 @@ class ActorCell[T]:
         loop = asyncio.get_running_loop()
         self.done: asyncio.Future[None] = loop.create_future()
         self.children: dict[str, ActorCell[Any]] = {}
+        self.adapters: list[ActorRef[Any]] = []  # message_adapter refs live as long as the actor, as in Pekko
         self.watching: dict[ActorCell[Any], tuple[T] | None] = {}
         self.watched_by: set[ActorCell[Any]] = set()
         self.failure: BaseException | None = None
@@ -632,6 +633,7 @@ class ActorCell[T]:
             if m is not _POISON:
                 self.system.dead_letter(m, self.ref)
         self._user.clear()
+        self.adapters.clear()
         note = _DeathNotify(self, self.failure)
         for w in self.watched_by:
             w.send_sys(note)

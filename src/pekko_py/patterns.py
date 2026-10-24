@@ -42,11 +42,14 @@ async def ask[Res](
     A reply arriving after the timeout goes to dead letters; nothing is left pending.
     """
     fut: asyncio.Future[Res] = asyncio.get_running_loop().create_future()
-    target.tell(make(PromiseRef(fut, f"{target.path}/$ask-{next(_ids)}")))
+    reply_to = PromiseRef(fut, f"{target.path}/$ask-{next(_ids)}")
+    target.tell(make(reply_to))
     try:
         return await asyncio.wait_for(fut, timeout)
     except TimeoutError:
         raise AskTimeoutError(f"ask to {target.path} timed out after {timeout}s") from None
+    finally:
+        del reply_to  # held until here on purpose: remoting keeps only a weak temp path for it while the ask is pending
 
 
 class _Flush:

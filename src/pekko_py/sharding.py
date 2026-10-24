@@ -16,6 +16,7 @@ from urllib.parse import quote
 from .behavior import Behavior, Behaviors
 from .context import ActorContext
 from .ref import ActorRef
+from .serialization import remotable
 from .signals import PostStop, Signal, Terminated
 
 
@@ -52,6 +53,7 @@ class EntityContext[T]:
     shard: ActorRef[ShardCommand]
 
 
+@remotable
 @dataclass(frozen=True)
 class ShardingEnvelope[T]:
     """What the region accepts: a message addressed to an entity id."""
@@ -105,6 +107,10 @@ class EntityRef[T](ActorRef[T]):
     @property
     def path(self) -> str:
         return f"{self._region.path}/{_child_name(self.entity_id)}"
+
+    @property
+    def region(self) -> ActorRef[ShardingEnvelope[T]]:
+        return self._region
 
     def tell(self, msg: T) -> None:
         self._region.tell(ShardingEnvelope(self.entity_id, msg))

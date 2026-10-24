@@ -2,7 +2,7 @@
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
 from dataclasses import dataclass
 
-from pekko_py import ActorContext, ActorRef, ShardingEnvelope, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
+from pekko_py import ActorContext, ActorRef, RemoteRef, ShardingEnvelope, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
 
 
 @dataclass(frozen=True)
@@ -112,3 +112,8 @@ def persistence_is_typed() -> None:
     counter.recover("id", empty="zero")  # type: ignore[arg-type]
     wrong: Behavior[str] = counter.recover("id", empty=0)  # type: ignore[assignment]
     del node, wrong
+
+
+def remote_refs_are_typed(remote: RemoteRef[Ping], ping: Ping) -> None:
+    remote.tell(ping)
+    remote.tell("not a ping")  # type: ignore[arg-type]

@@ -6,6 +6,8 @@ from .mailbox import MailboxOverflowError, MailboxSelector
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
 from .persistence import InMemoryStore, Persist, Persisted, PersistenceError, RevisionConflictError, SqliteStore, Store
 from .ref import ActorRef
+from .remote import RemoteRef, UniqueAddress
+from .serialization import Serialization, SerializationError, remotable
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
 from .sharding import (
@@ -51,9 +53,12 @@ __all__ = [
     "PostStop",
     "PreRestart",
     "Receive",
+    "RemoteRef",
     "Replyable",
     "RevisionConflictError",
     "Routers",
+    "Serialization",
+    "SerializationError",
     "ShardCommand",
     "Sharding",
     "ShardingEnvelope",
@@ -68,6 +73,8 @@ __all__ = [
     "Terminated",
     "TimerScheduler",
     "Try",
+    "UniqueAddress",
     "ask",
     "batching",
+    "remotable",
 ]

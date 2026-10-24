@@ -13,6 +13,7 @@ from pekko_py.cluster.reachability import Reachability, Record
 from pekko_py.cluster.sbr import (
     DownAll,
     DownAllDecision,
+    DownIndirectlyConnected,
     DowningStrategy,
     DownReachable,
     DownUnreachable,
@@ -20,6 +21,7 @@ from pekko_py.cluster.sbr import (
     KeepOldest,
     SplitBrainResolverSettings,
     StaticQuorum,
+    _DoubleDecision,  # pyright: ignore[reportPrivateUsage]
     _DowningStrategy,  # pyright: ignore[reportPrivateUsage]
 )
 from pekko_py.remote import UniqueAddress
@@ -196,3 +198,167 @@ def test_filter_records_keeps_versions():
     kept = r.filter_records(lambda x: x.observer == A.unique_address)
     assert len(kept.records) == 1 and kept.versions == r.versions
 
+
+
+# --- the strategies (SplitBrainResolverSpec scenarios) -----------------------------------------------------------
+
+
+def downing(config: DowningStrategy, members: set[Member], *sides: set[Member], indirectly: list[tuple[Member, Member]] | None = None) -> None:
+    """assertDowning: every non-empty side reaches the same nodes_to_down."""
+    for side in sides:
+        if side:
+            others = [o for o in sides if o is not side]
+            assert strategy(config, side, *others, indirectly=indirectly).nodes_to_down() == nodes(*members)
+
+
+# StaticQuorum
+
+
+def test_static_quorum_downs_unreachable_when_enough_reachable():
+    downing(StaticQuorum(3), {B, D}, {A, C, E}, {B, D})
+
+
+def test_static_quorum_downs_reachable_when_not_enough():
+    assert strategy(StaticQuorum(3), {A, B}, {C, D}).decide() == DownReachable()
+    assert strategy(StaticQuorum(3), {C, D}, {A, B}).decide() == DownReachable()
+
+
+def test_static_quorum_downs_all_when_too_many_members():
+    downing(StaticQuorum(3), {A, B, C, D, E, F}, {A, B, C}, {D, E, F})
+
+
+def test_static_quorum_does_not_count_joining():
+    assert strategy(StaticQuorum(3), {A, B, joining(C)}, {D, E}).decide() == DownReachable()
+    assert strategy(StaticQuorum(3), {A, B, C}, {joining(D), E}).decide() == DownUnreachable()
+
+
+def test_static_quorum_does_not_count_leaving_and_exiting():
+    assert strategy(StaticQuorum(3), {A, B, leaving(C)}, {D, E}).decide() == DownUnreachable()
+    assert strategy(StaticQuorum(3), {A, B, exiting(C)}, {D, E}).decide() == DownReachable()
+
+
+# KeepMajority
+
+
+def test_keep_majority_downs_minority():
+    downing(KeepMajority(), {D, E}, {A, B, C}, {D, E})
+
+
+def test_keep_majority_keeps_lowest_address_when_equal():
+    downing(KeepMajority(), {C, D}, {A, B}, {C, D})
+
+
+def test_keep_majority_two_node_cluster():
+    downing(KeepMajority(), {B}, {A}, {B})
+
+
+def test_keep_majority_does_not_count_joining_but_downs_it():
+    downing(KeepMajority(), {joining(A), C}, {B, D}, {joining(A), C})
+
+
+def test_keep_majority_downs_each_part_when_split_in_three():
+    s1, s2, s3 = {A, B}, {C, D}, {E}
+    assert strategy(KeepMajority(), s1, s2, s3).nodes_to_down() == nodes(A, B)
+    assert strategy(KeepMajority(), s2, s1, s3).nodes_to_down() == nodes(C, D)
+    assert strategy(KeepMajority(), s3, s1, s2).nodes_to_down() == nodes(E)
+
+
+def test_keep_majority_membership_change_edge_case():
+    s1 = strategy(KeepMajority(), {A, B, F, G}, {C, D, E})
+    assert s1.decide() == DownUnreachable() and s1.nodes_to_down() == nodes(C, D, E)
+    s2 = strategy(KeepMajority(), {C, D, E}, {A, B, joining(F), joining(G)})
+    assert s2.decide() == DownAllDecision() and s2.nodes_to_down() == nodes(A, B, C, D, E, F, G)
+
+
+def test_keep_majority_membership_change_edge_case_equal_size():
+    assert strategy(KeepMajority(), {A, B, F}, {C, D, E}).decide() == DownUnreachable()
+    assert strategy(KeepMajority(), {C, D, E}, {A, B, joining(F)}).decide() == DownAllDecision()
+
+
+def test_keep_majority_safe_edge_case():
+    assert strategy(KeepMajority(), {A, B}, {C, D, E, joining(F)}).decide() == DownReachable()
+    assert strategy(KeepMajority(), {C, D, E, F}, {A, B}).decide() == DownUnreachable()
+
+
+def test_keep_majority_leaving_edge_case():
+    s1 = strategy(KeepMajority(), {leaving(A), B, joining(E)}, {C, D})
+    assert s1.decide() == DownAllDecision()
+    s2 = strategy(KeepMajority(), {C, D}, {exiting(A), B})
+    assert s2.decide() == DownUnreachable() and s2.nodes_to_down() == nodes(B)
+
+
+def test_keep_majority_downs_indirectly_connected():
+    downing(KeepMajority(), {A, B}, {A, B, C}, indirectly=[(A, B), (B, A)])
+
+
+def test_keep_majority_indirectly_connected_with_clean_partition():
+    s1 = strategy(KeepMajority(), {A, B, C}, {D, E}, indirectly=[(B, C), (C, B)])
+    assert s1.decide() == DownIndirectlyConnected() and s1.nodes_to_down() == nodes(B, C, D, E)
+    s2 = strategy(KeepMajority(), {D, E}, {A, B, C})
+    assert s2.nodes_to_down() == nodes(D, E)
+
+
+def test_keep_majority_indirectly_connected_detected_before_partition():
+    assert strategy(KeepMajority(), {A, B, C}, {D, E, F, G}).nodes_to_down() == nodes(A, B, C)
+    assert strategy(KeepMajority(), {A, B, C}, {D, E, F, G}, indirectly=[(D, E), (E, D)]).nodes_to_down() == nodes(A, B, C, D, E)
+    assert strategy(KeepMajority(), {D, E, F, G}, {A, B, C}, indirectly=[(D, E), (E, D)]).nodes_to_down() == nodes(A, B, C, D, E)
+
+
+def test_keep_majority_double_indirectly_connected_raises():
+    s1 = strategy(KeepMajority(), {A, B, C}, {D, E, F, G}, indirectly=[(D, E), (G, F)])
+    with pytest.raises(_DoubleDecision):
+        s1.nodes_to_down()
+    assert strategy(KeepMajority(), {D, E, F, G}, {A, B, C}, indirectly=[(D, E), (G, F)]).nodes_to_down() == nodes(A, B, C, D, E, F, G)
+
+
+# KeepOldest (E is the oldest)
+
+
+def test_keep_oldest_keeps_partition_with_oldest():
+    downing(KeepOldest(), {B, C, D}, {A, E}, {B, C, D})
+
+
+def test_keep_oldest_unless_alone():
+    downing(KeepOldest(), {E}, {E}, {A, B, C, D})
+
+
+def test_keep_oldest_in_two_node_cluster():
+    downing(KeepOldest(), {A}, {B}, {A})
+
+
+def test_keep_oldest_even_when_alone_when_down_if_alone_false():
+    downing(KeepOldest(down_if_alone=False), {A, B, C, D}, {E}, {A, B, C, D})
+
+
+def test_keep_oldest_leaving_edge_cases():
+    assert strategy(KeepOldest(), {leaving(D), E}, {A, B, C}).decide() == DownAllDecision()
+    assert strategy(KeepOldest(), {A, B, C}, {leaving(D), E}).decide() == DownReachable()
+    assert strategy(KeepOldest(), {E}, {A, B, leaving(C)}).decide() == DownReachable()
+    assert strategy(KeepOldest(), {A, B, leaving(C)}, {E}).decide() == DownUnreachable()
+    assert strategy(KeepOldest(), {E}, {A, leaving(B), leaving(C), leaving(D)}).decide() == DownReachable()
+    assert strategy(KeepOldest(), {A, leaving(B), leaving(C), leaving(D)}, {E}).decide() == DownAllDecision()
+
+
+def test_keep_oldest_exiting_alone_edge_case():
+    assert strategy(KeepOldest(), {D, exiting(E)}, {A, B, C}).decide() == DownReachable()
+    assert strategy(KeepOldest(), {A, B, C}, {D, leaving(E)}).decide() == DownReachable()
+    assert strategy(KeepOldest(), {A}, {exiting(B)}).decide() == DownUnreachable()
+    assert strategy(KeepOldest(), {leaving(B)}, {A}).decide() == DownAllDecision()
+
+
+def test_keep_oldest_joining_edge_case():
+    assert strategy(KeepOldest(), {joining(A), E}, {B, C, D}).decide() == DownReachable()
+    assert strategy(KeepOldest(), {B, C, D}, {joining(A), E}).decide() == DownAllDecision()
+    assert strategy(KeepOldest(down_if_alone=False), {joining(A), E}, {B, C, D}).decide() == DownUnreachable()
+    assert strategy(KeepOldest(down_if_alone=False), {B, C, D}, {joining(A), E}).decide() == DownReachable()
+
+
+def test_keep_oldest_downs_indirectly_connected():
+    downing(KeepOldest(), {A, B}, {A, B, C}, indirectly=[(A, B), (B, A)])
+
+
+# DownAll
+
+
+def test_down_all_downs_everything():
+    downing(DownAll(), {A, B, C, D}, {A, B}, {C, D})

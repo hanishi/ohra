@@ -241,7 +241,102 @@ class _DowningStrategy:
     # --- decisions ------------------------------------------------------------------------------------------------
 
     def decide(self) -> Decision:
-        raise NotImplementedError
+        match self.config:
+            case StaticQuorum(quorum_size):
+                return self._decide_static_quorum(quorum_size)
+            case KeepMajority():
+                return self._decide_keep_majority()
+            case KeepOldest(down_if_alone):
+                return self._decide_keep_oldest(down_if_alone)
+            case DownAll():
+                return DownAllDecision()
+
+    # StaticQuorum: keep this side when it has at least quorum_size members. Never add more than
+    # quorum_size * 2 - 1 members, or both sides may keep themselves; past that it downs all.
+
+    @property
+    def is_too_many_members(self) -> bool:
+        return isinstance(self.config, StaticQuorum) and len(self.members()) > self.config.quorum_size * 2 - 1
+
+    def _decide_static_quorum(self, quorum_size: int) -> Decision:
+        if self.is_too_many_members:
+            return DownAllDecision()
+        if self.has_indirectly_connected:
+            return DownIndirectlyConnected()
+        if len(self.members()) - len(self.unreachable_members()) >= quorum_size:
+            return DownUnreachable()
+        return DownReachable()
+
+    # KeepMajority: down the unreachable when this side is the majority of the last known membership, else this
+    # side; equal sizes keep the side with the lowest address. Three or more parts with no majority all shut down.
+
+    def _decide_keep_majority(self) -> Decision:
+        if self.has_indirectly_connected:
+            return DownIndirectlyConnected()
+        ms = self.members()
+        if not ms:
+            return DownAllDecision()
+        decision = self._majority_decision(len(self.reachable_members()), len(self.unreachable_members()), ms[0])
+        if isinstance(decision, DownUnreachable):
+            if isinstance(self._majority_decision_when_including_membership_changes_edge_case(), DownUnreachable):
+                return DownUnreachable()
+            return DownAllDecision()  # the edge case disagrees: safest to down all
+        return decision
+
+    def _majority_decision(self, this_side: int, other_side: int, lowest: Member) -> Decision:
+        if this_side == other_side:
+            return DownReachable() if self.is_unreachable(lowest) else DownUnreachable()
+        return DownUnreachable() if this_side > other_side else DownReachable()
+
+    def _majority_decision_when_including_membership_changes_edge_case(self) -> Decision:
+        """A membership change at the same time as the partition: count as few as possible on this side (no
+        Joining, no Leaving) and as many as possible on the other (Joining included, Leaving included)."""
+        ms = self.members(including_possibly_up=False, excluding_possibly_exiting=True)
+        if not ms:
+            return DownAllDecision()
+        this_side = len(self.reachable_members(including_possibly_up=False, excluding_possibly_exiting=True))
+        other_side = len(self.unreachable_members(including_possibly_up=True, excluding_possibly_exiting=False))
+        return self._majority_decision(this_side, other_side, ms[0])
+
+    # KeepOldest: keep the side with the oldest member, unless down_if_alone and the oldest is alone against two or
+    # more, in which case the oldest downs itself and the others continue.
+
+    def _decide_keep_oldest(self, down_if_alone: bool) -> Decision:
+        if self.has_indirectly_connected:
+            return DownIndirectlyConnected()
+        ms = self.members()
+        if not ms:
+            return DownAllDecision()
+        oldest_is_reachable = not self.is_unreachable(ms[0])
+        decision = self._oldest_decision(down_if_alone, oldest_is_reachable, len(self.reachable_members()), len(self.unreachable_members()))
+        if isinstance(decision, DownUnreachable):
+            if isinstance(self._oldest_decision_when_including_membership_changes_edge_case(down_if_alone), DownUnreachable):
+                return DownUnreachable()
+            return DownAllDecision()
+        return decision
+
+    def _oldest_decision(self, down_if_alone: bool, oldest_is_on_this_side: bool, this_side: int, other_side: int) -> Decision:
+        # Two nodes: keep the oldest even though it is alone, the other side is no better. Three or more: the oldest
+        # alone against two or more shuts itself down when down_if_alone.
+        if oldest_is_on_this_side:
+            if down_if_alone and this_side == 1 and other_side >= 2:
+                return DownReachable()
+            return DownUnreachable()
+        if down_if_alone and other_side == 1 and this_side >= 2:
+            return DownUnreachable()
+        return DownReachable()
+
+    def _oldest_decision_when_including_membership_changes_edge_case(self, down_if_alone: bool) -> Decision:
+        """Exclude Leaving on this side (may be Exiting on the other); with down_if_alone count Joining and WeaklyUp
+        too, since they may be Up on the other side and flip the alone test."""
+        ms = self.members(including_possibly_up=False, excluding_possibly_exiting=True)
+        if not ms:
+            return DownAllDecision()
+        oldest_is_reachable = not self.is_unreachable(ms[0])
+        including_possibly_up = down_if_alone
+        reachable = len(self.reachable_members(including_possibly_up, excluding_possibly_exiting=True))
+        unreachable = len(self.unreachable_members(including_possibly_up, excluding_possibly_exiting=True))
+        return self._oldest_decision(down_if_alone, oldest_is_reachable, reachable, unreachable)
 
     def nodes_to_down(self, decision: Decision | None = None) -> frozenset[UniqueAddress]:
         if decision is None:

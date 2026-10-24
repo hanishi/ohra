@@ -2,7 +2,7 @@
 and the table merges by taking the newer row set per observer."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Literal
@@ -153,6 +153,9 @@ class Reachability:
     @property
     def all_observers(self) -> frozenset[UniqueAddress]:
         return frozenset(r.observer for r in self.records)
+
+    def filter_records(self, pred: Callable[[Record], bool]) -> Reachability:
+        return Reachability(tuple(r for r in self.records if pred(r)), self.versions)
 
     def records_from(self, observer: UniqueAddress) -> tuple[Record, ...]:
         return tuple(self._observer_rows.get(observer, {}).values())

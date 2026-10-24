@@ -32,6 +32,7 @@ from .vector_clock import VectorClock
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
+    from .sbr import SplitBrainResolverSettings
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,10 @@ class ClusterSettings:
     """How often a node re-sends its receptionist row to the others (anti-entropy); not a Pekko setting."""
     exiting_timeout: float = 10.0
     """How long an Exiting node waits for its exiting tasks (Pekko's cluster-exiting phase timeout)."""
+    downing: SplitBrainResolverSettings | None = None
+    """The split-brain resolver; None leaves downing manual, as Pekko without a downing provider."""
+    down_removal_margin: float = 0.0
+    """Pekko's down-removal-margin: 0 means the resolver's stable_after; see effective_down_removal_margin."""
 
     def __post_init__(self) -> None:
         positive = (
@@ -75,7 +80,7 @@ class ClusterSettings:
         )  # fmt: skip
         non_negative = (
             "periodic_tasks_initial_delay", "acceptable_heartbeat_pause", "max_gossips_before_shutting_down_myself",
-            "max_ticks_before_shutting_down_myself",
+            "max_ticks_before_shutting_down_myself", "down_removal_margin",
         )  # fmt: skip
         for name in positive:
             if getattr(self, name) <= 0:
@@ -87,6 +92,14 @@ class ClusterSettings:
             raise ValueError("gossip_different_view_probability must be in (0, 1]")
         if self.allow_weakly_up_members is not None and self.allow_weakly_up_members < 0:
             raise ValueError("allow_weakly_up_members must be >= 0 or None")
+
+    @property
+    def effective_down_removal_margin(self) -> float:
+        """Margin before a downed node's singletons and shards start elsewhere: the explicit value, else the resolver's
+        stable_after, else zero (Pekko's SplitBrainResolverProvider.downRemovalMargin and NoDowning)."""
+        if self.down_removal_margin > 0:
+            return self.down_removal_margin
+        return self.downing.stable_after if self.downing is not None else 0.0
 
 
 # --- commands and subscriptions (Pekko Typed's ClusterCommand and ClusterStateSubscription) ---------------

@@ -46,6 +46,7 @@ from .cluster.sharding import (
 from .cluster.sbr import DownAll, KeepMajority, KeepOldest, SplitBrainResolverSettings, StaticQuorum
 from .cluster.singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .context import ActorContext
+from .discovery import ConfigServiceDiscovery, Lookup, Resolved, ResolvedTarget, ServiceDiscovery
 from .coordinated_shutdown import (
     ActorSystemTerminateReason,
     ClusterDowningReason,
@@ -87,6 +88,7 @@ __all__ = [
     "ClusterShardingSettings",
     "ClusterSingleton",
     "ClusterSingletonSettings",
+    "ConfigServiceDiscovery",
     "CoordinatedShutdown",
     "CoordinatedShutdownSettings",
     "CurrentClusterState",
@@ -113,6 +115,7 @@ __all__ = [
     "LeaderChanged",
     "Leave",
     "Listing",
+    "Lookup",
     "MailboxOverflowError",
     "MailboxSelector",
     "Member",
@@ -140,12 +143,15 @@ __all__ = [
     "Registered",
     "RemoteRef",
     "Replyable",
+    "Resolved",
+    "ResolvedTarget",
     "RevisionConflictError",
     "Routers",
     "SelfRemoved",
     "SelfUp",
     "Serialization",
     "SerializationError",
+    "ServiceDiscovery",
     "ServiceKey",
     "ShardCommand",
     "Sharding",

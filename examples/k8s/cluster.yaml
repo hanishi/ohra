@@ -1,6 +1,6 @@
 # A three-pod pekko-py cluster on Kubernetes: the pods list each other through the API server (hence the service
 # account that may list pods) and form the cluster through Pekko's bootstrap; the probes are the management
-# health checks. Replace IMAGE with your image, see README.md "Running on Docker Desktop Kubernetes".
+# health checks. Replace IMAGE with your image, see docs/book/08-management-and-kubernetes.md.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

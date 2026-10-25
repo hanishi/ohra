@@ -10,7 +10,7 @@ replies with the result and its own pod name, which the submitter prints:
 Member events are printed too, so the logs show the pods joining, going Up and leaving. Deleting a pod runs the
 coordinated shutdown (SIGTERM): its shards hand off and its tasks continue on the others. The pod IP and name come
 from the downward API (POD_IP, POD_NAME); discovery needs the pods labelled app=cluster and a service account that
-may list them. See README.md, "Running on Docker Desktop Kubernetes".
+may list them. See docs/book/08-management-and-kubernetes.md.
 """
 import asyncio
 import os

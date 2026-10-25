@@ -1,6 +1,6 @@
 # Shopping carts on a three-pod cluster: FastAPI on every pod, the carts spread over the pods by cluster sharding and
 # persisted in one SQLite file that all pods share through a hostPath volume, which works on Docker Desktop's single
-# node only. Replace IMAGE with your image, see README.md "Carts: cluster sharding behind a web app".
+# node only. Replace IMAGE with your image, see docs/book/08-management-and-kubernetes.md, "Carts".
 apiVersion: v1
 kind: ServiceAccount
 metadata:

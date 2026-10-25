@@ -42,6 +42,8 @@ spec:
         app: cluster
     spec:
       serviceAccountName: cluster
+      imagePullSecrets:
+        - name: regcred             # for a private hub repository; harmless when the secret does not exist
       terminationGracePeriodSeconds: 30   # room for the coordinated shutdown to hand off shards and leave
       containers:
         - name: node

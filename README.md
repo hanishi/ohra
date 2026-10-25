@@ -357,6 +357,7 @@ On Kubernetes: give the pods the label `app=myapp`; bind a Role with `get` and `
 ```sh
 docker build -t YOU/pekko-py-cluster:dev -f examples/k8s/Dockerfile .
 docker login && docker push YOU/pekko-py-cluster:dev        # Docker Desktop's Kubernetes has its own image store, so the push is needed
+kubectl create secret docker-registry regcred --docker-username=YOU --docker-password=ACCESS_TOKEN   # only if the repository is private
 sed "s|IMAGE|YOU/pekko-py-cluster:dev|" examples/k8s/cluster.yaml | kubectl apply -f -
 kubectl get pods -l app=cluster -w                            # three pods, Ready once they are Up
 kubectl logs -l app=cluster -f --prefix                       # members joining, then the tasks and the pod that computed each
@@ -367,7 +368,7 @@ kubectl scale deploy/cluster --replicas=5                     # the new pods fin
 kubectl delete -f examples/k8s/cluster.yaml
 ```
 
-A new image needs a push and `kubectl rollout restart deploy/cluster` (or a new tag), since `IfNotPresent` keeps the one it has; the restart is itself a demonstration, since the old pods leave gracefully while the new ones bootstrap in. Any other cluster works the same way once the image is in a registry it can pull from.
+`ErrImagePull` with `pull access denied` means the repository is private: make it public in its settings on hub.docker.com, or create the `regcred` secret above with a Docker Hub access token; the manifest references it and the kubelet ignores it when it is missing. A new image needs a push and `kubectl rollout restart deploy/cluster` (or a new tag), since `IfNotPresent` keeps the one it has; the restart is itself a demonstration, since the old pods leave gracefully while the new ones bootstrap in. Any other cluster works the same way once the image is in a registry it can pull from.
 
 ### Split-brain resolver
 

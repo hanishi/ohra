@@ -1,7 +1,8 @@
 """Apache Pekko's CoordinatedShutdown: a fixed sequence of phases, each with a timeout, run by ``ActorSystem.
 terminate()``, by the cluster when this node leaves or is downed, and, opted in, on a signal. Tasks are added to
-phases; a phase's tasks run concurrently, a slow or failing task is logged and the run continues (Pekko's
-``recover = on``), and the last phase stops the system."""
+phases; a phase's tasks run concurrently, a failing task is logged and the run continues (Pekko's ``recover = on``),
+a phase that outlives its timeout is logged and its tasks are cancelled (Pekko lets them run on), and the last phase
+stops the system."""
 from __future__ import annotations
 
 import asyncio
@@ -50,7 +51,8 @@ _OWN_TIMEOUT: frozenset[str] = frozenset(p.name for p in PHASES if p.timeout != 
 @dataclass(frozen=True)
 class CoordinatedShutdownSettings:
     """Pekko's ``coordinated-shutdown`` settings, in seconds. ``run_on_signals`` installs a handler per signal that
-    runs the shutdown with ``JvmExitReason``; off by default, where Pekko's JVM shutdown hook is on."""
+    runs the shutdown with ``JvmExitReason``; off by default, where Pekko's JVM shutdown hook is on. A handler owns its
+    signal for the whole event loop: use it only when this system owns the process's signals."""
 
     default_phase_timeout: float = DEFAULT_PHASE_TIMEOUT
     phase_timeouts: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))

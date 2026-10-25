@@ -488,7 +488,9 @@ class Cluster:
 
     @property
     def is_terminated(self) -> bool:
-        return self._terminated or self.system.is_terminated
+        """True once the cluster daemon has stopped (Pekko's Cluster.isTerminated); a guardian that stopped on its own
+        does not count, since the node then still leaves through the coordinated shutdown."""
+        return self._terminated or self.system._system_root.done.done()  # pyright: ignore[reportPrivateUsage]
 
     def shutdown(self) -> None:
         """Leave the cluster for good: stops the cluster daemon, whose end runs the coordinated shutdown and so

@@ -30,7 +30,7 @@ from ..core import (
     MemberUp,
 )
 from ..core import Subscribe as ClusterSubscribe
-from ..gossip import Member, MemberStatus
+from ..gossip import Member
 
 _LEAVING_STATUSES = frozenset({"leaving", "exiting", "down"})
 _JOINING_STATUSES = frozenset({"joining", "weakly_up"})
@@ -249,7 +249,15 @@ class CoordinatorStopped:
     coordinator: ActorRef[Any]
 
 
-for _cls in (Register, RegisterAck, GetShardHome, ShardHome, ShardHomes, HostShard, ShardStarted, BeginHandOff, BeginHandOffAck, GracefulShutdownReq, CoordinatorStopped):
+@dataclass(frozen=True)
+class RegionStopped:
+    """A region that stopped tells its coordinator (ShardRegion.postStop), locally through the coordinator's watch and
+    remotely by this message: Pekko's RegionStopped, which makes a handed-off region gone at once."""
+
+    region: str
+
+
+for _cls in (Register, RegisterAck, GetShardHome, ShardHome, ShardHomes, HostShard, ShardStarted, BeginHandOff, BeginHandOffAck, GracefulShutdownReq, CoordinatorStopped, RegionStopped):
     Serialization.register(_cls, f"Sharding.{_cls.__name__}")  # the Receptionist already owns the manifest "Register"
 
 
@@ -285,11 +293,6 @@ class _RegionTerminatedForWorker:
 @dataclass(frozen=True)
 class _Terminate:
     """The coordinator singleton's stop message: stop once the local region has handed off (Pekko's Terminate)."""
-
-
-@dataclass(frozen=True)
-class _RegionStopped:
-    region: str
 
 
 @dataclass(frozen=True)
@@ -460,7 +463,7 @@ class _Coordinator:
         if path not in self.state.regions:
             self.state = self.state.updated(ShardRegionRegistered(path))
             if is_local_actor(region):  # Pekko's RegionStopped: the local region's end is what Terminate waits for
-                self.ctx.watch_with(region, _RegionStopped(path))
+                self.ctx.watch_with(region, RegionStopped(path))
         for shard in hosted:  # the region is the ground truth of what it hosts (Pekko reads this from ddata)
             owner = self.state.shards.get(shard)
             if owner is None:
@@ -538,14 +541,14 @@ class _Coordinator:
         else:
             self.stop_now = True
 
-    def on_member_removed(self, m: Member, previous_status: MemberStatus) -> None:
-        """A removed member's regions are terminated: at once after a graceful leave (Pekko's plain Terminated), after the
-        down-removal margin when it was Down, since a crashed or partitioned node may still run its shards (Pekko's
-        addressTerminated)."""
+    def on_member_removed(self, m: Member) -> None:
+        """A removed member's regions are terminated. One still alive, that never said it stopped, may still run its
+        shards on a crashed or partitioned node, so it waits the down-removal margin (Pekko's addressTerminated on a
+        live region); one that stopped after handing off told us so and is already gone."""
         self.registered_addresses.discard(m.unique_address)
         margin = self.cluster.settings.effective_down_removal_margin
         for path in [r for r in list(self.state.regions) + list(self.refs) if _is_at(r, m.address)]:
-            if margin > 0 and previous_status == "down" and path in self.alive_regions:
+            if margin > 0 and path in self.alive_regions:
                 self.region_termination_in_progress.add(path)  # GetShardHome for its shards waits, as Pekko's
                 self.ctx.timers.start_single_timer(("region-removed", path), _DelayedShardRegionTerminated(path), margin)
             else:
@@ -565,16 +568,16 @@ class _Coordinator:
                 case _ResendShardHost(shard, region):
                     if self.state.shards.get(shard) == region and region in self.refs:
                         self.send_host_shard(shard, region)
-                case MemberRemoved(member=m, previous_status=previous):
+                case MemberRemoved(member=m):
                     self.touch_gate()
-                    self.on_member_removed(m, previous)
+                    self.on_member_removed(m)
                 case MemberUp() | MemberLeft() | MemberExited():
                     self.touch_gate()
                 case ClusterDomainEvent():
                     pass
                 case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
                     self.on_rebalance_message(msg)
-                case _RegionStopped(path):
+                case RegionStopped(path):
                     self.region_terminated(path)
                 case _DelayedShardRegionTerminated(path):
                     if path in self.state.regions or path in self.refs:

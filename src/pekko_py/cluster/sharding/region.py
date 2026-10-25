@@ -43,6 +43,7 @@ from .coordinator import (
     GracefulShutdownReq,
     HostShard,
     Register,
+    RegionStopped,
     RegisterAck,
     ShardHome,
     ShardHomes,
@@ -299,6 +300,8 @@ class _Region:
 
         def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
             if sig is PostStop:
+                if self.coordinator is not None:
+                    self.coordinator.tell(RegionStopped(self.ctx.self.path))  # ShardRegion.postStop
                 self.exiting_done()
             return Behaviors.same
 

@@ -6,7 +6,11 @@ import asyncio
 from contextlib import AsyncExitStack
 
 from pekko_py import (
+    ActorSystem,
     ActorSystemTerminateReason,
+    Behavior,
+    Behaviors,
+    ClusterSettings,
     ClusterDomainEvent,
     ClusterDowningReason,
     ClusterLeavingReason,
@@ -22,7 +26,7 @@ from pekko_py.patterns import ask
 from pekko_py.remote import Address
 
 from ..util import eventually, free_port
-from .test_cluster import all_up, cluster_node, probe
+from .test_cluster import FAST, FAST_SHUTDOWN, all_up, cluster_node, probe
 from .test_cluster_sharding import Count, hosted, ids_hosted_by, ref
 from .test_cluster_sharding import node as sharding_node
 from .test_cluster_sharding import start as start_sharding
@@ -175,3 +179,25 @@ async def test_a_gracefully_left_region_is_forgotten_without_the_removal_margin(
         # ~1 s: the coordinator singleton, alone and exiting, waits one hand-over retry before stopping, as Pekko's;
         # with b's region kept for the margin it would be the margin on top (2 s)
         assert asyncio.get_running_loop().time() - began < 1.5
+
+
+async def test_a_guardian_that_stops_itself_leaves_gracefully():
+    """Pekko Typed's guardian wrapper turns the guardian's stop into terminate(), so the phases run."""
+    p1, p2 = two_ports()
+    async with AsyncExitStack() as stack:
+        a = await stack.enter_async_context(cluster_node("c", p1, [p1]))
+        guardian: Behavior[str] = Behaviors.receive_message(lambda _m: Behaviors.stopped())
+        seeds = (Address("c", "127.0.0.1", p1),)
+        b = await stack.enter_async_context(
+            ActorSystem(guardian, "c", address=("127.0.0.1", p2), cluster=ClusterSettings(seed_nodes=seeds, **FAST), shutdown=FAST_SHUTDOWN)
+        )
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        events: list[ClusterDomainEvent] = []
+        Cluster(a).subscriptions.tell(Subscribe(probe(events), ClusterDomainEvent))
+        b.tell("stop")
+        await asyncio.wait_for(b.when_terminated(), timeout=5)
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        names = [type(e).__name__ for e in events if isinstance(e, MemberEvent) and e.member.unique_address.port == p2]
+        assert names == ["MemberUp", "MemberLeft", "MemberExited", "MemberRemoved"]
+        assert not any(isinstance(e, UnreachableMember) for e in events)
+        assert CoordinatedShutdown(b).shutdown_reason == ActorSystemTerminateReason()

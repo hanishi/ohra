@@ -46,6 +46,7 @@ class ActorSystem[T](ActorRef[T]):
         """Set when the system is reachable from other nodes; paths then read pekko://name@host:port/..."""
         self.remoting: Remoting | None = Remoting(self, self.address) if self.address else None
         self._shutdown: asyncio.Task[None] | None = None
+        self._stop_requested = False  # set by _final_terminate; a guardian stopping on its own leaves it False
         root = self.address.root if self.address else f"pekko://{name}"
         self._root: ActorCell[T] = ActorCell(self, None, "user", f"{root}/user", guardian, mailbox or MailboxSelector())
         self.ignore_ref: ActorRef[Any] = FunctionRef(f"{root}/ignore", lambda _: None)
@@ -115,7 +116,11 @@ class ActorSystem[T](ActorRef[T]):
 
     def _final_terminate(self) -> None:
         """Stop the guardian and its subtree, then the system root (Pekko's finalTerminate)."""
-        self._root.send_sys(_stop_msg())
+        self._stop_requested = True
+        if self._root.done.done():  # the guardian already stopped on its own: only /system is left
+            self._system_root.send_sys(_stop_msg())
+        else:
+            self._root.send_sys(_stop_msg())
 
     def _on_signal(self) -> None:
         from .coordinated_shutdown import JvmExitReason
@@ -131,6 +136,13 @@ class ActorSystem[T](ActorRef[T]):
     def _user_root_stopped(self) -> None:
         if self.remoting is not None:
             self.remoting.listening.set()  # a cluster daemon still waiting to listen must not block the stop
+        if not self._stop_requested and self.coordinated_shutdown.settings.run_by_actor_system_terminate:
+            # The guardian stopped on its own: Pekko Typed's guardian wrapper turns that into terminate(), so a cluster
+            # node still leaves gracefully; the phases run after the user actors are gone.
+            from .coordinated_shutdown import ActorSystemTerminateReason
+
+            self.coordinated_shutdown.run(ActorSystemTerminateReason())
+            return
         self._system_root.send_sys(_stop_msg())
 
     def _close_remoting(self) -> None:

@@ -1,0 +1,101 @@
+# Shopping carts on a three-pod cluster: FastAPI on every pod, the carts spread over the pods by cluster sharding and
+# persisted in one SQLite file that all pods share through a hostPath volume, which works on Docker Desktop's single
+# node only. Replace IMAGE with your image, see README.md "Carts: cluster sharding behind a web app".
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: carts
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: carts-pod-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: carts-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: carts
+roleRef:
+  kind: Role
+  name: carts-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carts
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: carts              # what KubernetesApiServiceDiscovery looks up: app=<service_name>
+  template:
+    metadata:
+      labels:
+        app: carts
+    spec:
+      serviceAccountName: carts
+      imagePullSecrets:
+        - name: regcred             # for a private hub repository; harmless when the secret does not exist
+      terminationGracePeriodSeconds: 30   # room for uvicorn to drain, then the carts to hand off and the pod to leave
+      containers:
+        - name: carts
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "carts:app", "--app-dir", "examples/k8s", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: remoting
+              containerPort: 2551
+            - name: management        # the bootstrap's port_name
+              containerPort: 7626
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CARTS_DB
+              value: /data/carts.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: management
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /alive
+              port: management
+            periodSeconds: 10
+      volumes:
+        - name: data
+          hostPath:
+            path: /tmp/pekko-py-carts   # on the Kubernetes node; one node, so every pod sees the same file
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carts
+spec:
+  type: LoadBalancer          # Docker Desktop publishes it on localhost:8000
+  selector:
+    app: carts
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

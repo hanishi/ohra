@@ -460,3 +460,32 @@ async def test_factory_failure_after_the_write_sends_no_reply():
 def test_sqlite_store_rejects_in_memory_databases():
     with pytest.raises(ValueError):
         SqliteStore[int](":memory:")  # each call opens a fresh connection, so the table would vanish between calls
+
+
+def _open_store(path: str, barrier: object, out: object) -> None:
+    from pekko_py import SqliteStore
+
+    barrier.wait()  # type: ignore[attr-defined]
+    try:
+        SqliteStore[int](path)
+        out.put("ok")  # type: ignore[attr-defined]
+    except Exception as e:  # noqa: BLE001
+        out.put(repr(e))  # type: ignore[attr-defined]
+
+
+def test_sqlite_store_opens_a_fresh_database_from_racing_processes(tmp_path):
+    # Pods starting together on one shared file: switching a fresh database to WAL fails at once with
+    # "database is locked" for the losers (SQLite's deadlock avoidance skips the busy timeout), so it is retried.
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    results: list[str] = []
+    for i in range(10):
+        barrier, out = ctx.Barrier(4), ctx.Queue()
+        procs = [ctx.Process(target=_open_store, args=(str(tmp_path / f"r{i}.db"), barrier, out)) for _ in range(4)]
+        for p in procs:
+            p.start()
+        results += [out.get(timeout=30) for _ in procs]
+        for p in procs:
+            p.join()
+    assert [r for r in results if r != "ok"] == []

@@ -18,6 +18,7 @@ import contextlib
 import os
 import pickle
 import sqlite3
+import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -83,12 +84,22 @@ class SqliteStore[S]:
         if not self.path.parent.is_dir():
             raise FileNotFoundError(f"directory for {self.path} does not exist")
         self._dumps, self._loads = codec
-        with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")  # writers do not block readers, and commits are cheaper
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS state ("
-                "persistence_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data BLOB NOT NULL)"
-            )
+        # Processes opening one fresh file together (pods starting at once): switching it to WAL fails at once with
+        # "database is locked" for all but one, since SQLite's deadlock avoidance skips the busy timeout. Retry
+        # for about the 5 s that timeout would have waited.
+        for attempt in range(100):
+            try:
+                with self._connect() as conn:
+                    conn.execute("PRAGMA journal_mode=WAL")  # writers do not block readers, and commits are cheaper
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS state ("
+                        "persistence_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data BLOB NOT NULL)"
+                    )
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or attempt == 99:
+                    raise
+                time.sleep(0.05)
 
     def _connect(self) -> contextlib.closing[sqlite3.Connection]:
         # Autocommit: each statement is its own transaction. closing() so the connection does not wait for GC.

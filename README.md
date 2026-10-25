@@ -370,6 +370,22 @@ kubectl delete -f examples/k8s/cluster.yaml
 
 `ErrImagePull` with `pull access denied` means the repository is private: make it public in its settings on hub.docker.com, or create the `regcred` secret above with a Docker Hub access token; the manifest references it and the kubelet ignores it when it is missing. A new image needs a push and `kubectl rollout restart deploy/cluster` (or a new tag), since `IfNotPresent` keeps the one it has; the restart is itself a demonstration, since the old pods leave gracefully while the new ones bootstrap in. Any other cluster works the same way once the image is in a registry it can pull from.
 
+#### Carts: cluster sharding behind a web app
+
+`examples/k8s/carts.py` is `examples/fastapi_carts.py` on the cluster: FastAPI on every pod, one sharded cart entity per cart id persisted with `SqliteStore`, and `ClusterSharding.entity_ref_for` in the routes, so any pod serves any cart. Every response names the pod that took the request (`served_by`) and the pod running the cart (`hosted_on`). `examples/k8s/carts.yaml` runs three pods from the same image under uvicorn, with a LoadBalancer Service that Docker Desktop publishes on `localhost:8000`, and one SQLite file shared through a `hostPath` volume. With the image built and pushed as above:
+
+```sh
+sed "s|IMAGE|YOU/pekko-py-cluster:dev|" examples/k8s/carts.yaml | kubectl apply -f -
+curl -X POST localhost:8000/carts/alice/items -H 'content-type: application/json' -d '{"sku": "book", "qty": 2}'
+curl localhost:8000/carts/alice          # repeat: served_by changes from request to request, hosted_on stays put
+kubectl delete pod CARTS-POD-FROM-HOSTED_ON
+curl localhost:8000/carts/alice          # the same items, now hosted_on another pod: recovered from the store
+curl -X DELETE localhost:8000/carts/alice   # checkout; the cart is then 404
+kubectl delete -f examples/k8s/carts.yaml
+```
+
+uvicorn owns SIGTERM here: it stops taking requests first, then the app's lifespan exits and runs the coordinated shutdown, so a deleted pod has stopped serving before its carts hand off and it leaves. The shared SQLite file works because Docker Desktop has one node and sharding keeps one writer per cart, with the store's revision check behind it; on a cluster with several nodes the store would be a shared database behind the same `Store` protocol.
+
 ### Split-brain resolver
 
 Without a downing provider an unreachable member stays unreachable until someone sends `Down`, and until then the leader cannot move any member, so a crashed oldest node blocks singleton hand-over and shard reallocation. Apache Pekko's split-brain resolver is the provider: a child of the core daemon, active on the leader, that waits until membership and reachability have been stable for `stable_after` and then downs one side by a strategy, so the leader can remove it. Turn it on with `downing=`:
@@ -458,7 +474,7 @@ Messages are shared by reference and never copied. Keep them immutable: frozen d
 
 ### FastAPI
 
-`pekko_py.ext.fastapi.Actors` owns an `ActorSystem` for the life of a FastAPI app and hands it to routes as a typed dependency, so `ask` replies are type-checked all the way to the response. An `AskTimeoutError` that escapes a route becomes a 504. Needs the `web` extra. To stop taking requests before a cluster node leaves, add a task to the `service-unbind` phase of the coordinated shutdown, and let uvicorn keep its signals: its shutdown should call `system.terminate()` rather than `run_on_signals` taking SIGTERM.
+`pekko_py.ext.fastapi.Actors` owns an `ActorSystem` for the life of a FastAPI app and hands it to routes as a typed dependency, so `ask` replies are type-checked all the way to the response. An `AskTimeoutError` that escapes a route becomes a 504. Keyword arguments after the name go to `ActorSystem` (`address`, `cluster`, `shutdown`, `management`), so a cluster node can be owned by the app. Needs the `web` extra. To stop taking requests before a cluster node leaves, add a task to the `service-unbind` phase of the coordinated shutdown, and let uvicorn keep its signals: its shutdown should call `system.terminate()` rather than `run_on_signals` taking SIGTERM.
 
 ```python
 from fastapi import FastAPI
@@ -603,6 +619,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | `examples/remoting/` | two processes: `greeter_node.py` listens on 2552, `client_node.py` resolves it by path, tells and asks across the wire |
 | `examples/cluster/` | `node.py NAME PORT [SEED_PORT ...]`, or `node.py NAME PORT --bootstrap PORT...` to form the cluster with no seeds through Pekko's bootstrap: start three in three terminals, watch them join, go Up and elect a leader, each node's greeter appear in every node's Receptionist listing, one counter singleton answer all of them, and the sharded counters for three ids spread over the nodes; ctrl-c a node, which leaves gracefully, and the singleton and the shards it hosted move to the others; management on port + 1000 (`curl localhost:3551/cluster/members`) |
 | `examples/k8s/` | `node.py`, `Dockerfile` and `cluster.yaml`: a three-pod cluster on Docker Desktop Kubernetes that finds itself through the API server and spreads a simulated calculation over the pods with sharding; delete a pod and its tasks move, scale up and the new pods take shards; see "Running on Docker Desktop Kubernetes" |
+| `examples/k8s/carts.py` | the FastAPI carts on a three-pod cluster: any pod serves any cart, each cart lives on one pod and moves with its items when that pod goes; `carts.yaml`, see "Carts: cluster sharding behind a web app" |
 | `examples/persisted_counter.py` | `Behaviors.persisted` with `SqliteStore`: the total survives a supervised restart and a new actor system; run it twice and it keeps counting |
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
 | `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |

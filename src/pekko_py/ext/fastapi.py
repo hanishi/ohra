@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Any, cast
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -24,9 +24,11 @@ from ..system import ActorSystem
 
 
 class Actors[T]:
-    def __init__(self, guardian: Behavior[T], name: str = "app") -> None:
+    def __init__(self, guardian: Behavior[T], name: str = "app", **settings: Any) -> None:
+        """``settings`` go to ``ActorSystem``: ``address``, ``cluster``, ``shutdown``, ``management``, ``mailbox``."""
         self._guardian = guardian
         self._name = name
+        self._settings = settings
         self._system: ActorSystem[T] | None = None
 
     @property
@@ -39,7 +41,7 @@ class Actors[T]:
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None]:
         app.add_exception_handler(AskTimeoutError, _ask_timeout_to_504)
-        async with ActorSystem(self._guardian, self._name) as system:
+        async with ActorSystem(self._guardian, self._name, **self._settings) as system:
             self._system = system
             yield
 

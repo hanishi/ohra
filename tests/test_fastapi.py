@@ -79,3 +79,13 @@ def test_system_before_startup_is_an_error():
     actors = Actors(greeter, "web")
     with pytest.raises(RuntimeError):
         _ = actors.system
+
+
+async def test_system_settings_reach_the_actor_system():
+    from pekko_py import CoordinatedShutdownSettings
+
+    settings = CoordinatedShutdownSettings(default_phase_timeout=1.5)
+    actors = Actors(greeter, "web", shutdown=settings)  # address=, cluster=, management= pass the same way
+    app = FastAPI(lifespan=actors.lifespan)
+    async with app.router.lifespan_context(app):
+        assert actors.system.coordinated_shutdown.settings is settings

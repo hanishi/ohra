@@ -16,6 +16,7 @@ from ..remote import Address, UniqueAddress
 from ..remote.serialization import remotable
 from ..signals import PostStop, Signal
 from ..supervision import SupervisorStrategy
+from ..coordinated_shutdown import CoordinatedShutdown
 from .core import (
     Cluster,
     ClusterDomainEvent,
@@ -195,8 +196,16 @@ class IdentifySingleton:
 # --- the manager (ClusterSingletonManager) --------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _SelfExiting: ...
+@dataclass(frozen=True, eq=False)
+class _SelfExiting:
+    """CoordinatedShutdown's singleton-exiting-1: this member is leaving; ``done`` is completed once handled (the ask)."""
+
+    done: asyncio.Future[None] | None = None
+
+
+def _complete(future: asyncio.Future[None] | None) -> None:
+    if future is not None and not future.done():
+        future.set_result(None)
 
 
 @dataclass(frozen=True)
@@ -242,16 +251,27 @@ type _ManagerMsg = (
 
 class _ExitingProgress:
     """Pekko's memberExitingProgress and the SelfExiting ask, held outside the actor so a restarted manager
-    (the system guardian restarts a stuck one) keeps the one registered exiting task."""
+    (the system guardian restarts a stuck one) keeps the registered shutdown tasks."""
 
     def __init__(self) -> None:
         self.future: asyncio.Future[None] | None = None
 
-    def task(self, cluster: Cluster, manager: ActorRef[Any]) -> Callable[[], Awaitable[None]]:
+    def singleton_exiting_1(self, cluster: Cluster, manager: ActorRef[Any]) -> Callable[[], Awaitable[None]]:
+        """ClusterSingletonManager's cluster-exiting task 1: tell the manager SelfExiting and await its answer."""
+
         async def run() -> None:
             if cluster.is_terminated or cluster.self_member.status == "down":
                 return
-            manager.tell(_SelfExiting())
+            done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            manager.tell(_SelfExiting(done))
+            await asyncio.shield(done)
+
+        return run
+
+    def singleton_exiting_2(self) -> Callable[[], Awaitable[None]]:
+        """Task 2: await the hand-over (memberExitingProgress)."""
+
+        async def run() -> None:
             if self.future is not None:
                 await asyncio.shield(self.future)
 
@@ -397,8 +417,9 @@ class _Manager:
 
     def unhandled(self, msg: _ManagerMsg) -> Behavior[_ManagerMsg]:
         match msg:
-            case _SelfExiting():
+            case _SelfExiting(done):
                 self.self_member_exited()
+                _complete(done)
                 self.exiting_done()
             case MemberRemoved(member=m) if m.unique_address == self.self_unique_address and not self.self_exited:
                 return self.stop()
@@ -564,8 +585,9 @@ class _Manager:
                     return Behaviors.same
                 case _InstanceTerminated(ref) if ref == instance:
                     return self.oldest(None)
-                case _SelfExiting():
+                case _SelfExiting(done):
                     self.self_member_exited()
+                    _complete(done)
                     return Behaviors.same
                 case MemberDowned(member=m) if m.unique_address == self.self_unique_address:
                     return self.goto_stopping(instance) if instance is not None else self.stop()
@@ -620,8 +642,9 @@ class _Manager:
                     return self.goto_handing_over(instance, None)
                 case _InstanceTerminated(ref) if instance is not None and ref == instance:
                     return self.was_oldest(None, new_oldest)
-                case _SelfExiting():
+                case _SelfExiting(done):
                     self.self_member_exited()
+                    _complete(done)
                     return Behaviors.same
                 case MemberDowned(member=m) if m.unique_address == self.self_unique_address:
                     leave()
@@ -652,8 +675,9 @@ class _Manager:
                 case HandOverToMe(from_) if hand_over_to is not None and from_.path == hand_over_to.path:
                     from_.tell(HandOverInProgress())
                     return Behaviors.same
-                case _SelfExiting():
+                case _SelfExiting(done):
                     self.self_member_exited()
+                    _complete(done)
                     return Behaviors.same
                 case IdentifySingleton(reply_to, identify_id):
                     reply_to.tell(SingletonIdentity(identify_id, instance))
@@ -820,7 +844,9 @@ class ClusterSingleton:
         root = self.system._system_root  # pyright: ignore[reportPrivateUsage]
         progress = _ExitingProgress()
         manager = root.spawn_child(_manager(singleton, settings, progress), _manager_name(singleton.name), None)
-        Cluster(self.system).add_exiting_task(progress.task(Cluster(self.system), manager.ref))
+        shutdown = CoordinatedShutdown(self.system)
+        shutdown.add_task("cluster-exiting", f"singleton-exiting-1-{singleton.name}", progress.singleton_exiting_1(Cluster(self.system), manager.ref))
+        shutdown.add_task("cluster-exiting", f"singleton-exiting-2-{singleton.name}", progress.singleton_exiting_2())
         proxy = root.spawn_child(_proxy(singleton.name, settings), _proxy_name(singleton.name), None)
         self._proxies[singleton.name] = proxy.ref
         return proxy.ref

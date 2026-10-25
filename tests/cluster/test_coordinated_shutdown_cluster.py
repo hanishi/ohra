@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack
 
-import pytest
-
 from pekko_py import (
     ActorSystemTerminateReason,
     ClusterDomainEvent,
@@ -20,10 +18,17 @@ from pekko_py import (
     UnreachableMember,
 )
 from pekko_py.cluster.core import Cluster
+from pekko_py.patterns import ask
 from pekko_py.remote import Address
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node, probe
+from .test_cluster_sharding import Count, hosted, ids_hosted_by, ref
+from .test_cluster_sharding import node as sharding_node
+from .test_cluster_sharding import start as start_sharding
+from .test_singleton import Hit, Log, never_two_at_once, starts, stops
+from .test_singleton import node as singleton_node
+from .test_singleton import start as start_singleton
 
 
 def two_ports() -> tuple[int, int]:
@@ -106,4 +111,47 @@ async def test_downed_node_terminates_through_the_phases():
         await eventually(lambda: all_up(nodes[0], 2) and all_up(nodes[1], 2), timeout=5)
 
 
-_unused = pytest  # keep the fixture import for later tests
+
+# --- singleton and sharding through the phases (Task 3) -------------------------------------------------------
+
+
+async def test_singleton_hands_over_on_terminate():
+    p1, p2, p3 = sorted((free_port(), free_port(), free_port()))
+    async with AsyncExitStack() as stack:
+        a, b, c = [await stack.enter_async_context(singleton_node(p, [p1])) for p in (p1, p2, p3)]
+        await eventually(lambda: all(all_up(n, 3) for n in (a, b, c)), timeout=5)
+        log: Log = []
+        proxies = [start_singleton(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
+        assert await ask(proxies[2], Hit, timeout=3) == 1
+        a.terminate()
+        await asyncio.wait_for(a.when_terminated(), timeout=5)
+        await eventually(lambda: starts(log) == [p1, p2], timeout=5)
+        assert stops(log) == [p1] and never_two_at_once(log)
+        await eventually(lambda: all_up(c, 2), timeout=5)
+        assert await ask(proxies[2], Hit, timeout=3) == 1
+
+
+async def test_shards_hand_off_before_the_node_leaves():
+    p1, p2, p3 = sorted((free_port(), free_port(), free_port()))
+    async with AsyncExitStack() as stack:
+        nodes = [await stack.enter_async_context(sharding_node(p, [p1])) for p in (p1, p2, p3)]
+        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+        regions = [start_sharding(n) for n in nodes]
+        where = await ids_hosted_by(regions, nodes, 12)
+        on_c = [e for e, i in where.items() if i == 2]
+        assert on_c
+        hosted_at_leave: list[frozenset[str]] = []
+
+        async def record() -> None:  # runs in cluster-leave: after the region phase, before the member leaves
+            try:
+                hosted_at_leave.append(await asyncio.wait_for(hosted(regions[2]), 0.5))
+            except TimeoutError:  # the region stopped itself once everything was handed off, as Pekko's does
+                hosted_at_leave.append(frozenset())
+
+        CoordinatedShutdown(nodes[2]).add_task("cluster-leave", "record", record)
+        nodes[2].terminate()
+        await asyncio.wait_for(nodes[2].when_terminated(), timeout=8)
+        assert hosted_at_leave == [frozenset()]  # every entity had been handed off before the leave began
+        await eventually(lambda: all_up(nodes[0], 2) and all_up(nodes[1], 2), timeout=5)
+        for e in on_c:
+            assert await ask(ref(nodes[0], e), lambda r: Count(1, r), timeout=5) == 1  # a fresh entity elsewhere (state is in memory)

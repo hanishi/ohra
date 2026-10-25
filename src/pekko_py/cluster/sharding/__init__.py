@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...behavior import Behaviors
 from ...ref import ActorRef
+from ...coordinated_shutdown import CoordinatedShutdown
 from ..core import Cluster
 from ..singleton import ClusterSingleton, SingletonActor
 from .coordinator import (
@@ -98,7 +99,9 @@ class ClusterSharding:
             self._parent = self.system._system_root.spawn_child(Behaviors.empty, "sharding", None)  # pyright: ignore[reportPrivateUsage]
         progress = _ExitingProgress()
         region = self._parent.spawn_child(region_behavior(entity, settings, progress), name, None)
-        Cluster(self.system).add_exiting_task(progress.task(Cluster(self.system), region.ref))
+        CoordinatedShutdown(self.system).add_task(
+            "cluster-sharding-shutdown-region", f"region-shutdown-{name}", progress.task(Cluster(self.system), region.ref)
+        )
         ClusterSingleton(self.system).init(SingletonActor(coordinator_behavior(name, settings), f"{name}Coordinator").with_stop_message(_Terminate()))
         self._regions[name] = region.ref
         return region.ref

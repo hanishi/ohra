@@ -67,11 +67,12 @@ class _ShardTerminated:
 
 
 @dataclass(frozen=True)
-class _SelfExiting: ...
+class _GracefulShutdown:
+    """CoordinatedShutdown's region-shutdown task (Pekko's GracefulShutdown): hand every shard off."""
 
 
 class _ExitingProgress:
-    """The region's exiting task: ask the region to shut down gracefully and wait until it holds nothing."""
+    """The region's cluster-sharding-shutdown-region task: ask it to shut down gracefully, wait until it holds nothing."""
 
     def __init__(self) -> None:
         self.future: asyncio.Future[None] | None = None
@@ -80,7 +81,7 @@ class _ExitingProgress:
         async def run() -> None:
             if cluster.is_terminated or cluster.self_member.status == "down":
                 return
-            region.tell(_SelfExiting())
+            region.tell(_GracefulShutdown())
             if self.future is not None:
                 await asyncio.shield(self.future)
 
@@ -289,7 +290,7 @@ class _Region:
                     if self.coordinator is None:
                         self.register()
                         self.schedule_next_registration()
-                case _SelfExiting():
+                case _GracefulShutdown():
                     self.graceful_shutdown_in_progress = True
                     self.send_graceful_shutdown_to_coordinator()
                 case _:

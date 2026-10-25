@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -489,10 +489,6 @@ class Cluster:
     @property
     def is_terminated(self) -> bool:
         return self._terminated or self.system.is_terminated
-
-    def add_exiting_task(self, fn: Callable[[], Awaitable[None]]) -> None:
-        """Transitional: a task in the cluster-exiting phase; use CoordinatedShutdown(system).add_task."""
-        CoordinatedShutdown(self.system).add_task("cluster-exiting", f"exiting-task-{id(fn)}", fn)
 
     def shutdown(self) -> None:
         """Leave the cluster for good: stops the cluster daemon, whose end runs the coordinated shutdown and so

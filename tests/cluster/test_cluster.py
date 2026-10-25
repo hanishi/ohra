@@ -10,7 +10,17 @@ from typing import Any, cast
 
 import pytest
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, ClusterLeavingReason, CoordinatedShutdown, CoordinatedShutdownSettings
+from pekko_py import (
+    ActorContext,
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    ClusterLeavingReason,
+    CoordinatedShutdown,
+    CoordinatedShutdownSettings,
+    PekkoManagementSettings,
+)
 from pekko_py.cluster.core import (
     Cluster,
     ClusterDomainEvent,
@@ -58,8 +68,15 @@ FAST_SHUTDOWN = CoordinatedShutdownSettings(
 Pekko; 0.3 s instead of ten keeps the crash-style tests' teardown short. Nodes that hand off use their own helpers."""
 
 
-def cluster_node(name: str, port: int, seeds: list[int], shutdown: CoordinatedShutdownSettings = FAST_SHUTDOWN, **settings: Any) -> ActorSystem[Any]:
-    """A node whose guardian ignores messages; the cluster lives under /system."""
+def cluster_node(
+    name: str,
+    port: int,
+    seeds: list[int],
+    shutdown: CoordinatedShutdownSettings = FAST_SHUTDOWN,
+    management: PekkoManagementSettings | None = None,
+    **settings: Any,
+) -> ActorSystem[Any]:
+    """A node whose guardian ignores messages; the cluster lives under /system. Management binds an ephemeral port."""
     seed_nodes = tuple(Address(name, "127.0.0.1", p) for p in seeds)
     return ActorSystem(
         Behaviors.ignore,
@@ -67,6 +84,7 @@ def cluster_node(name: str, port: int, seeds: list[int], shutdown: CoordinatedSh
         address=("127.0.0.1", port),
         cluster=ClusterSettings(seed_nodes=seed_nodes, **{**FAST, **settings}),
         shutdown=shutdown,
+        management=management or PekkoManagementSettings(hostname="127.0.0.1", port=0),
     )
 
 

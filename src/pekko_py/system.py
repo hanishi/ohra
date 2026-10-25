@@ -17,6 +17,7 @@ from .remote.remoting import Remoting, UniqueAddress, resolve_local, unique_addr
 if TYPE_CHECKING:
     from .cluster.core import Cluster, ClusterSettings
     from .coordinated_shutdown import CoordinatedShutdownSettings
+    from .management import PekkoManagement, PekkoManagementSettings
     from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
@@ -36,6 +37,7 @@ class ActorSystem[T](ActorRef[T]):
         address: tuple[str, int] | None = None,
         cluster: ClusterSettings | None = None,
         shutdown: CoordinatedShutdownSettings | None = None,
+        management: PekkoManagementSettings | None = None,
     ) -> None:
         self.name = name
         self.log = logging.getLogger(f"pekko_py.system.{name}")
@@ -73,9 +75,16 @@ class ActorSystem[T](ActorRef[T]):
         from .receptionist import Receptionist as _Receptionist
 
         _Receptionist(self)  # after the cluster, so a cluster node's receptionist replicates from the start
+        from .management import PekkoManagement as _PekkoManagement
+        from .management import PekkoManagementSettings as _PMSettings
+
+        self.management: PekkoManagement = _PekkoManagement._start(self, management or _PMSettings())  # pyright: ignore[reportPrivateUsage]
+        """Pekko Management, reached as ``PekkoManagement(system)``; binds nothing until ``start()``."""
+        self._management_stop: asyncio.Task[None] | None = None
         # Shutdown order: user root, then system root, then remoting, however the user root went.
         self._root.done.add_done_callback(lambda _: self._user_root_stopped())
         self._system_root.done.add_done_callback(lambda _: self._close_remoting())
+        self._system_root.done.add_done_callback(lambda _: self._stop_management())
         loop = asyncio.get_running_loop()
         for sig in self.coordinated_shutdown.settings.run_on_signals:
             loop.add_signal_handler(sig, self._on_signal)
@@ -149,12 +158,19 @@ class ActorSystem[T](ActorRef[T]):
         if self.remoting is not None and self._shutdown is None:
             self._shutdown = asyncio.get_running_loop().create_task(self.remoting.close())
 
+    def _stop_management(self) -> None:
+        if self._management_stop is None:
+            self._management_stop = asyncio.get_running_loop().create_task(self.management.stop())
+
     async def when_terminated(self) -> None:
         await asyncio.shield(self._root.done)
         await asyncio.shield(self._system_root.done)
         self._close_remoting()  # the done callback above may still be queued behind this very resumption
         if self._shutdown is not None:
             await asyncio.shield(self._shutdown)
+        self._stop_management()
+        if self._management_stop is not None:
+            await asyncio.shield(self._management_stop)
         run = self.coordinated_shutdown._run  # pyright: ignore[reportPrivateUsage]
         if run is not None:
             await asyncio.shield(run)  # the phases after the stop are only the run's own bookkeeping; no task outlives us

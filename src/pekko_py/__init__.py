@@ -57,6 +57,8 @@ from .coordinated_shutdown import (
     Reason,
 )
 from .mailbox import MailboxOverflowError, MailboxSelector
+from .management import PekkoManagement, PekkoManagementSettings
+from .management.health import HealthCheckSettings
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
 from .receptionist import Deregister, Deregistered, Find, Listing, Receptionist, Register, Registered, ServiceKey
 from .persistence import InMemoryStore, Persist, Persisted, PersistenceError, RevisionConflictError, SqliteStore, Store
@@ -106,6 +108,7 @@ __all__ = [
     "Find",
     "GetCurrentState",
     "GetShardRegionState",
+    "HealthCheckSettings",
     "InMemoryStore",
     "Join",
     "JoinSeedNodes",
@@ -128,6 +131,8 @@ __all__ = [
     "MemberUp",
     "MemberWeaklyUp",
     "Passivate",
+    "PekkoManagement",
+    "PekkoManagementSettings",
     "Persist",
     "Persisted",
     "PersistenceError",

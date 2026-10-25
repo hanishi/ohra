@@ -1,0 +1,196 @@
+{
+ "kind": "PodList",
+ "items": [
+  {
+   "spec": {
+    "containers": [
+     {
+      "name": "app",
+      "ports": [
+       {
+        "name": "management",
+        "containerPort": 7626
+       },
+       {
+        "name": "remoting",
+        "containerPort": 2552
+       }
+      ]
+     }
+    ]
+   },
+   "metadata": {
+    "name": "x"
+   },
+   "status": {
+    "phase": "Running",
+    "containerStatuses": [
+     {
+      "name": "app",
+      "state": {
+       "running": {}
+      }
+     }
+    ],
+    "podIP": "10.1.0.5"
+   }
+  },
+  {
+   "spec": {
+    "containers": [
+     {
+      "name": "app",
+      "ports": [
+       {
+        "name": "management",
+        "containerPort": 7626
+       },
+       {
+        "name": "remoting",
+        "containerPort": 2552
+       }
+      ]
+     }
+    ]
+   },
+   "metadata": {
+    "name": "x",
+    "deletionTimestamp": "2026-10-25T00:00:00Z"
+   },
+   "status": {
+    "phase": "Running",
+    "containerStatuses": [
+     {
+      "name": "app",
+      "state": {
+       "running": {}
+      }
+     }
+    ],
+    "podIP": "10.1.0.6"
+   }
+  },
+  {
+   "spec": {
+    "containers": [
+     {
+      "name": "app",
+      "ports": [
+       {
+        "name": "management",
+        "containerPort": 7626
+       },
+       {
+        "name": "remoting",
+        "containerPort": 2552
+       }
+      ]
+     }
+    ]
+   },
+   "metadata": {
+    "name": "x"
+   },
+   "status": {
+    "phase": "Pending",
+    "containerStatuses": [
+     {
+      "name": "app",
+      "state": {
+       "running": {}
+      }
+     }
+    ],
+    "podIP": "10.1.0.7"
+   }
+  },
+  {
+   "spec": {
+    "containers": [
+     {
+      "name": "app",
+      "ports": [
+       {
+        "name": "management",
+        "containerPort": 7626
+       },
+       {
+        "name": "remoting",
+        "containerPort": 2552
+       }
+      ]
+     }
+    ]
+   },
+   "metadata": {
+    "name": "x"
+   },
+   "status": {
+    "phase": "Running",
+    "containerStatuses": [
+     {
+      "name": "app",
+      "state": {
+       "waiting": {
+        "reason": "ContainerCreating"
+       }
+      }
+     }
+    ],
+    "podIP": "10.1.0.8"
+   }
+  },
+  {
+   "spec": {
+    "containers": [
+     {
+      "name": "app",
+      "ports": [
+       {
+        "name": "management",
+        "containerPort": 7626
+       },
+       {
+        "name": "remoting",
+        "containerPort": 2552
+       }
+      ]
+     }
+    ]
+   },
+   "metadata": {
+    "name": "x"
+   },
+   "status": {
+    "phase": "Running",
+    "containerStatuses": [
+     {
+      "name": "app",
+      "state": {
+       "running": {}
+      }
+     }
+    ]
+   }
+  },
+  {
+   "spec": {
+    "containers": [
+     {
+      "name": "app",
+      "ports": [
+       {
+        "name": "management",
+        "containerPort": 7626
+       },
+       {
+        "name": "remoting",
+        "containerPort": 2552
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

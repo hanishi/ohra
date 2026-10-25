@@ -59,6 +59,7 @@ from .coordinated_shutdown import (
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .management import PekkoManagement, PekkoManagementSettings
 from .management.bootstrap import ClusterBootstrap, ClusterBootstrapSettings
+from .management.kubernetes import KubernetesApiServiceDiscovery, KubernetesApiSettings
 from .management.health import HealthCheckSettings
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
 from .receptionist import Deregister, Deregistered, Find, Listing, Receptionist, Register, Registered, ServiceKey
@@ -116,6 +117,8 @@ __all__ = [
     "Join",
     "JoinSeedNodes",
     "JvmExitReason",
+    "KubernetesApiServiceDiscovery",
+    "KubernetesApiSettings",
     "KeepMajority",
     "KeepOldest",
     "LeaderChanged",

@@ -12,8 +12,9 @@ they join.
     uv run python examples/cluster/node.py three 2553 2551 2552   # terminal 3: either seed will do
 
 Every node must run under the same system name, so NAME is only used for the log lines; the system is "cluster".
-Ctrl-c makes a node leave the cluster gracefully: its greeter leaves every listing and, if it hosted the counter,
-the counter is handed over before the node exits and starts again at 1 on the next oldest node. Kill a node
+Ctrl-c or SIGTERM runs the coordinated shutdown, so the node leaves gracefully: its shards are handed off, its
+greeter leaves every listing and, if it hosted the counter, the counter is handed over before the node exits and
+starts again at 1 on the next oldest node. Kill a node
 instead (kill -9) and the others report it unreachable, and the split-brain resolver downs and removes it after
 five seconds of stability (keep-majority): its singleton and shards start elsewhere without anyone sending `Down`.
 """
@@ -39,11 +40,11 @@ from pekko_py import (  # noqa: E402
     ClusterSettings,
     ClusterSharding,
     ClusterSingleton,
+    CoordinatedShutdownSettings,
     Entity,
     EntityContext,
     EntityTypeKey,
     LeaderChanged,
-    Leave,
     Listing,
     MemberEvent,
     ReachabilityEvent,
@@ -187,7 +188,8 @@ def node(name: str, port: int, seed_ports: list[int]) -> ActorSystem[Event]:
         seed_nodes=tuple(Address("cluster", HOST, p) for p in seed_ports),
         downing=SplitBrainResolverSettings(stable_after=5.0),  # keep-majority: a dead node is removed on its own
     )
-    system = ActorSystem(listener(name), "cluster", address=(HOST, port), cluster=settings)
+    shutdown = CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM))  # Pekko's JVM shutdown hook
+    system = ActorSystem(listener(name), "cluster", address=(HOST, port), cluster=settings, shutdown=shutdown)
     Cluster(system).subscriptions.tell(Subscribe(system, ClusterDomainEvent))
     return system
 
@@ -196,9 +198,7 @@ async def main(name: str, port: int, seed_ports: list[int]) -> None:
     async with node(name, port, seed_ports) as system:
         cluster = Cluster(system)
         print(f"[{name}] {cluster.self_address.root} joining through {seed_ports}; ctrl-c to leave")
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, lambda: cluster.manager.tell(Leave(cluster.self_address)))  # as CoordinatedShutdown's JVM hook
-        await system.when_terminated()  # the exiting phase hands the singleton over, then the node terminates itself
+        await system.when_terminated()  # ctrl-c runs the coordinated shutdown: shards hand off, the node leaves, singletons hand over
 
 
 if __name__ == "__main__":

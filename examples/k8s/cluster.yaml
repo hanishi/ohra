@@ -1,0 +1,77 @@
+# A three-pod pekko-py cluster on Kubernetes: the pods list each other through the API server (hence the service
+# account that may list pods) and form the cluster through Pekko's bootstrap; the probes are the management
+# health checks. Replace IMAGE with your image, see README.md "Running on Docker Desktop Kubernetes".
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: cluster
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cluster            # what KubernetesApiServiceDiscovery looks up: app=<service_name>
+  template:
+    metadata:
+      labels:
+        app: cluster
+    spec:
+      serviceAccountName: cluster
+      terminationGracePeriodSeconds: 30   # room for the coordinated shutdown to hand off shards and leave
+      containers:
+        - name: node
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: remoting
+              containerPort: 2551
+            - name: management        # the bootstrap's port_name
+              containerPort: 7626
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: management
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /alive
+              port: management
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi

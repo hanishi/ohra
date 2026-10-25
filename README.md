@@ -350,6 +350,25 @@ PekkoManagement(system).health.add_readiness_check("db", db.ping)  # your own ch
 
 On Kubernetes: give the pods the label `app=myapp`; bind a Role with `get` and `list` on `pods` to their service account; declare container ports for remoting and a port named `management` on 7626; point the readiness probe at `/ready` and the liveness probe at `/alive` on 7626; the namespace comes from `KUBERNETES_NAMESPACE` or the mounted service-account file; if the cluster's DNS does not resolve pod names (`10-1-0-5.ns.pod.cluster.local`), set `KubernetesApiSettings(use_raw_ip=True)` so the contact points are the pod IPs. Once a cluster exists, `new_cluster_enabled=False` forbids a partitioned minority from ever starting a second one. Locally, `examples/cluster/node.py one 2551 --bootstrap 2551 2552 2553` in three terminals forms a cluster with no seeds; its management runs on port + 1000.
 
+#### Running on Docker Desktop Kubernetes
+
+`examples/k8s/` is a complete deployment: `node.py` spreads a simulated calculation over the pods with sharding (each pod submits one task a second, and whichever pod owns the task's shard computes it and names itself in the result), `Dockerfile` builds the image from this checkout, and `cluster.yaml` holds the service account that may list pods, its Role and RoleBinding, and a three-replica Deployment with the pod IP and name from the downward API and the health checks as probes. Enable Kubernetes in Docker Desktop's settings (`kubectl config current-context` prints `docker-desktop`), then from the repository root, with your Docker Hub user for `YOU`:
+
+```sh
+docker build -t YOU/pekko-py-cluster:dev -f examples/k8s/Dockerfile .
+docker login && docker push YOU/pekko-py-cluster:dev        # Docker Desktop's Kubernetes has its own image store, so the push is needed
+sed "s|IMAGE|YOU/pekko-py-cluster:dev|" examples/k8s/cluster.yaml | kubectl apply -f -
+kubectl get pods -l app=cluster -w                            # three pods, Ready once they are Up
+kubectl logs -l app=cluster -f --prefix                       # members joining, then the tasks and the pod that computed each
+kubectl port-forward deploy/cluster 7626 &
+curl -s localhost:7626/cluster/members | python -m json.tool  # also /cluster/shards/calculator, /ready, /alive, /bootstrap/seed-nodes
+kubectl delete pod $(kubectl get pods -l app=cluster -o name | head -1)   # SIGTERM: the pod leaves gracefully, its shards move, a new pod bootstraps in
+kubectl scale deploy/cluster --replicas=5                     # the new pods find the cluster and take shards
+kubectl delete -f examples/k8s/cluster.yaml
+```
+
+A new image needs a push and `kubectl rollout restart deploy/cluster` (or a new tag), since `IfNotPresent` keeps the one it has; the restart is itself a demonstration, since the old pods leave gracefully while the new ones bootstrap in. Any other cluster works the same way once the image is in a registry it can pull from.
+
 ### Split-brain resolver
 
 Without a downing provider an unreachable member stays unreachable until someone sends `Down`, and until then the leader cannot move any member, so a crashed oldest node blocks singleton hand-over and shard reallocation. Apache Pekko's split-brain resolver is the provider: a child of the core daemon, active on the leader, that waits until membership and reachability have been stable for `stable_after` and then downs one side by a strategy, so the leader can remove it. Turn it on with `downing=`:
@@ -582,6 +601,7 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 | `examples/chatroom.py` | the ChatRoom from the Apache Pekko docs: sessions as children, narrowed refs, DeathWatch |
 | `examples/remoting/` | two processes: `greeter_node.py` listens on 2552, `client_node.py` resolves it by path, tells and asks across the wire |
 | `examples/cluster/` | `node.py NAME PORT [SEED_PORT ...]`, or `node.py NAME PORT --bootstrap PORT...` to form the cluster with no seeds through Pekko's bootstrap: start three in three terminals, watch them join, go Up and elect a leader, each node's greeter appear in every node's Receptionist listing, one counter singleton answer all of them, and the sharded counters for three ids spread over the nodes; ctrl-c a node, which leaves gracefully, and the singleton and the shards it hosted move to the others; management on port + 1000 (`curl localhost:3551/cluster/members`) |
+| `examples/k8s/` | `node.py`, `Dockerfile` and `cluster.yaml`: a three-pod cluster on Docker Desktop Kubernetes that finds itself through the API server and spreads a simulated calculation over the pods with sharding; delete a pod and its tasks move, scale up and the new pods take shards; see "Running on Docker Desktop Kubernetes" |
 | `examples/persisted_counter.py` | `Behaviors.persisted` with `SqliteStore`: the total survives a supervised restart and a new actor system; run it twice and it keeps counting |
 | `examples/database_client.py` | backoff restarts of a failing setup, a stash that outlives restarts, timers, `ctx.ask` |
 | `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |

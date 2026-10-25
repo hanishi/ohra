@@ -11,6 +11,12 @@ they join.
     uv run python examples/cluster/node.py two 2552 2551          # terminal 2: joins through 2551
     uv run python examples/cluster/node.py three 2553 2551 2552   # terminal 3: either seed will do
 
+Or with no seed nodes at all, as on Kubernetes: every node lists the deployment's ports and the cluster forms by itself
+through Pekko's bootstrap (discovery, contact-point probing, the lowest address self-joins):
+
+    uv run python examples/cluster/node.py one 2551 --bootstrap 2551 2552 2553     # in three terminals, with two, three
+    curl localhost:3551/cluster/members                                            # management is on port + 1000
+
 Every node must run under the same system name, so NAME is only used for the log lines; the system is "cluster".
 Ctrl-c or SIGTERM runs the coordinated shutdown, so the node leaves gracefully: its shards are handed off, its
 greeter leaves every listing and, if it hosted the counter, the counter is handed over before the node exits and
@@ -23,7 +29,7 @@ import logging
 import signal
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -39,7 +45,9 @@ from pekko_py import (  # noqa: E402
     ClusterDomainEvent,
     ClusterSettings,
     ClusterSharding,
+    ClusterBootstrapSettings,
     ClusterSingleton,
+    ConfigServiceDiscovery,
     CoordinatedShutdownSettings,
     Entity,
     EntityContext,
@@ -47,9 +55,12 @@ from pekko_py import (  # noqa: E402
     LeaderChanged,
     Listing,
     MemberEvent,
+    PekkoManagement,
+    PekkoManagementSettings,
     ReachabilityEvent,
     Receptionist,
     Register,
+    ResolvedTarget,
     ServiceKey,
     SingletonActor,
     SplitBrainResolverSettings,
@@ -183,21 +194,30 @@ def listener(name: str) -> Behavior[Event]:
     return setup
 
 
-def node(name: str, port: int, seed_ports: list[int]) -> ActorSystem[Event]:
+def node(name: str, port: int, seed_ports: list[int], bootstrap_ports: list[int]) -> ActorSystem[Event]:
     settings = ClusterSettings(
         seed_nodes=tuple(Address("cluster", HOST, p) for p in seed_ports),
         downing=SplitBrainResolverSettings(stable_after=5.0),  # keep-majority: a dead node is removed on its own
     )
     shutdown = CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM))  # Pekko's JVM shutdown hook
-    system = ActorSystem(listener(name), "cluster", address=(HOST, port), cluster=settings, shutdown=shutdown)
+    management = PekkoManagementSettings(hostname=HOST, port=port + 1000)  # health checks and /cluster/members on port + 1000
+    if bootstrap_ports:  # --bootstrap: no seed nodes; the nodes find each other through discovery and probing, as on Kubernetes
+        management = replace(
+            management,
+            discovery=ConfigServiceDiscovery({"cluster": [ResolvedTarget(HOST, p + 1000, HOST) for p in bootstrap_ports]}),
+            bootstrap=ClusterBootstrapSettings(service_name="cluster", stable_margin=3.0, required_contact_point_nr=2, filter_on_fallback_port=False),
+        )
+    system = ActorSystem(listener(name), "cluster", address=(HOST, port), cluster=settings, shutdown=shutdown, management=management)
     Cluster(system).subscriptions.tell(Subscribe(system, ClusterDomainEvent))
     return system
 
 
-async def main(name: str, port: int, seed_ports: list[int]) -> None:
-    async with node(name, port, seed_ports) as system:
+async def main(name: str, port: int, seed_ports: list[int], bootstrap_ports: list[int]) -> None:
+    async with node(name, port, seed_ports, bootstrap_ports) as system:
         cluster = Cluster(system)
-        print(f"[{name}] {cluster.self_address.root} joining through {seed_ports}; ctrl-c to leave")
+        uri = await PekkoManagement(system).start()
+        how = f"bootstrapping with {bootstrap_ports}" if bootstrap_ports else f"joining through {seed_ports}"
+        print(f"[{name}] {cluster.self_address.root} {how}; management at {uri}; ctrl-c to leave")
         await system.when_terminated()  # ctrl-c runs the coordinated shutdown: shards hand off, the node leaves, singletons hand over
 
 
@@ -205,4 +225,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    asyncio.run(main(sys.argv[1], int(sys.argv[2]), [int(p) for p in sys.argv[3:]]))
+    rest = sys.argv[3:]
+    if rest[:1] == ["--bootstrap"]:
+        asyncio.run(main(sys.argv[1], int(sys.argv[2]), [], [int(p) for p in rest[1:]]))
+    else:
+        asyncio.run(main(sys.argv[1], int(sys.argv[2]), [int(p) for p in rest], []))

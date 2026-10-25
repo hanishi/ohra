@@ -19,9 +19,10 @@ Pekko Typed semantics on asyncio. Read README.md first, especially the runtime m
 - `behavior.py`: behavior values and the `Behaviors` factory.
 - `cell.py`: the runtime, including the message loop, interpretation, supervision, and lifecycle. Most work happens here.
 - `context.py`: `ActorContext`, a thin facade over the cell.
-- `ref.py`, `patterns.py`, `routers.py`, `system.py`, `signals.py`, `supervision.py`, `mailbox.py`, `result.py`, `receptionist.py`, `persistence.py`, `coordinated_shutdown.py` (Pekko's phases, run by `terminate()`).
+- `ref.py`, `patterns.py`, `routers.py`, `system.py`, `signals.py`, `supervision.py`, `mailbox.py`, `result.py`, `receptionist.py`, `persistence.py`, `coordinated_shutdown.py` (Pekko's phases, run by `terminate()`), `discovery.py` (Pekko's ServiceDiscovery API).
 - `remote/`: `remoting.py` (transport, addresses, `RemoteRef`) and `serialization.py` (`@remotable`).
 - `cluster/`: `core.py` (the membership daemon and the `Cluster` extension), its internals `gossip.py`, `reachability.py`, `vector_clock.py`, `failure_detector.py`, the split-brain resolver `sbr.py`, then `singleton.py` and `sharding/` (`shard.py`: the Shard actor and the single-node `Sharding`; `coordinator.py`; `region.py`; the `ClusterSharding` extension in `__init__.py`).
+- `management/`: Pekko Management for Kubernetes: `http.py` (stdlib HTTP/1.1 server and client), `health.py`, the `PekkoManagement` extension in `__init__.py`, `cluster_http.py` (read-only routes), `bootstrap.py` (cluster bootstrap), `kubernetes.py` (API discovery).
 - `ext/`: `fastapi.py` and `shm.py`, integrations that are not part of Pekko.
 - Public names are importable from `pekko_py`, and also from the subpackage they belong to (`pekko_py.cluster`, `pekko_py.cluster.sharding`, `pekko_py.remote`).
 

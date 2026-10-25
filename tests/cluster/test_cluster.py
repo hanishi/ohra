@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, ClusterLeavingReason, CoordinatedShutdown, CoordinatedShutdownSettings
 from pekko_py.cluster.core import (
     Cluster,
     ClusterDomainEvent,
@@ -51,11 +51,22 @@ FAST: dict[str, Any] = dict(
 )
 
 
-def cluster_node(name: str, port: int, seeds: list[int], **settings: Any) -> ActorSystem[Any]:
+FAST_SHUTDOWN = CoordinatedShutdownSettings(
+    default_phase_timeout=1.0, phase_timeouts={"cluster-sharding-shutdown-region": 1.0, "cluster-exiting": 1.0, "actor-system-terminate": 1.0}
+)
+"""A leaving node whose cluster cannot converge (an undowned unreachable member) waits out cluster-exiting, as in
+Pekko; one second instead of ten keeps such tests short."""
+
+
+def cluster_node(name: str, port: int, seeds: list[int], shutdown: CoordinatedShutdownSettings = FAST_SHUTDOWN, **settings: Any) -> ActorSystem[Any]:
     """A node whose guardian ignores messages; the cluster lives under /system."""
     seed_nodes = tuple(Address(name, "127.0.0.1", p) for p in seeds)
     return ActorSystem(
-        Behaviors.ignore, name, address=("127.0.0.1", port), cluster=ClusterSettings(seed_nodes=seed_nodes, **{**FAST, **settings})
+        Behaviors.ignore,
+        name,
+        address=("127.0.0.1", port),
+        cluster=ClusterSettings(seed_nodes=seed_nodes, **{**FAST, **settings}),
+        shutdown=shutdown,
     )
 
 
@@ -183,7 +194,7 @@ def unreachable_ports(system: ActorSystem[Any]) -> set[int]:
 
 async def crash(system: ActorSystem[Any]) -> None:
     """Tear a node down without leaving: the others only find out through missing heartbeats."""
-    system.terminate()
+    system._final_terminate()  # pyright: ignore[reportPrivateUsage]  # a crash does not run the coordinated shutdown
     await system.when_terminated()
 
 
@@ -439,12 +450,13 @@ async def test_exiting_tasks_run_before_the_node_exits():
             await asyncio.sleep(0.1)
             done.append("done")
 
-        Cluster(b).add_exiting_task(task)
+        CoordinatedShutdown(b).add_task("cluster-exiting", "t", task)
         events: list[ClusterDomainEvent] = []
         Cluster(a).subscriptions.tell(Subscribe(probe(events), MemberEvent))
         Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
         await asyncio.wait_for(b.when_terminated(), timeout=5)
         assert done == ["done"]  # the task finished before the node went away
+        assert CoordinatedShutdown(b).shutdown_reason == ClusterLeavingReason()
         await eventually(lambda: all_up(a, 1), timeout=5)
         names = [type(e).__name__ for e in events if isinstance(e, MemberEvent) and e.member.unique_address.port == p2]
         assert names.index("MemberExited") < names.index("MemberRemoved")
@@ -453,14 +465,15 @@ async def test_exiting_tasks_run_before_the_node_exits():
 async def test_a_slow_exiting_task_is_bounded_by_exiting_timeout():
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:
-        a = await stack.enter_async_context(cluster_node("c", p1, [p1], exiting_timeout=0.2))
-        b = await stack.enter_async_context(cluster_node("c", p2, [p1], exiting_timeout=0.2))
+        short = CoordinatedShutdownSettings(phase_timeouts={"cluster-exiting": 0.2})
+        a = await stack.enter_async_context(cluster_node("c", p1, [p1], shutdown=short))
+        b = await stack.enter_async_context(cluster_node("c", p2, [p1], shutdown=short))
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
 
         async def slow() -> None:
             await asyncio.sleep(5)
 
-        Cluster(b).add_exiting_task(slow)
+        CoordinatedShutdown(b).add_task("cluster-exiting", "slow", slow)
         Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
         await asyncio.wait_for(b.when_terminated(), timeout=2)
 
@@ -474,7 +487,7 @@ async def test_a_failing_exiting_task_does_not_block_the_exit():
         async def failing() -> None:
             raise RuntimeError("boom")
 
-        Cluster(b).add_exiting_task(failing)
+        CoordinatedShutdown(b).add_task("cluster-exiting", "failing", failing)
         Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
         await asyncio.wait_for(b.when_terminated(), timeout=2)
 

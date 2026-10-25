@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from pekko_py import (
+    CoordinatedShutdownSettings,
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -78,8 +79,10 @@ def counter(log: Log, port: int) -> Behavior[Hit | Crash]:
     return Behaviors.setup(setup)
 
 
-def node(port: int, seeds: list[int], **settings: Any) -> ActorSystem[Any]:
-    return cluster_node("c", port, seeds, **{"exiting_timeout": 1.0, **settings})
+def node(port: int, seeds: list[int], exiting_timeout: float = 1.0, **settings: Any) -> ActorSystem[Any]:
+    """A node whose hand-off phases (region shutdown and cluster-exiting) are bounded by ``exiting_timeout``."""
+    phases = {"cluster-sharding-shutdown-region": exiting_timeout, "cluster-exiting": exiting_timeout}
+    return cluster_node("c", port, seeds, shutdown=CoordinatedShutdownSettings(phase_timeouts=phases), **settings)
 
 
 def start(system: ActorSystem[Any], log: Log, port: int, settings: ClusterSingletonSettings = FAST_SINGLETON) -> ActorRef[Hit | Crash]:
@@ -106,7 +109,7 @@ def never_two_at_once(log: Log) -> bool:
 async def crash(system: ActorSystem[Any]) -> None:
     assert system.remoting is not None
     await system.remoting.close()
-    system.terminate()
+    system._final_terminate()  # pyright: ignore[reportPrivateUsage]  # a crash does not run the coordinated shutdown
     await system.when_terminated()
 
 

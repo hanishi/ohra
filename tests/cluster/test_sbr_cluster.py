@@ -31,7 +31,7 @@ SBR: dict[str, Any] = dict(downing=SplitBrainResolverSettings(stable_after=0.3))
 async def crash(system: ActorSystem[Any]) -> None:
     assert system.remoting is not None
     await system.remoting.close()
-    system.terminate()
+    system._final_terminate()  # pyright: ignore[reportPrivateUsage]  # a crash does not run the coordinated shutdown
     await system.when_terminated()
 
 

@@ -13,7 +13,7 @@ from pekko_py.remote.serialization import Json
 from pekko_py.remote import Address
 
 from ..util import eventually, free_port
-from .test_cluster import FAST, all_up, unreachable_ports
+from .test_cluster import FAST, FAST_SHUTDOWN, all_up, unreachable_ports
 
 
 @remotable
@@ -57,7 +57,7 @@ def recorder(into: list[Any]) -> Behavior[Any]:
 def node(port: int, seeds: list[int], **settings: Any) -> ActorSystem[Any]:
     seed_nodes = tuple(Address("c", "127.0.0.1", p) for p in seeds)
     cfg = ClusterSettings(seed_nodes=seed_nodes, **{**FAST, "receptionist_resend_interval": 0.05, **settings})
-    return ActorSystem(Behaviors.receive(spawner), "c", address=("127.0.0.1", port), cluster=cfg)
+    return ActorSystem(Behaviors.receive(spawner), "c", address=("127.0.0.1", port), cluster=cfg, shutdown=FAST_SHUTDOWN)
 
 
 async def spawn(system: ActorSystem[Any], behavior: Behavior[Any], name: str) -> ActorRef[Any]:

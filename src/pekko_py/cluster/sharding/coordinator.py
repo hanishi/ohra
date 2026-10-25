@@ -30,7 +30,7 @@ from ..core import (
     MemberUp,
 )
 from ..core import Subscribe as ClusterSubscribe
-from ..gossip import Member
+from ..gossip import Member, MemberStatus
 
 _LEAVING_STATUSES = frozenset({"leaving", "exiting", "down"})
 _JOINING_STATUSES = frozenset({"joining", "weakly_up"})
@@ -538,11 +538,14 @@ class _Coordinator:
         else:
             self.stop_now = True
 
-    def on_member_removed(self, m: Member) -> None:
+    def on_member_removed(self, m: Member, previous_status: MemberStatus) -> None:
+        """A removed member's regions are terminated: at once after a graceful leave (Pekko's plain Terminated), after the
+        down-removal margin when it was Down, since a crashed or partitioned node may still run its shards (Pekko's
+        addressTerminated)."""
         self.registered_addresses.discard(m.unique_address)
         margin = self.cluster.settings.effective_down_removal_margin
         for path in [r for r in list(self.state.regions) + list(self.refs) if _is_at(r, m.address)]:
-            if margin > 0 and path in self.alive_regions:
+            if margin > 0 and previous_status == "down" and path in self.alive_regions:
                 self.region_termination_in_progress.add(path)  # GetShardHome for its shards waits, as Pekko's
                 self.ctx.timers.start_single_timer(("region-removed", path), _DelayedShardRegionTerminated(path), margin)
             else:
@@ -562,9 +565,9 @@ class _Coordinator:
                 case _ResendShardHost(shard, region):
                     if self.state.shards.get(shard) == region and region in self.refs:
                         self.send_host_shard(shard, region)
-                case MemberRemoved(member=m):
+                case MemberRemoved(member=m, previous_status=previous):
                     self.touch_gate()
-                    self.on_member_removed(m)
+                    self.on_member_removed(m, previous)
                 case MemberUp() | MemberLeft() | MemberExited():
                     self.touch_gate()
                 case ClusterDomainEvent():

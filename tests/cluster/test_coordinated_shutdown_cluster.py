@@ -155,3 +155,21 @@ async def test_shards_hand_off_before_the_node_leaves():
         await eventually(lambda: all_up(nodes[0], 2) and all_up(nodes[1], 2), timeout=5)
         for e in on_c:
             assert await ask(ref(nodes[0], e), lambda r: Count(1, r), timeout=5) == 1  # a fresh entity elsewhere (state is in memory)
+
+
+async def test_a_gracefully_left_region_is_forgotten_without_the_removal_margin():
+    """Pekko delays a region's termination by the removal margin only for a crashed node (addressTerminated); a
+    node that left gracefully has stopped, so the coordinator must not make the next leaver wait for the margin."""
+    p1, p2 = sorted((free_port(), free_port()))
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(sharding_node(p, [p1], down_removal_margin=1.0)) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        regions = [start_sharding(n) for n in (a, b)]
+        await ids_hosted_by(regions, [a, b], 12)
+        b.terminate()
+        await asyncio.wait_for(b.when_terminated(), timeout=5)
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        began = asyncio.get_running_loop().time()
+        a.terminate()
+        await asyncio.wait_for(a.when_terminated(), timeout=5)
+        assert asyncio.get_running_loop().time() - began < 0.8  # a's hand-off did not wait on b's dead region

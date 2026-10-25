@@ -58,6 +58,7 @@ from .coordinated_shutdown import (
 )
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .management import PekkoManagement, PekkoManagementSettings
+from .management.bootstrap import ClusterBootstrap, ClusterBootstrapSettings
 from .management.health import HealthCheckSettings
 from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
 from .receptionist import Deregister, Deregistered, Find, Listing, Receptionist, Register, Registered, ServiceKey
@@ -82,6 +83,8 @@ __all__ = [
     "Behaviors",
     "ChildFailed",
     "Cluster",
+    "ClusterBootstrap",
+    "ClusterBootstrapSettings",
     "ClusterDomainEvent",
     "ClusterDowningReason",
     "ClusterLeavingReason",

@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..discovery import ServiceDiscovery
+from .bootstrap import ClusterBootstrap, ClusterBootstrapSettings
 from .health import HealthChecks, HealthCheckSettings
-from .http import Response, serve
+from .http import Response, json_response, serve
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
@@ -34,7 +35,7 @@ class PekkoManagementSettings:
     bind_port: int | None = None
     base_path: str = ""
     health_checks: HealthCheckSettings = field(default_factory=HealthCheckSettings)
-    bootstrap: object | None = None  # ClusterBootstrapSettings, typed in the bootstrap module
+    bootstrap: ClusterBootstrapSettings | None = None
     discovery: ServiceDiscovery | None = None
 
     def __post_init__(self) -> None:
@@ -66,6 +67,7 @@ class PekkoManagement:
     system: ActorSystem[Any]
     settings: PekkoManagementSettings
     health: HealthChecks
+    bootstrap: ClusterBootstrap | None
     uri: str | None
     _server: asyncio.Server | None
     _routes: dict[str, RouteHandler]
@@ -81,6 +83,7 @@ class PekkoManagement:
         self.system = system
         self.settings = settings
         self.health = HealthChecks(settings.health_checks)
+        self.bootstrap = None
         self.uri = None
         self._server = None
         self._routes = {}
@@ -97,9 +100,18 @@ class PekkoManagement:
                 return cluster.self_member.status in hc.ready_states
 
             self.health.add_readiness_check("cluster-membership", cluster_membership)
-            from .cluster_http import register_cluster_routes  # imports the cluster, which this module must not at import time
+            from .bootstrap import seed_nodes_json
+            from .cluster_http import register_cluster_routes
 
             register_cluster_routes(self, system)
+            bootstrap_settings = settings.bootstrap
+
+            async def seed_nodes(_path: str) -> Response:
+                return json_response(200, seed_nodes_json(system, bootstrap_settings or ClusterBootstrapSettings(service_name="-")))
+
+            self.add_route("/bootstrap/seed-nodes", seed_nodes)
+            if bootstrap_settings is not None and settings.discovery is not None:
+                self.bootstrap = ClusterBootstrap._start(system, bootstrap_settings, settings.discovery)  # pyright: ignore[reportPrivateUsage]
         return self
 
     # --- routes ---------------------------------------------------------------------------------------------------
@@ -144,6 +156,8 @@ class PekkoManagement:
                 self._server = server
                 self.uri = f"http://{s.effective_hostname}:{port}{s.base_path}"
                 _log.info("Bound Pekko Management (HTTP) endpoint to: %s:%s", s.effective_bind_hostname, port)
+                if self.bootstrap is not None:
+                    self.bootstrap.start((s.effective_hostname, port), s.base_path)
             return self.uri
 
     async def stop(self) -> None:

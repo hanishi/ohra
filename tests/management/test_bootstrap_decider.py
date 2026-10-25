@@ -83,3 +83,4 @@ def test_backed_off_interval_doubles_and_caps():
     assert backed_off_interval(3, 1.0, 15.0, 0.0) == 8.0
     assert backed_off_interval(10, 1.0, 15.0, 0.0) == 15.0
     assert 2.0 <= backed_off_interval(1, 1.0, 15.0, 0.5) <= 3.0
+    assert all(15.0 <= backed_off_interval(10, 1.0, 15.0, 0.5) <= 22.5 for _ in range(50))  # Pekko: the random factor applies after the cap

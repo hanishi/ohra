@@ -85,6 +85,14 @@ def test_settings_validation():
         PekkoManagementSettings(port=70000)
 
 
+async def test_bootstrap_on_a_non_cluster_system_is_refused():
+    from pekko_py import ClusterBootstrapSettings, ConfigServiceDiscovery
+
+    settings = mgmt(bootstrap=ClusterBootstrapSettings(service_name="x"), discovery=ConfigServiceDiscovery({}))
+    with pytest.raises(ValueError, match="cluster"):
+        ActorSystem(Behaviors.ignore, "m", management=settings)  # bootstrap joins a cluster; there is none to join
+
+
 async def test_cluster_membership_readiness():
     p = free_port()
     async with cluster_node("c", p, []) as node:  # no seed nodes: never joins by itself

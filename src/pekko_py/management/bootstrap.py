@@ -149,10 +149,9 @@ def matches_self(target: ResolvedTarget, self_contact_point: tuple[str, int], se
 def backed_off_interval(restart_count: int, min_backoff: float, max_backoff: float, random_factor: float) -> float:
     rnd = 1.0 + random.random() * random_factor
     try:
-        calculated = min(max_backoff, min_backoff * (2**restart_count)) * rnd
+        return min(max_backoff, min_backoff * (2**restart_count)) * rnd  # Pekko's: the random factor applies after the cap
     except OverflowError:
         return max_backoff
-    return min(calculated, max_backoff) if rnd == 1.0 else min(calculated, max_backoff * rnd)
 
 
 # --- the decider (LowestAddressJoinDecider.scala) ------------------------------------------------------------------

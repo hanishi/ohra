@@ -2,6 +2,7 @@
 the API server, with the pod's service-account token and CA, and take each Running pod's IP and named port."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import ssl
@@ -110,8 +111,6 @@ class KubernetesApiServiceDiscovery(ServiceDiscovery):
         if status != 200:
             _log.warning("Non-200 when communicating with Kubernetes API server. Status code: [%s]. Response body: [%s]", status, body.decode(errors="replace"))
             raise KubernetesApiError(f"Non-200 from Kubernetes API server: {status}")
-        import json
-
         pod_list: Any = json.loads(body)
         found = targets(pod_list, lookup.port_name, namespace, s.pod_domain, s.use_raw_ip, s.container_name)
         if not found and pod_list.get("items"):

@@ -227,6 +227,8 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     rest = sys.argv[3:]
     if rest[:1] == ["--bootstrap"]:
+        if len(rest) < 2:
+            sys.exit(__doc__)
         asyncio.run(main(sys.argv[1], int(sys.argv[2]), [], [int(p) for p in rest[1:]]))
     else:
         asyncio.run(main(sys.argv[1], int(sys.argv[2]), [int(p) for p in rest], []))

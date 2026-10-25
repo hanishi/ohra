@@ -44,6 +44,8 @@ class ActorSystem[T](ActorRef[T]):
         self._dead_letters = logging.getLogger("pekko_py.dead_letters")
         if cluster is not None and address is None:
             raise ValueError("a cluster node needs an address=(host, port)")
+        if management is not None and management.bootstrap is not None and cluster is None:
+            raise ValueError("cluster bootstrap needs a cluster node: pass cluster=ClusterSettings(...)")
         self.address: UniqueAddress | None = unique_address(*address, name) if address else None
         """Set when the system is reachable from other nodes; paths then read pekko://name@host:port/..."""
         self.remoting: Remoting | None = Remoting(self, self.address) if self.address else None

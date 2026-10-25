@@ -10,6 +10,7 @@ import pytest
 
 from pekko_py import (
     ActorSystem,
+    Address,
     ClusterBootstrapSettings,
     ConfigServiceDiscovery,
     Lookup,
@@ -124,3 +125,51 @@ async def test_bootstrap_with_seed_nodes_configured_bails_out(caplog: pytest.Log
         await PekkoManagement(node).start()
         assert any("bailing out of the bootstrap process" in r.message for r in caplog.records)
         await eventually(lambda: all_up(node, 1), timeout=5)
+
+
+async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
+    """After a probe is dropped (ProbingFailed or a vanished contact point) its child may still exist while the next
+    discovery lists the same point; spawning a duplicate by name would fail the coordinator. Pekko uses context.child."""
+    from pekko_py import ActorContext, Behavior, Behaviors
+    from pekko_py.management.bootstrap import _Coordinator  # pyright: ignore[reportPrivateUsage]
+
+    p, m = free_port(), free_port()
+    outcome: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    cp = ResolvedTarget("127.0.0.1", free_port(), "127.0.0.1")
+    settings = ClusterBootstrapSettings(service_name="svc", **BOOT)
+
+    def probe_twice(ctx: ActorContext[None]) -> Behavior[None]:
+        coordinator = _Coordinator(ctx, settings, ConfigServiceDiscovery({"svc": [cp]}), ("127.0.0.1", m), "")
+        coordinator.ensure_probing(cp)
+        coordinator.probes.clear()  # as _ProbingFailed does; the child still exists
+        try:
+            coordinator.ensure_probing(cp)
+            outcome.set_result("reused" if len(ctx.children) == 1 else "duplicated")
+        except Exception as e:
+            outcome.set_result(f"raised {type(e).__name__}")
+        return Behaviors.ignore
+
+    async with cluster_node("c", p, [], management=PekkoManagementSettings(hostname="127.0.0.1", port=m)) as node:
+        node._system_root.spawn_child(Behaviors.setup(probe_twice), "probeTwice", None)  # pyright: ignore[reportPrivateUsage]
+        assert await asyncio.wait_for(outcome, 5) == "reused"
+
+
+def test_decider_resolves_its_own_hostname_once(monkeypatch: pytest.MonkeyPatch):
+    """matches_self must not call DNS on the event loop per tick: the self IP is resolved once at construction."""
+    import socket
+
+    from pekko_py.management.bootstrap import JoinSelf, LowestAddressJoinDecider, SeedNodesInformation, SeedNodesObservation
+
+    calls: list[str] = []
+
+    def fake(host: str) -> str:
+        calls.append(host)
+        return "10.0.0.1"
+
+    monkeypatch.setattr(socket, "gethostbyname", fake)
+    decider = LowestAddressJoinDecider(ClusterBootstrapSettings(service_name="svc", required_contact_point_nr=1), ("mgmt.local", 7626), logging.getLogger("t"))
+    a = ResolvedTarget("10-0-0-1.ns.pod.cluster.local", 7626, "10.0.0.1")
+    info = SeedNodesInformation(200.0, 100.0, frozenset({a}), frozenset({SeedNodesObservation(100.0, a, Address("c", "10.0.0.1", 2552), frozenset())}))
+    for _ in range(20):
+        assert decider.decide(info) == JoinSelf()
+    assert calls == ["mgmt.local"]

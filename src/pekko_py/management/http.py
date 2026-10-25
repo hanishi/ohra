@@ -7,11 +7,14 @@ import json
 import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit
 
 REASONS: dict[int, str] = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 500: "Internal Server Error"}
 _LINE_LIMIT = 8 * 1024
 _MAX_HEADERS = 100
+_HEAD_TIMEOUT = 10.0  # a client that connects and says nothing holds a connection task for at most this long
+_MAX_BODY = 1024 * 1024  # every caller expects small JSON
 
 
 @dataclass(frozen=True)
@@ -67,12 +70,49 @@ async def _read_head(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, 
         return None
 
 
-async def serve(host: str, port: int, handler: Handler) -> asyncio.Server:
+class HttpServer:
+    """A listening server whose connection tasks are cancelled when it closes, so a silent or half-open client never
+    holds the owner's shutdown (asyncio's ``wait_closed`` waits for every handler to finish)."""
+
+    def __init__(self) -> None:
+        self._server: asyncio.Server | None = None
+        self._connections: set[asyncio.Task[None]] = set()
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None
+        return self._server.sockets[0].getsockname()[1]
+
+    @property
+    def sockets(self) -> tuple[Any, ...]:
+        assert self._server is not None
+        return tuple(self._server.sockets)
+
+    def track(self) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._connections.add(task)
+            task.add_done_callback(self._connections.discard)
+
+    def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+        for task in list(self._connections):
+            task.cancel()
+
+    async def wait_closed(self) -> None:
+        if self._server is not None:
+            await self._server.wait_closed()
+
+
+async def serve(host: str, port: int, handler: Handler) -> HttpServer:
     """Listen and answer one GET per connection with the handler's response; the caller closes the server."""
+    http_server = HttpServer()
 
     async def on_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        http_server.track()
         try:
-            head = await _read_head(reader)
+            head = await asyncio.wait_for(_read_head(reader), _HEAD_TIMEOUT)
             if head is None:
                 writer.write(_encode(Response(400, b"bad request", "text/plain")))
             else:
@@ -87,12 +127,13 @@ async def serve(host: str, port: int, handler: Handler) -> asyncio.Server:
                         response = Response(500, str(e).encode(), "text/plain")
                     writer.write(_encode(response))
             await writer.drain()
-        except (OSError, asyncio.CancelledError):
-            pass
+        except (OSError, TimeoutError, asyncio.CancelledError):
+            pass  # a dead or silent client, or the server closing: nothing awaits this task, so swallowing is safe
         finally:
             writer.close()
 
-    return await asyncio.start_server(on_connection, host, port, limit=_LINE_LIMIT)
+    http_server._server = await asyncio.start_server(on_connection, host, port, limit=_LINE_LIMIT)  # pyright: ignore[reportPrivateUsage]
+    return http_server
 
 
 # --- client --------------------------------------------------------------------------------------------------------
@@ -116,7 +157,7 @@ async def get(url: str, *, headers: Mapping[str, str] | None = None, timeout: fl
             writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
             await writer.drain()
             status_line = (await reader.readuntil(b"\n")).decode("latin-1").split(" ", 2)
-            if len(status_line) < 2 or not status_line[0].startswith("HTTP/1."):
+            if len(status_line) < 2 or not status_line[0].startswith("HTTP/1.") or not status_line[1].isdigit():
                 raise HttpError(f"malformed status line from {url}")
             status = int(status_line[1])
             response_headers: dict[str, str] = {}
@@ -135,9 +176,12 @@ async def get(url: str, *, headers: Mapping[str, str] | None = None, timeout: fl
                     body += await reader.readexactly(size)
                     await reader.readuntil(b"\n")
             elif "content-length" in response_headers:
-                body = await reader.readexactly(int(response_headers["content-length"]))
+                length = response_headers["content-length"]
+                if not length.isdigit() or int(length) > _MAX_BODY:
+                    raise HttpError(f"bad Content-Length {length!r} from {url}")
+                body = await reader.readexactly(int(length))
             else:
-                body = await reader.read()
+                body = await reader.read(_MAX_BODY)
             return status, body
         finally:
             writer.close()

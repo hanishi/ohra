@@ -20,6 +20,7 @@ from ..discovery import Lookup, Resolved, ResolvedTarget, ServiceDiscovery
 from ..ref import ActorRef
 from ..remote import Address
 from ..result import Failure, Success, Try
+from ..supervision import SupervisorStrategy
 from .http import get
 
 if TYPE_CHECKING:
@@ -134,11 +135,12 @@ def _resolve(host: str) -> str | None:
         return None
 
 
-def matches_self(target: ResolvedTarget, self_contact_point: tuple[str, int]) -> bool:
-    """The target is this node's management endpoint: same host (by name or IP) and, when the target has a port, the same port."""
+def matches_self(target: ResolvedTarget, self_contact_point: tuple[str, int], self_ip: str | None = None) -> bool:
+    """The target is this node's management endpoint: same host (by name, or by IP when the target carries one and the
+    host is an IP literal or was resolved once by the caller) and, when the target has a port, the same port."""
     host, port = self_contact_point
     bare = host.replace("[", "").replace("]", "")
-    host_matches = target.host in (host, bare) or target.address == bare or (target.address is not None and target.address == _resolve(host))
+    host_matches = target.host in (host, bare) or target.address == bare or (self_ip is not None and target.address == self_ip)
     if target.port is None:
         return host_matches
     return host_matches and target.port == port
@@ -165,6 +167,7 @@ class LowestAddressJoinDecider:
         self.settings = settings
         self.self_contact_point = self_contact_point
         self.log = log
+        self.self_ip = _resolve(self_contact_point[0])  # once, not on every decide tick (DNS blocks the event loop)
 
     def decide(self, info: SeedNodesInformation) -> JoinDecision:
         s = self.settings
@@ -210,9 +213,9 @@ class LowestAddressJoinDecider:
         return KeepProbing()
 
     def _can_join_self(self, target: ResolvedTarget, info: SeedNodesInformation) -> bool:
-        if matches_self(target, self.self_contact_point):
+        if matches_self(target, self.self_contact_point, self.self_ip):
             return True
-        if not any(matches_self(c, self.self_contact_point) for c in info.contact_points):
+        if not any(matches_self(c, self.self_contact_point, self.self_ip) for c in info.contact_points):
             self.log.warning("Self contact point [%s:%s] not found in targets %s", self.self_contact_point[0], self.self_contact_point[1], sorted(_cp(c) for c in info.contact_points))
         return False
 
@@ -398,7 +401,7 @@ class _Coordinator:
             return
         port = cp.port if cp.port is not None else self.fallback_port
         self_remoting = self.cluster.self_address
-        if cp.host in (self_remoting.host, cp.address) and (cp.host == self_remoting.host or cp.address == self_remoting.host) and port == self_remoting.port:
+        if (cp.host == self_remoting.host or cp.address == self_remoting.host) and port == self_remoting.port:
             _log.warning(
                 "Misconfiguration detected! Attempted to start probing a contact-point which address [%s:%s] matches our local remoting address [%s]. "
                 "Avoiding probing this address. Consider double checking your service discovery and port configurations.",
@@ -409,7 +412,8 @@ class _Coordinator:
             return
         url = f"http://{cp.host}:{port}{self.base_path}/bootstrap/seed-nodes"
         name = "contactPointProbe-" + f"{cp.host}-{port}".replace(".", "-").replace(":", "-")
-        self.probes[cp] = self.ctx.spawn(_probe_behavior(self.settings, cp, url, self.ctx.self), name)
+        existing = self.ctx.child(name)  # Pekko's context.child: a dropped probe may still be stopping under that name
+        self.probes[cp] = existing if existing is not None else self.ctx.spawn(_probe_behavior(self.settings, cp, url, self.ctx.self), name)
 
     def decide(self) -> Behavior[Any]:
         if self.last_contacts is None:
@@ -474,7 +478,8 @@ class _Coordinator:
 
 
 def _coordinator_behavior(settings: ClusterBootstrapSettings, discovery: ServiceDiscovery, self_contact_point: tuple[str, int], base_path: str) -> Behavior[Any]:
-    return Behaviors.setup(lambda ctx: _Coordinator(ctx, settings, discovery, self_contact_point, base_path).behavior())
+    behavior: Behavior[Any] = Behaviors.setup(lambda ctx: _Coordinator(ctx, settings, discovery, self_contact_point, base_path).behavior())
+    return Behaviors.supervise(behavior).on_failure(SupervisorStrategy.restart())  # as Pekko's system guardian restarts it
 
 
 # --- the extension (ClusterBootstrap.scala) ----------------------------------------------------------------------------

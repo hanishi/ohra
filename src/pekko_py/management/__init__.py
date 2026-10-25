@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ..discovery import ServiceDiscovery
 from .bootstrap import ClusterBootstrap, ClusterBootstrapSettings
 from .health import HealthChecks, HealthCheckSettings
-from .http import Response, json_response, serve
+from .http import HttpServer, Response, json_response, serve
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
@@ -69,7 +69,7 @@ class PekkoManagement:
     health: HealthChecks
     bootstrap: ClusterBootstrap | None
     uri: str | None
-    _server: asyncio.Server | None
+    _server: HttpServer | None
     _routes: dict[str, RouteHandler]
     _prefixes: list[tuple[str, RouteHandler]]
     _starting: asyncio.Lock
@@ -147,12 +147,15 @@ class PekkoManagement:
     # --- lifecycle ------------------------------------------------------------------------------------------------
 
     async def start(self) -> str:
-        """Bind the endpoint once and return its base URI; a second call returns the same URI."""
+        """Bind the endpoint once and return its base URI; a second call returns the same URI. After ``stop()`` a call
+        binds again, as Pekko's; after the system has stopped it raises, since nothing would ever close the server."""
         async with self._starting:
+            if self.system._system_root.done.done():  # pyright: ignore[reportPrivateUsage]
+                raise RuntimeError("the ActorSystem has terminated; the management endpoint cannot start")
             if self.uri is None:
                 s = self.settings
                 server = await serve(s.effective_bind_hostname, s.effective_bind_port, self._dispatch)
-                port = server.sockets[0].getsockname()[1]
+                port = server.port
                 self._server = server
                 self.uri = f"http://{s.effective_hostname}:{port}{s.base_path}"
                 _log.info("Bound Pekko Management (HTTP) endpoint to: %s:%s", s.effective_bind_hostname, port)
@@ -161,7 +164,8 @@ class PekkoManagement:
             return self.uri
 
     async def stop(self) -> None:
-        server, self._server = self._server, None
-        if server is not None:
-            server.close()
-            await server.wait_closed()
+        async with self._starting:  # a stop racing a start waits for the bind, then closes it
+            server, self._server, self.uri = self._server, None, None
+            if server is not None:
+                server.close()
+                await server.wait_closed()

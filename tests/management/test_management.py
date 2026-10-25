@@ -93,3 +93,35 @@ async def test_cluster_membership_readiness():
         Cluster(node).manager.tell(Join(Address("c", "127.0.0.1", p)))
         await eventually(lambda: all_up(node, 1), timeout=5)
         assert (await get(uri + "/ready", timeout=2))[0] == 200
+
+
+async def test_idle_and_half_open_connections_do_not_block_shutdown():
+    """A client that connects and says nothing, and one that asked for a slow route and went away, must not hold the
+    system's termination; the server cancels its connection tasks when it closes."""
+    system = ActorSystem(Behaviors.ignore, "m", management=mgmt())
+    uri = await PekkoManagement(system).start()
+    host, port = uri.removeprefix("http://").split(":")
+    idle_reader, idle_writer = await asyncio.open_connection(host, int(port))
+    began = asyncio.get_running_loop().time()
+    system.terminate()
+    await asyncio.wait_for(system.when_terminated(), timeout=5)
+    assert asyncio.get_running_loop().time() - began < 1.0
+    assert await idle_reader.read() == b""  # the server closed it
+    idle_writer.close()
+    await idle_writer.wait_closed()
+
+
+async def test_start_after_termination_raises_and_stop_allows_a_rebind():
+    system = ActorSystem(Behaviors.ignore, "m", management=mgmt())
+    m = PekkoManagement(system)
+    first = await m.start()
+    await m.stop()
+    assert m.uri is None
+    with pytest.raises(OSError):
+        await get(first + "/ready", timeout=1)
+    second = await m.start()  # a rebind after stop, as Pekko's stop/start
+    assert (await get(second + "/ready", timeout=2))[0] == 200
+    system.terminate()
+    await system.when_terminated()
+    with pytest.raises(RuntimeError):
+        await m.start()  # the system is gone: nothing would ever close a new server

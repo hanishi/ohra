@@ -166,7 +166,7 @@ async def test_a_gracefully_left_region_is_forgotten_without_the_removal_margin(
     node that left gracefully has stopped, so the coordinator must not make the next leaver wait for the margin."""
     p1, p2 = sorted((free_port(), free_port()))
     async with AsyncExitStack() as stack:
-        a, b = [await stack.enter_async_context(sharding_node(p, [p1], down_removal_margin=1.0)) for p in (p1, p2)]
+        a, b = [await stack.enter_async_context(sharding_node(p, [p1], down_removal_margin=3.0)) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
         regions = [start_sharding(n) for n in (a, b)]
         await ids_hosted_by(regions, [a, b], 12)
@@ -177,8 +177,8 @@ async def test_a_gracefully_left_region_is_forgotten_without_the_removal_margin(
         a.terminate()
         await asyncio.wait_for(a.when_terminated(), timeout=5)
         # ~1 s: the coordinator singleton, alone and exiting, waits one hand-over retry before stopping, as Pekko's;
-        # with b's region kept for the margin it would be the margin on top (2 s)
-        assert asyncio.get_running_loop().time() - began < 1.5
+        # with b's region kept for the margin it would be 3 s more
+        assert asyncio.get_running_loop().time() - began < 2.5
 
 
 async def test_a_guardian_that_stops_itself_leaves_gracefully():

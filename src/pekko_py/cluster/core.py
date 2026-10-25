@@ -438,6 +438,8 @@ class Cluster:
 
     async def _leave_task(self) -> None:
         """CoordinatedShutdownLeave: leave, then wait until this member is Leaving, Exiting, Down or Removed."""
+        # Pekko's CoordinatedShutdownLeave asks for CurrentClusterState and completes on an empty member list; the
+        # published state is at hand here, and the Subscribe below replays the current state as events anyway.
         if self._skip_cluster_tasks() or not self.state.members:  # not joined: nothing to leave
             return
         done: asyncio.Future[None] = asyncio.get_running_loop().create_future()

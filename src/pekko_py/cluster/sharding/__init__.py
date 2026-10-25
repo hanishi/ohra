@@ -102,7 +102,10 @@ class ClusterSharding:
         CoordinatedShutdown(self.system).add_task(
             "cluster-sharding-shutdown-region", f"region-shutdown-{name}", progress.task(Cluster(self.system), region.ref)
         )
-        ClusterSingleton(self.system).init(SingletonActor(coordinator_behavior(name, settings), f"{name}Coordinator").with_stop_message(_Terminate()))
+        coordinator = SingletonActor(coordinator_behavior(name, settings), f"{name}Coordinator").with_stop_message(_Terminate())
+        if settings.coordinator_singleton_settings is not None:
+            coordinator = coordinator.with_settings(settings.coordinator_singleton_settings)
+        ClusterSingleton(self.system).init(coordinator)
         self._regions[name] = region.ref
         return region.ref
 

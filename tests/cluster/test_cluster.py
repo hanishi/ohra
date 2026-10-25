@@ -52,10 +52,10 @@ FAST: dict[str, Any] = dict(
 
 
 FAST_SHUTDOWN = CoordinatedShutdownSettings(
-    default_phase_timeout=1.0, phase_timeouts={"cluster-sharding-shutdown-region": 1.0, "cluster-exiting": 1.0, "actor-system-terminate": 1.0}
+    default_phase_timeout=1.0, phase_timeouts={"cluster-sharding-shutdown-region": 1.0, "cluster-exiting": 0.3, "actor-system-terminate": 1.0}
 )
 """A leaving node whose cluster cannot converge (an undowned unreachable member) waits out cluster-exiting, as in
-Pekko; one second instead of ten keeps such tests short."""
+Pekko; 0.3 s instead of ten keeps the crash-style tests' teardown short. Nodes that hand off use their own helpers."""
 
 
 def cluster_node(name: str, port: int, seeds: list[int], shutdown: CoordinatedShutdownSettings = FAST_SHUTDOWN, **settings: Any) -> ActorSystem[Any]:

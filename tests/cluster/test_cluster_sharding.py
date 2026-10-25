@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
@@ -20,6 +20,7 @@ from pekko_py import (
     Behaviors,
     ClusterSharding,
     ClusterShardingSettings,
+    ClusterSingletonSettings,
     CurrentShardRegionState,
     Entity,
     EntityContext,
@@ -44,6 +45,7 @@ FAST_SHARDING = ClusterShardingSettings(
     shard_start_timeout=0.2,
     coordinator_failure_backoff=0.1,
     shard_region_query_timeout=1.0,
+    coordinator_singleton_settings=ClusterSingletonSettings(hand_over_retry_interval=0.05, min_number_of_hand_over_retries=5, singleton_identification_interval=0.02),
 )
 
 
@@ -487,3 +489,19 @@ async def test_a_failed_region_restarts_and_recovers():
         for entity_id in ids:
             assert await ask(ref(a, entity_id), lambda r: Count(0, r), timeout=5) >= 0
         assert await shards_on(region_a) or True
+
+
+async def test_coordinator_singleton_settings_apply_to_the_coordinator():
+    """Pekko's ClusterShardingSettings.coordinatorSingletonSettings: a lone leaving node's coordinator waits one
+    hand-over retry before stopping, so a short retry interval makes its shutdown short."""
+    fast_singleton = ClusterSingletonSettings(hand_over_retry_interval=0.05, min_number_of_hand_over_retries=5, singleton_identification_interval=0.02)
+    settings = replace(FAST_SHARDING, coordinator_singleton_settings=fast_singleton)
+    p = free_port()
+    async with node(p, [p]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        start(a, settings=settings)
+        assert await ask(ref(a, "x"), lambda r: Count(1, r), timeout=5) == 1
+        began = asyncio.get_running_loop().time()
+        a.terminate()
+        await asyncio.wait_for(a.when_terminated(), timeout=5)
+        assert asyncio.get_running_loop().time() - began < 0.6  # one 0.05 s retry, not the default second

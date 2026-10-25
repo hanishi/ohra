@@ -13,7 +13,7 @@ import asyncio
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from ...behavior import Behavior, Behaviors
@@ -21,6 +21,9 @@ from ...context import ActorContext
 from ...ref import ActorRef
 from ...remote.serialization import remotable
 from ...signals import PostStop, Signal, Terminated
+
+if TYPE_CHECKING:
+    from ..singleton import ClusterSingletonSettings
 
 
 def _child_name(entity_id: str) -> str:
@@ -52,6 +55,8 @@ class ClusterShardingSettings:
     rebalance_relative_limit: float = 0.1
     passivate_after: float | None = None
     shard_region_query_timeout: float = 3.0
+    coordinator_singleton_settings: ClusterSingletonSettings | None = None
+    """Settings of the coordinator's singleton manager (Pekko's coordinator-singleton); None means the defaults."""
 
     def __post_init__(self) -> None:
         for name in ("retry_interval", "rebalance_interval", "handoff_timeout", "shard_start_timeout", "coordinator_failure_backoff", "shard_region_query_timeout"):  # fmt: skip

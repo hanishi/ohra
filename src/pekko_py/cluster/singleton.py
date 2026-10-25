@@ -268,10 +268,12 @@ class _ExitingProgress:
 
         return run
 
-    def singleton_exiting_2(self) -> Callable[[], Awaitable[None]]:
-        """Task 2: await the hand-over (memberExitingProgress)."""
+    def singleton_exiting_2(self, cluster: Cluster) -> Callable[[], Awaitable[None]]:
+        """Task 2: await the hand-over (memberExitingProgress); nothing to wait for once terminated or Down, as Pekko's."""
 
         async def run() -> None:
+            if cluster.is_terminated or cluster.self_member.status == "down":
+                return
             if self.future is not None:
                 await asyncio.shield(self.future)
 
@@ -846,7 +848,7 @@ class ClusterSingleton:
         manager = root.spawn_child(_manager(singleton, settings, progress), _manager_name(singleton.name), None)
         shutdown = CoordinatedShutdown(self.system)
         shutdown.add_task("cluster-exiting", f"singleton-exiting-1-{singleton.name}", progress.singleton_exiting_1(Cluster(self.system), manager.ref))
-        shutdown.add_task("cluster-exiting", f"singleton-exiting-2-{singleton.name}", progress.singleton_exiting_2())
+        shutdown.add_task("cluster-exiting", f"singleton-exiting-2-{singleton.name}", progress.singleton_exiting_2(Cluster(self.system)))
         proxy = root.spawn_child(_proxy(singleton.name, settings), _proxy_name(singleton.name), None)
         self._proxies[singleton.name] = proxy.ref
         return proxy.ref

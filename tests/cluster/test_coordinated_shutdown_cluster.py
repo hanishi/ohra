@@ -172,4 +172,6 @@ async def test_a_gracefully_left_region_is_forgotten_without_the_removal_margin(
         began = asyncio.get_running_loop().time()
         a.terminate()
         await asyncio.wait_for(a.when_terminated(), timeout=5)
-        assert asyncio.get_running_loop().time() - began < 0.8  # a's hand-off did not wait on b's dead region
+        # ~1 s: the coordinator singleton, alone and exiting, waits one hand-over retry before stopping, as Pekko's;
+        # with b's region kept for the margin it would be the margin on top (2 s)
+        assert asyncio.get_running_loop().time() - began < 1.5

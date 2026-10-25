@@ -97,6 +97,9 @@ class PekkoManagement:
                 return cluster.self_member.status in hc.ready_states
 
             self.health.add_readiness_check("cluster-membership", cluster_membership)
+            from .cluster_http import register_cluster_routes  # imports the cluster, which this module must not at import time
+
+            register_cluster_routes(self, system)
         return self
 
     # --- routes ---------------------------------------------------------------------------------------------------

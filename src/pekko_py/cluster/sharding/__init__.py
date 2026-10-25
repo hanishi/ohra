@@ -76,6 +76,7 @@ class ClusterSharding:
 
     system: ActorSystem[Any]
     _regions: dict[str, ActorRef[Any]]
+    _entities: dict[str, Entity[Any]]
     _parent: ActorCell[Any] | None
 
     def __new__(cls, system: ActorSystem[Any]) -> ClusterSharding:
@@ -85,6 +86,7 @@ class ClusterSharding:
             self = object.__new__(cls)
             self.system = system
             self._regions = {}
+            self._entities = {}
             self._parent = None
             system.cluster_sharding = self
         return system.cluster_sharding
@@ -107,6 +109,7 @@ class ClusterSharding:
             coordinator = coordinator.with_settings(settings.coordinator_singleton_settings)
         ClusterSingleton(self.system).init(coordinator)
         self._regions[name] = region.ref
+        self._entities[name] = entity
         return region.ref
 
     def entity_ref_for[M](self, key: EntityTypeKey[M], entity_id: str) -> EntityRef[M]:

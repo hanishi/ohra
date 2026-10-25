@@ -55,6 +55,7 @@ If you know Apache Pekko or Akka Typed, the names are the same in snake_case, an
 pip install -e .            # the library
 pip install -e '.[numpy]'   # plus numpy, for the examples that use it
 pip install -e '.[web]'     # plus FastAPI and uvicorn, for pekko_py.ext.fastapi and the fastapi_* examples
+pip install -e '.[postgres]' # plus psycopg, for pekko_py.ext.postgres, the durable state store for clusters
 pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 ```
 
@@ -102,7 +103,7 @@ The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The 
 
 ## Development
 
-Layout follows Apache Pekko's modules: `pekko_py` is the actor core, `pekko_py.remote` the transport and serialization, `pekko_py.cluster` membership and the singleton, `pekko_py.cluster.sharding` the Shard, region and coordinator, `pekko_py.ext` the FastAPI and shared-memory integrations. Every public name is importable from `pekko_py` and from its own subpackage.
+Layout follows Apache Pekko's modules: `pekko_py` is the actor core, `pekko_py.remote` the transport and serialization, `pekko_py.cluster` membership and the singleton, `pekko_py.cluster.sharding` the Shard, region and coordinator, `pekko_py.ext` the FastAPI, Postgres and shared-memory integrations. Every public name is importable from `pekko_py` and from its own subpackage.
 
 ```
 pytest      # every test fails if any asyncio task outlives it

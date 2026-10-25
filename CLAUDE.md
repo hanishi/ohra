@@ -23,7 +23,7 @@ Pekko Typed semantics on asyncio. Read the book in docs/book/ first, especially 
 - `remote/`: `remoting.py` (transport, addresses, `RemoteRef`) and `serialization.py` (`@remotable`).
 - `cluster/`: `core.py` (the membership daemon and the `Cluster` extension), its internals `gossip.py`, `reachability.py`, `vector_clock.py`, `failure_detector.py`, the split-brain resolver `sbr.py`, then `singleton.py` and `sharding/` (`shard.py`: the Shard actor and the single-node `Sharding`; `coordinator.py`; `region.py`; the `ClusterSharding` extension in `__init__.py`).
 - `management/`: Pekko Management for Kubernetes: `http.py` (stdlib HTTP/1.1 server and client), `health.py`, the `PekkoManagement` extension in `__init__.py`, `cluster_http.py` (read-only routes), `bootstrap.py` (cluster bootstrap), `kubernetes.py` (API discovery).
-- `ext/`: `fastapi.py` and `shm.py`, integrations that are not part of Pekko.
+- `ext/`: `fastapi.py`, `postgres.py` (`PostgresStore`, durable state for clusters) and `shm.py`, integrations outside the core.
 - `docs/book/`: the documentation, one chapter per layer with Mermaid diagrams; README.md is only the front page.
 - Public names are importable from `pekko_py`, and also from the subpackage they belong to (`pekko_py.cluster`, `pekko_py.cluster.sharding`, `pekko_py.remote`).
 

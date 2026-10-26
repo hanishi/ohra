@@ -23,7 +23,7 @@
 | `EntityTypeKey`, `EntityContext`, `EntityRef`, `ShardingEnvelope`, `ClusterSharding.Passivate`, `GetShardRegionState` | same; `Passivate` |
 | `DurableStateBehavior(persistenceId, emptyState, commandHandler)` | `@Behaviors.persisted(store)` on a state-to-behavior factory, started with `factory.recover(id, empty)` |
 | `Effect.persist(state).thenReply(replyTo)(f)`, `Effect.none` | `factory(state).then_reply(ref, msg)` / `.then_run(callback)`; any plain behavior, including `same`, writes nothing |
-| durable state stores (JDBC, R2DBC) | `InMemoryStore`, `SqliteStore(path, codec=...)` |
+| durable state stores (JDBC, R2DBC) | `InMemoryStore`, `SqliteStore(path, codec=...)`, `pekko_py.ext.postgres.PostgresStore(dsn, table=..., codec=...)` |
 | `pekko.remote.artery.canonical.hostname / port` | `ActorSystem(..., address=(host, port))`; paths read `pekko://name@host:port/user/...` |
 | `ActorRefResolver.resolveActorRef(path)` | `system.resolve(path)`: a local ref, or a `RemoteRef` for another node |
 | serialization bindings and manifests | `@remotable` on a frozen dataclass; self-describing JSON with `$type` and `$ref` |

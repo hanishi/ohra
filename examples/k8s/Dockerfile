@@ -6,6 +6,6 @@ WORKDIR /app
 COPY pyproject.toml LICENSE NOTICE ./
 COPY src ./src
 COPY examples ./examples
-RUN pip install --no-cache-dir '.[web]'   # FastAPI and uvicorn for carts.py
+RUN pip install --no-cache-dir '.[web,postgres]'   # FastAPI, uvicorn and psycopg for carts.py
 EXPOSE 2551 7626 8000
 CMD ["python", "examples/k8s/node.py"]

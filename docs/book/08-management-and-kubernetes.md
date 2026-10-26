@@ -66,7 +66,7 @@ kubectl delete -f examples/k8s/cluster.yaml
 
 ### Carts: cluster sharding behind a web app
 
-`examples/k8s/carts.py` is `examples/fastapi_carts.py` on the cluster: FastAPI on every pod, one sharded cart entity per cart id persisted with `SqliteStore`, and `ClusterSharding.entity_ref_for` in the routes, so any pod serves any cart. Every response names the pod that took the request (`served_by`) and the pod running the cart (`hosted_on`). `examples/k8s/carts.yaml` runs three pods from the same image under uvicorn, with a LoadBalancer Service that Docker Desktop publishes on `localhost:8000`, and one SQLite file shared through a `hostPath` volume. With the image built and pushed as above:
+`examples/k8s/carts.py` is `examples/fastapi_carts.py` on the cluster: FastAPI on every pod, one sharded cart entity per cart id persisted with `PostgresStore`, and `ClusterSharding.entity_ref_for` in the routes, so any pod serves any cart. Every response names the pod that took the request (`served_by`) and the pod running the cart (`hosted_on`). `examples/k8s/carts.yaml` runs three pods from the same image under uvicorn, with a LoadBalancer Service that Docker Desktop publishes on `localhost:8000`, and a one-replica Postgres StatefulSet whose volume claim outlives its pod. An init container holds each cart pod until Postgres accepts connections. The carts are stored as JSON, so psql can show them. With the image built and pushed as above:
 
 ```sh
 sed "s|IMAGE|YOU/pekko-py-cluster:dev|" examples/k8s/carts.yaml | kubectl apply -f -
@@ -74,11 +74,14 @@ curl -X POST localhost:8000/carts/alice/items -H 'content-type: application/json
 curl localhost:8000/carts/alice          # repeat: served_by changes from request to request, hosted_on stays put
 kubectl delete pod CARTS-POD-FROM-HOSTED_ON
 curl localhost:8000/carts/alice          # the same items, now hosted_on another pod: recovered from the store
+kubectl exec postgres-0 -- psql -U postgres -d carts -c \
+  "SELECT persistence_id, revision, convert_from(state_payload, 'UTF8') FROM durable_state"   # one row per cart
+kubectl delete pod postgres-0             # the database restarts on its volume; the next requests reconnect
 curl -X DELETE localhost:8000/carts/alice   # checkout; the cart is then 404
-kubectl delete -f examples/k8s/carts.yaml
+kubectl delete -f examples/k8s/carts.yaml   # the volume claim stays: kubectl delete pvc data-postgres-0 removes the carts
 ```
 
-uvicorn owns SIGTERM here: it stops taking requests first, then the app's lifespan exits and runs the coordinated shutdown, so a deleted pod has stopped serving before its carts hand off and it leaves. The shared SQLite file works because Docker Desktop has one node and sharding keeps one writer per cart, with the store's revision check behind it; on a cluster with several nodes the store would be a shared database behind the same `Store` protocol.
+uvicorn owns SIGTERM here: it stops taking requests first, then the app's lifespan exits and runs the coordinated shutdown, so a deleted pod has stopped serving before its carts hand off and it leaves. Sharding keeps one writer per cart, and the store's revision check catches anything else. Every pod reaches the same database, so the example runs the same on a cluster with several nodes. The password in the manifest's Secret is an example; replace it outside a local cluster.
 
 ---
 

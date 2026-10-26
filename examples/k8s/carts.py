@@ -1,5 +1,5 @@
 """Shopping carts on a Kubernetes cluster: examples/fastapi_carts.py with the carts spread over the pods by cluster
-sharding. Every pod serves HTTP, any pod can reach any cart, and each cart lives on one pod, persisted in SQLite.
+sharding. Every pod serves HTTP, any pod can reach any cart, and each cart lives on one pod, persisted in Postgres.
 
 Every response names two pods: `served_by` took the HTTP request, `hosted_on` runs the cart entity. Through the
 Service the first changes from request to request while the second stays put; delete the `hosted_on` pod and the next
@@ -8,9 +8,11 @@ request recovers the cart, with its items, on another pod.
     uvicorn carts:app --app-dir examples/k8s --host 0.0.0.0 --port 8000      # as examples/k8s/carts.yaml runs it
 
 uvicorn owns SIGTERM: it stops taking requests, then the lifespan exits, which runs the coordinated shutdown, so the
-pod hands its carts off and leaves the cluster after it has stopped serving. CARTS_DB is the database (all pods share
-it through a hostPath volume on Docker Desktop's single node; sharding keeps one writer per cart).
+pod hands its carts off and leaves the cluster after it has stopped serving. DATABASE_URL is the Postgres database
+every pod reaches; sharding keeps one writer per cart, and the store's revision check catches anything else. Carts are
+stored as JSON, so `SELECT persistence_id, revision, convert_from(state_payload, 'UTF8') FROM durable_state` shows them.
 """
+import json
 import os
 import sys
 from collections.abc import AsyncGenerator
@@ -42,15 +44,17 @@ from pekko_py import (  # noqa: E402
     PekkoManagement,
     PekkoManagementSettings,
     SplitBrainResolverSettings,
-    SqliteStore,
     ask,
     remotable,
 )
 from pekko_py.ext.fastapi import Actors  # noqa: E402
+from pekko_py.ext.postgres import PostgresStore  # noqa: E402
 
 POD, IP = os.environ.get("POD_NAME", "local"), os.environ.get("POD_IP", "127.0.0.1")
 IDLE_TIMEOUT = 30.0  # seconds without a request before a cart entity is passivated
-store = SqliteStore[dict[str, int]](os.environ.get("CARTS_DB", "/data/carts.db"))
+store = PostgresStore[dict[str, int]](
+    os.environ["DATABASE_URL"], codec=(lambda items: json.dumps(items).encode(), lambda raw: json.loads(raw))
+)  # opened by the lifespan
 
 # --- cart protocol: remotable, since the HTTP pod and the cart's pod are usually different ----------------------
 
@@ -107,7 +111,7 @@ def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
 
         return on_message
 
-    return cart.recover(entity.entity_id, empty={})  # one read from the shared database, on whichever pod hosts it
+    return cart.recover(entity.entity_id, empty={})  # one read from Postgres, on whichever pod hosts it
 
 
 # --- the cluster node, owned by the app's lifespan ---------------------------------------------------------------
@@ -136,7 +140,7 @@ actors = Actors(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    async with actors.lifespan(app):
+    async with store, actors.lifespan(app):  # the pool opens before the cluster node starts and closes after it stops
         await PekkoManagement(actors.system).start()  # health checks for the probes, then the bootstrap
         yield
 

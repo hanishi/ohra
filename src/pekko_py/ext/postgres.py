@@ -16,7 +16,7 @@ from collections.abc import Callable
 from types import TracebackType
 from typing import Self
 
-from psycopg import AsyncConnection, sql
+from psycopg import AsyncConnection, OperationalError, sql
 from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool
 
@@ -72,36 +72,45 @@ class PostgresStore[S]:
             raise RuntimeError("PostgresStore is not open: use it inside `async with PostgresStore(...) as store`")
         return self._pool
 
+    async def _execute(self, query: sql.Composed, params: tuple[object, ...]) -> tuple[int, TupleRow | None]:
+        """Run one statement; return its row count and first row. A restarted server leaves the pool holding closed
+        connections: on a connection error, drop every broken idle one at once and retry the statement once. The
+        pool's own check would test each before lending it, but backs off 1, 2, 4... seconds per broken connection.
+        A retried save that had in fact committed fails the revision check, as any lost write would."""
+        pool = self._opened()
+
+        async def run() -> tuple[int, TupleRow | None]:
+            async with pool.connection() as conn:
+                cur = await conn.execute(query, params)
+                return cur.rowcount, (await cur.fetchone() if cur.description else None)
+
+        try:
+            return await run()
+        except OperationalError:
+            await pool.check()
+            return await run()
+
     async def load(self, persistence_id: str) -> tuple[S, int] | None:
-        async with self._opened().connection() as conn:
-            cur = await conn.execute(
-                sql.SQL("SELECT state_payload, revision FROM {} WHERE persistence_id = %s").format(self._table),
-                (persistence_id,),
-            )
-            row = await cur.fetchone()
+        _, row = await self._execute(
+            sql.SQL("SELECT state_payload, revision FROM {} WHERE persistence_id = %s").format(self._table), (persistence_id,)
+        )
         return None if row is None else (self._loads(row[0]), row[1])
 
     async def save(self, persistence_id: str, state: S, revision: int) -> None:
         data = self._dumps(state)
-        async with self._opened().connection() as conn:
-            if revision == 1:
-                cur = await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {} (persistence_id, revision, state_payload) VALUES (%s, 1, %s) "
-                        "ON CONFLICT (persistence_id) DO NOTHING"
-                    ).format(self._table),
-                    (persistence_id, data),
-                )
-            else:
-                cur = await conn.execute(
-                    sql.SQL(
-                        "UPDATE {} SET revision = %s, state_payload = %s WHERE persistence_id = %s AND revision = %s"
-                    ).format(self._table),
-                    (revision, data, persistence_id, revision - 1),
-                )
-            if cur.rowcount != 1:
-                raise RevisionConflictError(f"{persistence_id}: revision {revision} is not the next revision")
+        if revision == 1:
+            query = sql.SQL(
+                "INSERT INTO {} (persistence_id, revision, state_payload) VALUES (%s, 1, %s) "
+                "ON CONFLICT (persistence_id) DO NOTHING"
+            ).format(self._table)
+            rowcount, _ = await self._execute(query, (persistence_id, data))
+        else:
+            query = sql.SQL(
+                "UPDATE {} SET revision = %s, state_payload = %s WHERE persistence_id = %s AND revision = %s"
+            ).format(self._table)
+            rowcount, _ = await self._execute(query, (revision, data, persistence_id, revision - 1))
+        if rowcount != 1:
+            raise RevisionConflictError(f"{persistence_id}: revision {revision} is not the next revision")
 
     async def delete(self, persistence_id: str) -> None:
-        async with self._opened().connection() as conn:
-            await conn.execute(sql.SQL("DELETE FROM {} WHERE persistence_id = %s").format(self._table), (persistence_id,))
+        await self._execute(sql.SQL("DELETE FROM {} WHERE persistence_id = %s").format(self._table), (persistence_id,))

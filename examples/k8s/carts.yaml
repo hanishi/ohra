@@ -1,6 +1,71 @@
 # Shopping carts on a three-pod cluster: FastAPI on every pod, the carts spread over the pods by cluster sharding and
-# persisted in one SQLite file that all pods share through a hostPath volume, which works on Docker Desktop's single
-# node only. Replace IMAGE with your image, see docs/book/08-management-and-kubernetes.md, "Carts".
+# persisted in one Postgres database that every pod reaches. Replace IMAGE with your image, see
+# docs/book/08-management-and-kubernetes.md, "Carts".
+apiVersion: v1
+kind: Secret
+metadata:
+  name: carts-postgres
+stringData:
+  password: carts-example-only   # an example; use your own secret outside a local cluster
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: carts
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: carts-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata   # a subdirectory: the volume's root is not empty
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "carts"]
+            periodSeconds: 5
+  volumeClaimTemplates:          # Docker Desktop's default storage class provides it; it outlives the pods
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -45,6 +110,10 @@ spec:
       imagePullSecrets:
         - name: regcred             # for a private hub repository; harmless when the secret does not exist
       terminationGracePeriodSeconds: 30   # room for uvicorn to drain, then the carts to hand off and the pod to leave
+      initContainers:
+        - name: wait-for-postgres   # the store's pool would give up after 30 s and the pod would restart
+          image: postgres:17
+          command: ["sh", "-c", "until pg_isready -h postgres -U postgres -d carts; do sleep 1; done"]
       containers:
         - name: carts
           image: IMAGE
@@ -66,11 +135,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: CARTS_DB
-              value: /data/carts.db
-          volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: carts-postgres
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://postgres:$(POSTGRES_PASSWORD)@postgres:5432/carts
           readinessProbe:
             httpGet:
               path: /ready
@@ -81,11 +152,6 @@ spec:
               path: /alive
               port: management
             periodSeconds: 10
-      volumes:
-        - name: data
-          hostPath:
-            path: /tmp/pekko-py-carts   # on the Kubernetes node; one node, so every pod sees the same file
-            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

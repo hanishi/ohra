@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 
@@ -107,3 +108,16 @@ async def test_nodes_starting_together_create_the_table_once(table: str):
         assert await stores[-1].load("a") == (1, 1)
     finally:
         await asyncio.gather(*(s.__aexit__(None, None, None) for s in stores))
+
+
+async def test_the_store_reconnects_after_the_database_restarts(table: str):
+    # A restarted server leaves the pool holding closed connections; the next calls must still succeed.
+    async with PostgresStore[int](DSN, table=table) as store:
+        await store.save("a", 1, 1)
+        async with await psycopg.AsyncConnection.connect(DSN, autocommit=True) as admin:
+            await admin.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database()")
+        started = time.monotonic()
+        for revision in range(2, 8):  # more calls than the pool has connections
+            assert await store.load("a") == (revision - 1, revision - 1)
+            await store.save("a", revision, revision)
+        assert time.monotonic() - started < 2  # every broken connection dropped at once, not one per backoff step

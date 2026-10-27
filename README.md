@@ -110,6 +110,8 @@ pytest      # every test fails if any asyncio task outlives it
 pyright     # strict; tests/typing_check.py asserts type errors that must occur
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the runtime invariants and how to port from Apache Pekko. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 Apache-2.0, the same as Apache Pekko. The chat room and interaction-pattern examples are derived from the Apache Pekko documentation; see [NOTICE](NOTICE).

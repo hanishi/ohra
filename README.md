@@ -2,6 +2,13 @@
 
 # ohra
 
+[![CI](https://github.com/hanishi/ohra/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hanishi/ohra/actions/workflows/ci.yml)
+[![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](pyproject.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Checked with pyright](https://img.shields.io/badge/pyright-strict-informational)](https://microsoft.github.io/pyright/)
+[![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)](pyproject.toml)
+
 Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies. *Ohra* is Finnish for barley, the crop of Pekko, the Finnish god of barley and brewing.
 
 ohra is an independent project, built on the design of Apache Pekko and, before it, Akka, with thanks to both communities. It follows their semantics and names closely, but it is not part of the Apache Software Foundation.

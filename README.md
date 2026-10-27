@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" width="160" alt="ohra logo: an ear of barley"></p>
+
 # ohra
 
 Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies. *Ohra* is Finnish for barley.
@@ -71,8 +73,9 @@ pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 6. [Cluster singleton](docs/book/06-singleton.md): one actor on the oldest member, and the hand-over
 7. [Sharding](docs/book/07-sharding.md): regions, shards and the coordinator, in one process and across nodes
 8. [Management and Kubernetes](docs/book/08-management-and-kubernetes.md): health checks, bootstrap, discovery, running on Docker Desktop
-9. [FastAPI, numpy and shared memory](docs/book/09-integrations.md)
-10. [Putting it together](docs/book/10-putting-it-together.md): one cart request through every layer
+9. [FastAPI](docs/book/09-fastapi.md): the actor system owned by the app, routes that ask actors
+10. [numpy and shared memory](docs/book/10-numpy-and-shared-memory.md): blocking work in a thread, large arrays to another process without a copy
+11. [Putting it together](docs/book/11-putting-it-together.md): one cart request through every layer
 
 Appendices: [Apache Pekko names](docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](docs/book/appendix-deviations.md), [performance](docs/book/appendix-performance.md), and a [glossary](docs/book/glossary.md).
 

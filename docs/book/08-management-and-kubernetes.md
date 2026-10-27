@@ -204,4 +204,4 @@ uvicorn owns SIGTERM here: it stops taking requests first, then the app's lifesp
 
 ---
 
-[← Sharding](07-sharding.md) · [Contents](README.md) · [FastAPI, numpy and shared memory →](09-integrations.md)
+[← Sharding](07-sharding.md) · [Contents](README.md) · [FastAPI →](09-fastapi.md)

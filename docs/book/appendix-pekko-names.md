@@ -65,4 +65,4 @@
 
 ---
 
-[← Putting it together: one cart request](10-putting-it-together.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)
+[← Putting it together: one cart request](11-putting-it-together.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)

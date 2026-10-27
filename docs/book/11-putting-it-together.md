@@ -1,4 +1,4 @@
-# 10. Putting it together: one cart request
+# 11. Putting it together: one cart request
 
 ## The problem
 
@@ -11,7 +11,7 @@ Follow one request, `POST /carts/alice/items`, through `examples/k8s/carts.py`: 
 | Step | Chapter |
 |---|---|
 | The pods found each other and formed a cluster | [8](08-management-and-kubernetes.md), [5](05-cluster.md) |
-| The route asks the cart for alice | [9](09-integrations.md), [1](01-actors.md) |
+| The route asks the cart for alice | [9](09-fastapi.md), [1](01-actors.md) |
 | The node finds the pod that hosts alice's shard | [7](07-sharding.md); the coordinator is a singleton, [6](06-singleton.md) |
 | The message crosses to that pod | [4](04-remoting.md) |
 | The cart saves the items before it replies | [3](03-persistence.md) |
@@ -81,4 +81,4 @@ Delete pod B and its coordinated shutdown hands alice's shard off. The next requ
 
 ---
 
-[← FastAPI, numpy and shared memory](09-integrations.md) · [Contents](README.md) · [Appendix A: Apache Pekko names →](appendix-pekko-names.md)
+[← numpy and shared memory](10-numpy-and-shared-memory.md) · [Contents](README.md) · [Appendix A: Apache Pekko names →](appendix-pekko-names.md)

@@ -6,7 +6,7 @@ ohra runs Apache Pekko Typed on one asyncio event loop per process, in pure Pyth
 
 Every chapter opens the same way: **the problem** it solves, **the idea** in plain words, **a first example** you can run, and a box for readers **coming from Apache Pekko**. **How it works** follows, as the reference.
 
-- **New to actors.** Read the chapters in order, each one up to "How it works", and come back for the rest when you need it. The examples build on chapter 1's `cart.py`, and through chapter 8 each runs with one command. The [glossary](glossary.md) has every term in plain words.
+- **New to actors.** Read the chapters in order, each one up to "How it works", and come back for the rest when you need it. The examples build on chapter 1's `cart.py`, and all but the web app and the Kubernetes cluster run with one command. The [glossary](glossary.md) has every term in plain words.
 - **Coming from Apache Pekko or Akka.** Skim the box near the top of each chapter for the names and the differences that matter, then read "How it works" for the layers you use. [Appendix A](appendix-pekko-names.md) maps every name, and [appendix B](appendix-deviations.md) lists every deviation.
 - **Contributing.** "How it works" describes the actors behind each feature, ported from the Apache Pekko source. Read it with [CONTRIBUTING.md](../../CONTRIBUTING.md), which has the runtime invariants and the checks.
 
@@ -53,8 +53,9 @@ flowchart TB
 6. [Cluster singleton](06-singleton.md)
 7. [Sharding](07-sharding.md)
 8. [Management and Kubernetes](08-management-and-kubernetes.md)
-9. [FastAPI, numpy and shared memory](09-integrations.md)
-10. [Putting it together: one cart request](10-putting-it-together.md)
+9. [FastAPI](09-fastapi.md)
+10. [numpy and shared memory](10-numpy-and-shared-memory.md)
+11. [Putting it together: one cart request](11-putting-it-together.md)
 
 Appendices
 

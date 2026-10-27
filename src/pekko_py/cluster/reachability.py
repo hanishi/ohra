@@ -1,5 +1,6 @@
-"""Reachability, as Pekko's: each node records what it observes about others, with a version per observer,
-and the table merges by taking the newer row set per observer."""
+"""Reachability, as Pekko's: each node records what it observes about others, with a version per
+observer, and the table merges by taking the newer row set per observer."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
@@ -32,7 +33,7 @@ class Reachability:
     def empty() -> Reachability:
         return Reachability()
 
-    # --- derived views ----------------------------------------------------------------------------
+    # --- derived views ---------------------------------------------------------------------------
 
     @cached_property
     def _observer_rows(self) -> dict[UniqueAddress, dict[UniqueAddress, Record]]:
@@ -48,7 +49,10 @@ class Reachability:
     @cached_property
     def all_unreachable(self) -> frozenset[UniqueAddress]:
         """Observed Unreachable by at least one node, and not Terminated by any."""
-        return frozenset(r.subject for r in self.records if r.status == "unreachable") - self._all_terminated
+        return (
+            frozenset(r.subject for r in self.records if r.status == "unreachable")
+            - self._all_terminated
+        )
 
     @property
     def all_unreachable_or_terminated(self) -> frozenset[UniqueAddress]:
@@ -57,7 +61,7 @@ class Reachability:
     def version_of(self, observer: UniqueAddress) -> int:
         return dict(self.versions).get(observer, 0)
 
-    # --- observations -----------------------------------------------------------------------------
+    # --- observations ----------------------------------------------------------------------------
 
     def unreachable(self, observer: UniqueAddress, subject: UniqueAddress) -> Reachability:
         return self._change(observer, subject, "unreachable")
@@ -68,7 +72,9 @@ class Reachability:
     def terminated(self, observer: UniqueAddress, subject: UniqueAddress) -> Reachability:
         return self._change(observer, subject, "terminated")
 
-    def _change(self, observer: UniqueAddress, subject: UniqueAddress, status: ReachabilityStatus) -> Reachability:
+    def _change(
+        self, observer: UniqueAddress, subject: UniqueAddress, status: ReachabilityStatus
+    ) -> Reachability:
         version = self.version_of(observer) + 1
         new_versions = tuple((o, version if o == observer else v) for o, v in self.versions)
         if observer not in dict(self.versions):
@@ -82,19 +88,26 @@ class Reachability:
         old = rows.get(subject)
         if old is None:
             if status == "reachable" and all(r.status == "reachable" for r in rows.values()):
-                return Reachability(tuple(r for r in self.records if r.observer != observer), new_versions)
+                return Reachability(
+                    tuple(r for r in self.records if r.observer != observer), new_versions
+                )
             return Reachability((*self.records, record), new_versions)
         if old.status == "terminated" or old.status == status:
             return self
-        if status == "reachable" and all(r.status == "reachable" or r.subject == subject for r in rows.values()):
+        if status == "reachable" and all(
+            r.status == "reachable" or r.subject == subject for r in rows.values()
+        ):
             # all Reachable again: drop the observer's rows entirely, and bump the version
-            return Reachability(tuple(r for r in self.records if r.observer != observer), new_versions)
+            return Reachability(
+                tuple(r for r in self.records if r.observer != observer), new_versions
+            )
         return Reachability(tuple(record if r is old else r for r in self.records), new_versions)
 
-    # --- merging and pruning ----------------------------------------------------------------------
+    # --- merging and pruning ---------------------------------------------------------------------
 
     def merge(self, allowed: frozenset[UniqueAddress], other: Reachability) -> Reachability:
-        """Per observer, keep the row set of whichever side has the higher version; drop nodes not in allowed."""
+        """Per observer, keep the row set of whichever side has the higher version; drop nodes not
+        in allowed."""
         records: list[Record] = []
         versions = dict(self.versions)
         for observer in allowed:
@@ -109,7 +122,9 @@ class Reachability:
                 records.extend(r for r in rows2.values() if r.subject in allowed)
             if v2 > v1:
                 versions[observer] = v2
-        return Reachability(tuple(records), tuple((o, v) for o, v in versions.items() if o in allowed))
+        return Reachability(
+            tuple(records), tuple((o, v) for o, v in versions.items() if o in allowed)
+        )
 
     def remove(self, nodes: Iterable[UniqueAddress]) -> Reachability:
         gone = set(nodes)
@@ -126,10 +141,13 @@ class Reachability:
             tuple((o, v) for o, v in self.versions if o not in nodes),
         )
 
-    # --- queries ----------------------------------------------------------------------------------
+    # --- queries ---------------------------------------------------------------------------------
 
-    def status(self, observer: UniqueAddress, subject: UniqueAddress | None = None) -> ReachabilityStatus:
-        """status(observer, subject): one observation. status(node): the aggregate over all observers."""
+    def status(
+        self, observer: UniqueAddress, subject: UniqueAddress | None = None
+    ) -> ReachabilityStatus:
+        """status(observer, subject): one observation. status(node): the aggregate over all
+        observers."""
         if subject is None:
             node = observer
             if node in self._all_terminated:
@@ -148,7 +166,11 @@ class Reachability:
         return not self.records
 
     def all_unreachable_from(self, observer: UniqueAddress) -> frozenset[UniqueAddress]:
-        return frozenset(s for s, r in self._observer_rows.get(observer, {}).items() if r.status == "unreachable")
+        return frozenset(
+            s
+            for s, r in self._observer_rows.get(observer, {}).items()
+            if r.status == "unreachable"
+        )
 
     @property
     def all_observers(self) -> frozenset[UniqueAddress]:

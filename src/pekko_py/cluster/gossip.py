@@ -1,5 +1,6 @@
-"""Members, Gossip and MembershipState, as Gossip.scala, Member.scala and MembershipState.scala, for one data
-center without roles."""
+"""Members, Gossip and MembershipState, as Gossip.scala, Member.scala and MembershipState.scala,
+for one data center without roles."""
+
 from __future__ import annotations
 
 import hashlib
@@ -30,11 +31,28 @@ UP_NUMBER_UNSET = 2**31 - 1  # Pekko's Int.MaxValue: not yet Up
 # Statuses the leader may hold, and the ones that must have seen the gossip for convergence.
 LEADER_MEMBER_STATUS: frozenset[str] = frozenset({"up", "leaving"})
 CONVERGENCE_MEMBER_STATUS: frozenset[str] = frozenset({"up", "leaving"})
-# Unreachable members with these statuses neither block convergence nor stay: the leader removes them.
+# Unreachable members with these statuses neither block convergence nor stay: the leader removes
+# them.
 REMOVE_UNREACHABLE_WITH_MEMBER_STATUS: frozenset[str] = frozenset({"down", "exiting"})
 
-_PRIORITY = {"removed": 0, "down": 1, "exiting": 2, "leaving": 3, "up": 4, "weakly_up": 5, "joining": 6}
-_LEADER_RANK = {"up": 0, "leaving": 0, "weakly_up": 1, "joining": 2, "exiting": 3, "down": 4, "removed": 5}
+_PRIORITY = {
+    "removed": 0,
+    "down": 1,
+    "exiting": 2,
+    "leaving": 3,
+    "up": 4,
+    "weakly_up": 5,
+    "joining": 6,
+}
+_LEADER_RANK = {
+    "up": 0,
+    "leaving": 0,
+    "weakly_up": 1,
+    "joining": 2,
+    "exiting": 3,
+    "down": 4,
+    "removed": 5,
+}
 
 
 def vclock_name(node: UniqueAddress) -> str:
@@ -44,7 +62,8 @@ def vclock_name(node: UniqueAddress) -> str:
 @remotable
 @dataclass(frozen=True, eq=False)
 class Member:
-    """A node in the cluster. Equal by unique address; ordered by address, as Pekko's Member.ordering."""
+    """A node in the cluster. Equal by unique address; ordered by address, as Pekko's
+    Member.ordering."""
 
     unique_address: UniqueAddress
     up_number: int
@@ -87,13 +106,16 @@ def removed_placeholder(node: UniqueAddress) -> Member:
 
 
 def highest_priority_of(m1: Member, m2: Member) -> Member:
-    """Of two views of one member, the one further along in the lifecycle; the older when they agree."""
+    """Of two views of one member, the one further along in the lifecycle; the older when they
+    agree."""
     if m1.status == m2.status:
         return m1 if m1.is_older_than(m2) else m2
     return m1 if _PRIORITY[m1.status] < _PRIORITY[m2.status] else m2
 
 
-def pick_highest_priority(a: Iterable[Member], b: Iterable[Member], tombstones: dict[UniqueAddress, float]) -> set[Member]:
+def pick_highest_priority(
+    a: Iterable[Member], b: Iterable[Member], tombstones: dict[UniqueAddress, float]
+) -> set[Member]:
     grouped: dict[UniqueAddress, list[Member]] = {}
     for m in [*a, *b]:
         grouped.setdefault(m.unique_address, []).append(m)
@@ -126,7 +148,7 @@ class Gossip:
     def empty() -> Gossip:
         return Gossip()
 
-    # --- members ------------------------------------------------------------------------------------
+    # --- members ---------------------------------------------------------------------------------
 
     def with_member(self, member: Member) -> Gossip:
         if member in self.members:
@@ -152,7 +174,7 @@ class Gossip:
     def is_singleton(self) -> bool:
         return len(self.members) == 1
 
-    # --- seen ---------------------------------------------------------------------------------------
+    # --- seen ------------------------------------------------------------------------------------
 
     def seen_by_node(self, node: UniqueAddress) -> bool:
         return node in self.seen_by
@@ -176,7 +198,7 @@ class Gossip:
         text = ",".join(sorted(f"{n.host}:{n.port}" for n in self.seen_by))
         return hashlib.sha1(text.encode()).hexdigest()
 
-    # --- versions and reachability ------------------------------------------------------------------
+    # --- versions and reachability ---------------------------------------------------------------
 
     def increment(self, node_name: str) -> Gossip:
         return replace(self, version=self.version.increment(node_name))
@@ -196,7 +218,7 @@ class Gossip:
     def is_reachable(self, from_node: UniqueAddress, to_node: UniqueAddress) -> bool:
         return self.has_member(to_node) and self.reachability.is_reachable(from_node, to_node)
 
-    # --- lifecycle ----------------------------------------------------------------------------------
+    # --- lifecycle -------------------------------------------------------------------------------
 
     def merge(self, other: Gossip) -> Gossip:
         tombstones = {**dict(self.tombstones), **dict(other.tombstones)}
@@ -214,7 +236,10 @@ class Gossip:
             seen_by=tuple(n for n in self.seen_by if n != node),
             reachability=self.reachability.remove([node]),
             version=self.version.prune(vclock_name(node)),
-            tombstones=(*((n, t) for n, t in self.tombstones if n != node), (node, removal_timestamp)),
+            tombstones=(
+                *((n, t) for n, t in self.tombstones if n != node),
+                (node, removal_timestamp),
+            ),
         )
 
     def remove_all(self, nodes: Iterable[UniqueAddress], removal_timestamp: float) -> Gossip:
@@ -225,7 +250,9 @@ class Gossip:
 
     def mark_as_down(self, member: Member) -> Gossip:
         downed = self.update([member.with_status("down")])
-        return replace(downed, seen_by=tuple(n for n in self.seen_by if n != member.unique_address))
+        return replace(
+            downed, seen_by=tuple(n for n in self.seen_by if n != member.unique_address)
+        )
 
     def prune_tombstones(self, remove_earlier_than: float) -> Gossip:
         kept = tuple((n, t) for n, t in self.tombstones if t > remove_earlier_than)
@@ -249,15 +276,22 @@ class MembershipState:
         return replace(self, latest_gossip=self.latest_gossip.seen(self.self_unique_address))
 
     def convergence(self, exiting_confirmed: frozenset[UniqueAddress]) -> bool:
-        """Every Up or Leaving member has seen this gossip, and every unreachable member is Down or Exiting."""
+        """Every Up or Leaving member has seen this gossip, and every unreachable member is Down or
+        Exiting."""
         gossip = self.latest_gossip
-        # Until some member is Up or Leaving, Joining and WeaklyUp members must have seen the gossip too, so the first
-        # up_number is assigned only once (Pekko's firstMemberInDc).
+        # Until some member is Up or Leaving, Joining and WeaklyUp members must have seen the
+        # gossip too, so the first up_number is assigned only once (Pekko's firstMemberInDc).
         first_member = not any(m.status in CONVERGENCE_MEMBER_STATUS for m in gossip.members)
-        member_status = CONVERGENCE_MEMBER_STATUS | {"joining", "weakly_up"} if first_member else CONVERGENCE_MEMBER_STATUS
+        member_status = (
+            CONVERGENCE_MEMBER_STATUS | {"joining", "weakly_up"}
+            if first_member
+            else CONVERGENCE_MEMBER_STATUS
+        )
         hindering = any(
             m.status in member_status
-            and not (gossip.seen_by_node(m.unique_address) or m.unique_address in exiting_confirmed)
+            and not (
+                gossip.seen_by_node(m.unique_address) or m.unique_address in exiting_confirmed
+            )
             for m in gossip.members
         )
         unreachable = [
@@ -265,14 +299,18 @@ class MembershipState:
             for node in self.reachability_excluding_downed_observers.all_unreachable_or_terminated
             if node != self.self_unique_address and node not in exiting_confirmed
         ]
-        return not hindering and all(m.status in REMOVE_UNREACHABLE_WITH_MEMBER_STATUS for m in unreachable)
+        return not hindering and all(
+            m.status in REMOVE_UNREACHABLE_WITH_MEMBER_STATUS for m in unreachable
+        )
 
     @property
     def reachability_excluding_downed_observers(self) -> Reachability:
         return self.latest_gossip.reachability_excluding_downed_observers
 
     def is_reachable_excluding_downed_observers(self, node: UniqueAddress) -> bool:
-        return self.latest_gossip.has_member(node) and self.reachability_excluding_downed_observers.is_reachable(node)
+        return self.latest_gossip.has_member(
+            node
+        ) and self.reachability_excluding_downed_observers.is_reachable(node)
 
     @property
     def leader(self) -> UniqueAddress | None:
@@ -282,8 +320,8 @@ class MembershipState:
         return self.leader == node
 
     def leader_of(self, members: Iterable[Member]) -> UniqueAddress | None:
-        """The first member, by address, with a leader status among the reachable non-Down ones; else the
-        least-bad reachable member, as leaderOf with leaderStatusOrdering."""
+        """The first member, by address, with a leader status among the reachable non-Down ones;
+        else the least-bad reachable member, as leaderOf with leaderStatusOrdering."""
         reachability = self.latest_gossip.reachability
         reachable = [
             m
@@ -311,13 +349,19 @@ class MembershipState:
     def youngest_member(self) -> Member:
         if not self.members:
             raise ValueError("no youngest when no members")
-        return max(self.members, key=lambda m: 0 if m.up_number == UP_NUMBER_UNSET else m.up_number)
+        return max(
+            self.members, key=lambda m: 0 if m.up_number == UP_NUMBER_UNSET else m.up_number
+        )
 
     def gossip_targets_for_exiting_members(self, exiting: Iterable[Member]) -> set[Member]:
-        """The two oldest members, where singletons and shard coordinators live, as Pekko's optimization."""
+        """The two oldest members, where singletons and shard coordinators live, as Pekko's
+        optimization."""
         if not any(True for _ in exiting):
             return set()
-        by_age = sorted(self.members, key=lambda m: (m.up_number, (m.unique_address.host, m.unique_address.port)))
+        by_age = sorted(
+            self.members,
+            key=lambda m: (m.up_number, (m.unique_address.host, m.unique_address.port)),
+        )
         return set(by_age[:2])
 
 
@@ -325,7 +369,9 @@ class GossipTargetSelector:
     """Which node to gossip to this round: prefer one that has not seen the current gossip, with a
     probability that shrinks for very large clusters, as Pekko's GossipTargetSelector."""
 
-    def __init__(self, gossip_different_view_probability: float = 0.8, reduce_at_cluster_size: int = 400) -> None:
+    def __init__(
+        self, gossip_different_view_probability: float = 0.8, reduce_at_cluster_size: int = 400
+    ) -> None:
         self._p = gossip_different_view_probability
         self._low = reduce_at_cluster_size
 
@@ -335,7 +381,11 @@ class GossipTargetSelector:
 
     def gossip_targets(self, state: MembershipState) -> list[UniqueAddress]:
         gossip = state.latest_gossip
-        valid = [m.unique_address for m in gossip.members if state.valid_node_for_gossip(m.unique_address)]
+        valid = [
+            m.unique_address
+            for m in gossip.members
+            if state.valid_node_for_gossip(m.unique_address)
+        ]
         if random.random() < self._adjusted_probability(len(gossip.members)):
             not_seen = [n for n in valid if not gossip.seen_by_node(n)]
             if not_seen:
@@ -343,7 +393,11 @@ class GossipTargetSelector:
         return valid
 
     def random_nodes_for_full_gossip(self, state: MembershipState, n: int) -> list[UniqueAddress]:
-        valid = [m.unique_address for m in state.members if state.valid_node_for_gossip(m.unique_address)]
+        valid = [
+            m.unique_address
+            for m in state.members
+            if state.valid_node_for_gossip(m.unique_address)
+        ]
         if len(valid) <= n:
             return valid
         return random.sample(valid, n)

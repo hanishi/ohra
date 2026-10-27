@@ -1,4 +1,5 @@
-"""Persisted state: an actor whose latest state is written before it replies and recovered in one read.
+"""Persisted state: an actor whose latest state is written before it replies and recovered in one
+read.
 
     @Behaviors.persisted(store)
     def cart(items: dict[str, int]) -> Behavior[CartCmd]:
@@ -8,9 +9,11 @@
     ctx.spawn(cart.recover("cart-42", empty={}), "cart-42")
 
 No events and no replay: a persisting command writes the whole state. Pekko's DurableStateBehavior
-shapes its API around a command handler and Effect so it can share them with event sourcing; pekko-py
-has no event sourcing, so state stays where every other behavior keeps it, as the factory's parameter.
+shapes its API around a command handler and Effect so it can share them with event sourcing;
+pekko-py has no event sourcing, so state stays where every other behavior keeps it, as the
+factory's parameter.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +34,8 @@ from .ref import ActorRef
 
 
 class RevisionConflictError(Exception):
-    """A write carried a revision that is not the stored revision plus one: another incarnation wrote first."""
+    """A write carried a revision that is not the stored revision plus one: another incarnation
+    wrote first."""
 
 
 class PersistenceError(Exception):
@@ -39,7 +43,8 @@ class PersistenceError(Exception):
 
 
 class Store[S](Protocol):
-    """Where states live. ``save`` must reject a revision that is not exactly one past the stored one."""
+    """Where states live. ``save`` must reject a revision that is not exactly one past the stored
+    one."""
 
     async def load(self, persistence_id: str) -> tuple[S, int] | None: ...
 
@@ -61,17 +66,19 @@ class InMemoryStore[S]:
         current = self.states.get(persistence_id)
         expected = 1 if current is None else current[1] + 1
         if revision != expected:
-            raise RevisionConflictError(f"{persistence_id}: revision {revision} written, {expected} expected")
+            raise RevisionConflictError(
+                f"{persistence_id}: revision {revision} written, {expected} expected"
+            )
         self.states[persistence_id] = (state, revision)
 
     async def delete(self, persistence_id: str) -> None:
         self.states.pop(persistence_id, None)
 
 
-
 class SqliteStore[S]:
-    """Durable states in one SQLite table, through the stdlib. Each call runs in a thread so the event loop
-    never blocks. The default codec is pickle: trusted local storage only; pass (dumps, loads) for anything else."""
+    """Durable states in one SQLite table, through the stdlib. Each call runs in a thread so the
+    event loop never blocks. The default codec is pickle: trusted local storage only; pass (dumps,
+    loads) for anything else."""
 
     def __init__(
         self,
@@ -80,20 +87,25 @@ class SqliteStore[S]:
     ) -> None:
         self.path = Path(path)
         if str(path) == ":memory:" or "mode=memory" in str(path):
-            raise ValueError("SqliteStore opens a connection per call, so an in-memory database would not persist; use InMemoryStore")
+            raise ValueError(
+                "SqliteStore opens a connection per call, so an in-memory database would not "
+                "persist; use InMemoryStore"
+            )
         if not self.path.parent.is_dir():
             raise FileNotFoundError(f"directory for {self.path} does not exist")
         self._dumps, self._loads = codec
-        # Processes opening one fresh file together (pods starting at once): switching it to WAL fails at once with
-        # "database is locked" for all but one, since SQLite's deadlock avoidance skips the busy timeout. Retry
-        # for about the 5 s that timeout would have waited.
+        # Processes opening one fresh file together (pods starting at once): switching it to WAL
+        # fails at once with "database is locked" for all but one, since SQLite's deadlock
+        # avoidance skips the busy timeout. Retry for about the 5 s that timeout would have waited.
         for attempt in range(100):
             try:
                 with self._connect() as conn:
-                    conn.execute("PRAGMA journal_mode=WAL")  # writers do not block readers, and commits are cheaper
+                    # writers do not block readers, and commits are cheaper
+                    conn.execute("PRAGMA journal_mode=WAL")
                     conn.execute(
                         "CREATE TABLE IF NOT EXISTS state ("
-                        "persistence_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data BLOB NOT NULL)"
+                        "persistence_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data BLOB "
+                        "NOT NULL)"
                     )
                 break
             except sqlite3.OperationalError as e:
@@ -102,7 +114,8 @@ class SqliteStore[S]:
                 time.sleep(0.05)
 
     def _connect(self) -> contextlib.closing[sqlite3.Connection]:
-        # Autocommit: each statement is its own transaction. closing() so the connection does not wait for GC.
+        # Autocommit: each statement is its own transaction. closing() so the connection does not
+        # wait for GC.
         return contextlib.closing(sqlite3.connect(self.path, isolation_level=None))
 
     async def load(self, persistence_id: str) -> tuple[S, int] | None:
@@ -128,11 +141,14 @@ class SqliteStore[S]:
                     )
                 else:
                     cur = conn.execute(
-                        "UPDATE state SET revision = ?, data = ? WHERE persistence_id = ? AND revision = ?",
+                        "UPDATE state SET revision = ?, data = ? WHERE persistence_id = ? AND "
+                        "revision = ?",
                         (revision, data, persistence_id, revision - 1),
                     )
                 if cur.rowcount != 1:
-                    raise RevisionConflictError(f"{persistence_id}: revision {revision} is not the next revision")
+                    raise RevisionConflictError(
+                        f"{persistence_id}: revision {revision} is not the next revision"
+                    )
 
         await asyncio.to_thread(go)
 
@@ -144,7 +160,7 @@ class SqliteStore[S]:
         await asyncio.to_thread(go)
 
 
-# --- the behavior -----------------------------------------------------------------------------------
+# --- the behavior --------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -170,10 +186,13 @@ _current: ContextVar[_Incarnation | None] = ContextVar("pekko_py.persistence", d
 def _incarnation(owner: Persisted[Any, Any]) -> _Incarnation:
     inc = _current.get()
     if inc is None or inc.task is not asyncio.current_task():
-        raise PersistenceError("a persisted behavior can only run in an actor started with recover(...)")
+        raise PersistenceError(
+            "a persisted behavior can only run in an actor started with recover(...)"
+        )
     if inc.owner is not owner:
         raise PersistenceError(
-            f"this actor was recovered through a different persisted factory ({inc.persistence_id!r}); "
+            "this actor was recovered through a different persisted factory "
+            f"({inc.persistence_id!r}); "
             "keep one factory per persisted actor and put phases inside the state"
         )
     return inc
@@ -181,8 +200,9 @@ def _incarnation(owner: Persisted[Any, Any]) -> _Incarnation:
 
 @dataclass(frozen=True, eq=False, slots=True)
 class Persist[T](Setup[T]):
-    """``factory(state)``: writes the state, runs the deferred effects, then becomes the factory's behavior.
-    A Setup, so the runtime interprets it before the next message with no special casing."""
+    """``factory(state)``: writes the state, runs the deferred effects, then becomes the factory's
+    behavior. A Setup, so the runtime interprets it before the next message with no special
+    casing."""
 
     state: Any
     owner: Persisted[Any, T]
@@ -198,7 +218,8 @@ class Persist[T](Setup[T]):
 
 
 class Persisted[S, T]:
-    """A state-to-behavior factory whose states are written to a store. Made with ``Behaviors.persisted``."""
+    """A state-to-behavior factory whose states are written to a store. Made with
+    ``Behaviors.persisted``."""
 
     def __init__(self, store: Store[S], factory: Callable[[S], Behavior[T]]) -> None:
         self.store = store
@@ -220,13 +241,16 @@ class Persisted[S, T]:
         return Setup(setup)
 
 
-def _node[S, T](owner: Persisted[S, T], state: S, effects: tuple[Callable[[], None], ...]) -> Persist[T]:
+def _node[S, T](
+    owner: Persisted[S, T], state: S, effects: tuple[Callable[[], None], ...]
+) -> Persist[T]:
     async def write_then_become(ctx: ActorContext[T]) -> Behavior[T]:
         inc = _incarnation(owner)
         await inc.store.save(inc.persistence_id, state, inc.revision + 1)
         _current.set(replace(inc, revision=inc.revision + 1))
-        # The state is committed. Build the behavior before the effects so a failing factory sends no reply,
-        # and never let a failing effect roll memory back behind the store: log it and carry on.
+        # The state is committed. Build the behavior before the effects so a failing factory sends
+        # no reply, and never let a failing effect roll memory back behind the store: log it and
+        # carry on.
         next_behavior = owner.factory(state)
         for effect in effects:
             try:
@@ -243,7 +267,8 @@ class _Persister[S](Protocol):
 
 
 def persisted[S](store: Store[S]) -> _Persister[S]:
-    """``@persisted(store)`` on ``def cart(items) -> Behavior[Cmd]``; also ``Behaviors.persisted(store)``."""
+    """``@persisted(store)`` on ``def cart(items) -> Behavior[Cmd]``; also
+    ``Behaviors.persisted(store)``."""
 
     def wrap[T](factory: Callable[[S], Behavior[T]]) -> Persisted[S, T]:
         return Persisted(store, factory)

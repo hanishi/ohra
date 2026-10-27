@@ -1,4 +1,5 @@
 """Children, stop, DeathWatch."""
+
 from __future__ import annotations
 
 import asyncio
@@ -76,7 +77,10 @@ async def test_watch_delivers_terminated_and_ctx_stop_drops_pending():
         def on_message(msg: ParentCmd) -> Behavior[ParentCmd]:
             match msg:
                 case Spawn():
-                    c = ctx.spawn(Behaviors.receive_message(lambda m: events.append(m) or Behaviors.same), "child")
+                    c = ctx.spawn(
+                        Behaviors.receive_message(lambda m: events.append(m) or Behaviors.same),
+                        "child",
+                    )
                     ctx.watch(c)
                     child.append(c)
                 case StopChild():
@@ -155,9 +159,15 @@ async def test_watch_with_and_watching_an_already_dead_actor():
 async def test_spawn_protocol_spawns_on_request_with_unique_names():
     events: list[str] = []
     async with ActorSystem(SpawnProtocol.apply(), "t") as system:
-        a = await system.ask(lambda r: SpawnProtocol.Spawn(recorder("a", events), "worker", r), timeout=1)
-        b = await system.ask(lambda r: SpawnProtocol.Spawn(recorder("b", events), "worker", r), timeout=1)
-        c = await system.ask(lambda r: SpawnProtocol.Spawn(recorder("c", events), "", r), timeout=1)
+        a = await system.ask(
+            lambda r: SpawnProtocol.Spawn(recorder("a", events), "worker", r), timeout=1
+        )
+        b = await system.ask(
+            lambda r: SpawnProtocol.Spawn(recorder("b", events), "worker", r), timeout=1
+        )
+        c = await system.ask(
+            lambda r: SpawnProtocol.Spawn(recorder("c", events), "", r), timeout=1
+        )
         assert [r.path for r in (a, b, c)] == [
             "pekko://t/user/worker",
             "pekko://t/user/worker-1",

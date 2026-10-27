@@ -4,6 +4,7 @@ database actor with a timeout.
 
     uv run python examples/database_client.py
 """
+
 import asyncio
 import logging
 import random
@@ -107,7 +108,8 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
                         timers.start_timer_with_fixed_delay("hb", Heartbeat(), 0.3)
                         return buffer.unstash_all(ready(ctx))
                     case Connected(Success(False)):
-                        raise ConnectionError("database not ready")  # supervisor: retry with backoff
+                        # supervisor: retry with backoff
+                        raise ConnectionError("database not ready")
                     case Connected(Failure(e)):
                         raise ConnectionError(str(e))
                     case Run():
@@ -123,9 +125,18 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Run(sql, reply_to):
-                        ctx.ask(db, lambda r: Query(sql, r), lambda res: Answer(res, reply_to), timeout=1)
+                        ctx.ask(
+                            db,
+                            lambda r: Query(sql, r),
+                            lambda res: Answer(res, reply_to),
+                            timeout=1,
+                        )
                     case Answer(result, reply_to):
-                        reply_to.tell(result.value if isinstance(result, Success) else f"error: {result.exception}")
+                        reply_to.tell(
+                            result.value
+                            if isinstance(result, Success)
+                            else f"error: {result.exception}"
+                        )
                     case Heartbeat():
                         ctx.log.info("heartbeat")
                     case Connected():
@@ -161,7 +172,10 @@ def app(ctx: ActorContext[Run]) -> Behavior[Run]:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(relativeCreated)6.0fms %(name)s %(message)s")
     async with ActorSystem(app, "app") as system:
-        asks = (system.ask(lambda r, sql=sql: Run(sql, r), timeout=5) for sql in ("select 1", "select 2", "select 3"))
+        asks = (
+            system.ask(lambda r, sql=sql: Run(sql, r), timeout=5)
+            for sql in ("select 1", "select 2", "select 3")
+        )
         print(*await asyncio.gather(*asks), sep="\n")
         await asyncio.sleep(0.7)  # a couple of heartbeats
 

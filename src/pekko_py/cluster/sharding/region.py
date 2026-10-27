@@ -1,4 +1,6 @@
-"""The ShardRegion: routes by shard id, registers with the coordinator, hosts Shard actors, hands off on leave."""
+"""The ShardRegion: routes by shard id, registers with the coordinator, hosts Shard actors, hands
+off on leave."""
+
 from __future__ import annotations
 
 import asyncio
@@ -69,11 +71,13 @@ class _ShardTerminated:
 
 @dataclass(frozen=True)
 class _GracefulShutdown:
-    """CoordinatedShutdown's region-shutdown task (Pekko's GracefulShutdown): hand every shard off."""
+    """CoordinatedShutdown's region-shutdown task (Pekko's GracefulShutdown): hand every shard
+    off."""
 
 
 class _ExitingProgress:
-    """The region's cluster-sharding-shutdown-region task: ask it to shut down gracefully, wait until it holds nothing."""
+    """The region's cluster-sharding-shutdown-region task: ask it to shut down gracefully, wait
+    until it holds nothing."""
 
     def __init__(self) -> None:
         self.future: asyncio.Future[None] | None = None
@@ -89,9 +93,14 @@ class _ExitingProgress:
         return run
 
 
-
 class _Region:
-    def __init__(self, ctx: ActorContext[Any], entity: Entity[Any], settings: ClusterShardingSettings, progress: _ExitingProgress) -> None:
+    def __init__(
+        self,
+        ctx: ActorContext[Any],
+        entity: Entity[Any],
+        settings: ClusterShardingSettings,
+        progress: _ExitingProgress,
+    ) -> None:
         self.ctx = ctx
         self.entity = entity
         self.settings = settings
@@ -111,10 +120,11 @@ class _Region:
         self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
         ctx.timers.start_timer_with_fixed_delay("retry", _Retry(), settings.retry_interval)
 
-    # --- coordinator location -----------------------------------------------------------------------------------------
+    # --- coordinator location --------------------------------------------------------------------
 
     def coordinator_path(self, member: Member) -> str:
-        return f"{member.address.root}/system/{_manager_name(f'{self.type_name}Coordinator')}/singleton"
+        manager = _manager_name(f"{self.type_name}Coordinator")
+        return f"{member.address.root}/system/{manager}/singleton"
 
     def change_members(self, new_members: list[Member]) -> None:
         before = self.members_by_age[0].unique_address if self.members_by_age else None
@@ -132,12 +142,14 @@ class _Region:
 
     def schedule_next_registration(self) -> None:
         if self.next_registration_delay < self.settings.retry_interval:
-            self.ctx.timers.start_single_timer("register-retry", _RegisterRetry(), self.next_registration_delay)
+            self.ctx.timers.start_single_timer(
+                "register-retry", _RegisterRetry(), self.next_registration_delay
+            )
             self.next_registration_delay *= 2
 
     def coordinator_selection(self) -> list[Member]:
-        """Pekko's coordinatorSelection: the members by age up to and including the first Up one, since the
-        coordinator may still be on an older member that is leaving."""
+        """Pekko's coordinatorSelection: the members by age up to and including the first Up one,
+        since the coordinator may still be on an older member that is leaving."""
         selected: list[Member] = []
         for m in self.members_by_age:
             selected.append(m)
@@ -149,11 +161,12 @@ class _Region:
         for m in self.coordinator_selection():
             try:
                 coordinator = self.ctx.system.resolve(self.coordinator_path(m))
-            except LookupError:  # the local singleton instance is not up yet: the next retry asks again
+            # the local singleton instance is not up yet: the next retry asks again
+            except LookupError:
                 continue
             coordinator.tell(Register(self.ctx.self, tuple(self.shards)))
 
-    # --- delivery -----------------------------------------------------------------------------------------------------
+    # --- delivery --------------------------------------------------------------------------------
 
     def shard_for(self, shard: str) -> ActorRef[Any]:
         ref = self.shards.get(shard)
@@ -177,7 +190,9 @@ class _Region:
 
     def buffer(self, shard: str, envelope: ShardingEnvelope[Any]) -> None:
         if self.buffered >= self.settings.buffer_size:
-            self.log.warning("%s: buffer is full, dropping message for shard [%s]", self.type_name, shard)
+            self.log.warning(
+                "%s: buffer is full, dropping message for shard [%s]", self.type_name, shard
+            )
             self.ctx.system.dead_letter(envelope, self.ctx.self)
             return
         self.shard_buffers.setdefault(shard, deque()).append(envelope)
@@ -190,10 +205,20 @@ class _Region:
 
     def receive_shard_home(self, shard: str, region: ActorRef[Any]) -> None:
         current = self.region_by_shard.get(shard)
-        if current is not None and current.path == self.ctx.self.path and region.path != self.ctx.self.path:
-            # Pekko throws here because distributed data makes it impossible; without it a registration that
-            # arrives after the coordinator's gate opened can lose a shard it hosts: hand the local copy off
-            self.log.error("%s: shard [%s] moved from self to [%s]; stopping the local copy", self.type_name, shard, region.path)
+        if (
+            current is not None
+            and current.path == self.ctx.self.path
+            and region.path != self.ctx.self.path
+        ):
+            # Pekko throws here because distributed data makes it impossible; without it a
+            # registration that arrives after the coordinator's gate opened can lose a shard it
+            # hosts: hand the local copy off
+            self.log.error(
+                "%s: shard [%s] moved from self to [%s]; stopping the local copy",
+                self.type_name,
+                shard,
+                region.path,
+            )
             local = self.shards.get(shard)
             if local is not None:
                 local.tell(HandOff(shard, self.ctx.system.ignore_ref))
@@ -211,7 +236,7 @@ class _Region:
             for shard in self.shard_buffers:
                 self.coordinator.tell(GetShardHome(shard, self.ctx.self))
 
-    # --- the behavior ---------------------------------------------------------------------------------------------
+    # --- the behavior ----------------------------------------------------------------------------
 
     def behavior(self) -> Behavior[Any]:
         def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
@@ -221,23 +246,52 @@ class _Region:
                     self.ctx.system.dead_letter(envelope.message, self.ctx.self)
                 else:
                     self.deliver(envelope)
-                return Behaviors.stopped() if self.try_complete_graceful_shutdown() else Behaviors.same
+                return (
+                    Behaviors.stopped()
+                    if self.try_complete_graceful_shutdown()
+                    else Behaviors.same
+                )
             match msg:
                 case GetShardRegionState(reply_to):
                     if not self.shards:
                         reply_to.tell(CurrentShardRegionState(frozenset()))
                     else:
-                        self.ctx.spawn_anonymous(_aggregate_shard_states(list(self.shards.values()), reply_to, self.settings.shard_region_query_timeout))
+                        self.ctx.spawn_anonymous(
+                            _aggregate_shard_states(
+                                list(self.shards.values()),
+                                reply_to,
+                                self.settings.shard_region_query_timeout,
+                            )
+                        )
                 case MemberUp(member=m) | MemberLeft(member=m) | MemberExited(member=m):
-                    self.change_members(by_age([x for x in self.members_by_age if x.unique_address != m.unique_address] + [m]))
-                case MemberRemoved(member=m) if m.unique_address == self.cluster.self_unique_address:
+                    self.change_members(
+                        by_age(
+                            [
+                                x
+                                for x in self.members_by_age
+                                if x.unique_address != m.unique_address
+                            ]
+                            + [m]
+                        )
+                    )
+                case MemberRemoved(member=m) if (
+                    m.unique_address == self.cluster.self_unique_address
+                ):
                     return Behaviors.stopped()
-                case MemberDowned(member=m) if m.unique_address == self.cluster.self_unique_address:
+                case MemberDowned(member=m) if (
+                    m.unique_address == self.cluster.self_unique_address
+                ):
                     return Behaviors.stopped()
                 case MemberRemoved(member=m):
-                    for shard in [s for s, r in self.region_by_shard.items() if r.path != self.ctx.self.path and _is_at(r, m.address)]:
+                    for shard in [
+                        s
+                        for s, r in self.region_by_shard.items()
+                        if r.path != self.ctx.self.path and _is_at(r, m.address)
+                    ]:
                         del self.region_by_shard[shard]
-                    self.change_members([x for x in self.members_by_age if x.unique_address != m.unique_address])
+                    self.change_members(
+                        [x for x in self.members_by_age if x.unique_address != m.unique_address]
+                    )
                 case MemberEvent():
                     pass
                 case RegisterAck(coordinator):
@@ -278,7 +332,10 @@ class _Region:
                         reply_to.tell(ShardStopped(shard))
                 case _ShardTerminated(shard):
                     self.shards.pop(shard, None)
-                    if self.region_by_shard.get(shard) is not None and self.region_by_shard[shard].path == self.ctx.self.path:
+                    if (
+                        self.region_by_shard.get(shard) is not None
+                        and self.region_by_shard[shard].path == self.ctx.self.path
+                    ):
                         del self.region_by_shard[shard]
                 case _Retry():
                     if self.coordinator is None:
@@ -301,7 +358,8 @@ class _Region:
         def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
             if sig is PostStop:
                 if self.coordinator is not None:
-                    self.coordinator.tell(RegionStopped(self.ctx.self.path))  # ShardRegion.postStop
+                    # ShardRegion.postStop
+                    self.coordinator.tell(RegionStopped(self.ctx.self.path))
                 self.exiting_done()
             return Behaviors.same
 
@@ -312,7 +370,8 @@ class _Region:
             self.coordinator.tell(GracefulShutdownReq(self.ctx.self))
 
     def try_complete_graceful_shutdown(self) -> bool:
-        """Pekko's tryCompleteGracefulShutdownIfInProgress: every shard handed off and nothing buffered."""
+        """Pekko's tryCompleteGracefulShutdownIfInProgress: every shard handed off and nothing
+        buffered."""
         if self.graceful_shutdown_in_progress and not self.shards and not self.shard_buffers:
             self.exiting_done()
             return True
@@ -323,8 +382,11 @@ class _Region:
             self.progress.future.set_result(None)
 
 
-def region_behavior(entity: Entity[Any], settings: ClusterShardingSettings, progress: _ExitingProgress) -> Behavior[Any]:
-    behavior: Behavior[Any] = Behaviors.setup(lambda ctx: _Region(ctx, entity, settings, progress).behavior())
-    return Behaviors.supervise(behavior).on_failure(SupervisorStrategy.restart())  # as under Pekko's system guardian
-
-
+def region_behavior(
+    entity: Entity[Any], settings: ClusterShardingSettings, progress: _ExitingProgress
+) -> Behavior[Any]:
+    behavior: Behavior[Any] = Behaviors.setup(
+        lambda ctx: _Region(ctx, entity, settings, progress).behavior()
+    )
+    # as under Pekko's system guardian
+    return Behaviors.supervise(behavior).on_failure(SupervisorStrategy.restart())

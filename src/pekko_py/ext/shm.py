@@ -6,6 +6,7 @@ the handle owns the segment. Sending the handle transfers ownership, and the own
 calls ``unlink()`` exactly once when the data is no longer needed. Readers that do
 not own it use ``with handle.open() as arr:`` and leave the segment alone.
 """
+
 from __future__ import annotations
 
 import sys
@@ -66,10 +67,14 @@ class _View:
 
     def __enter__(self) -> NDArray[Any]:
         self._seg = SharedMemory(self._handle.name, **_KW)
-        self._arr: NDArray[Any] = np.ndarray(self._handle.shape, np.dtype(self._handle.dtype), buffer=self._seg.buf)
+        self._arr: NDArray[Any] = np.ndarray(
+            self._handle.shape, np.dtype(self._handle.dtype), buffer=self._seg.buf
+        )
         self._arr.flags.writeable = self._writeable
         return self._arr
 
-    def __exit__(self, et: type[BaseException] | None, e: BaseException | None, tb: TracebackType | None) -> None:
+    def __exit__(
+        self, et: type[BaseException] | None, e: BaseException | None, tb: TracebackType | None
+    ) -> None:
         del self._arr  # release the buffer export before closing the mapping
         self._seg.close()

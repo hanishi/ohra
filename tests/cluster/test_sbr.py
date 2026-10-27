@@ -1,5 +1,6 @@
-"""The split-brain resolver: settings, Pekko's DowningStrategy and its four strategies, and the resolver driven by
-a manual clock, as Pekko's SplitBrainResolverSpec."""
+"""The split-brain resolver: settings, Pekko's DowningStrategy and its four strategies, and the
+resolver driven by a manual clock, as Pekko's SplitBrainResolverSpec."""
+
 from __future__ import annotations
 
 import logging
@@ -31,20 +32,21 @@ from pekko_py.cluster.sbr import (
     KeepOldest,
     SplitBrainResolverSettings,
     StaticQuorum,
-    _DoubleDecision,  # pyright: ignore[reportPrivateUsage]
+    _DoubleDecisionError,  # pyright: ignore[reportPrivateUsage]
     _DowningStrategy,  # pyright: ignore[reportPrivateUsage]
     _Resolver,  # pyright: ignore[reportPrivateUsage]
 )
 from pekko_py.remote import Address, UniqueAddress
 
-# --- fixtures (TestAddresses.scala and StrategySetup) ------------------------------------------------------------
+# --- fixtures (TestAddresses.scala and StrategySetup) --------------------------------------------
 
 
 def member(host: str, up_number: int) -> Member:
     return Member(UniqueAddress(host, 7355, 0, "sys"), up_number, "up")
 
 
-A, B, C, D, E, F, G = (member(h, n) for h, n in zip("abcdefg", (5, 4, 3, 2, 1, 5, 6), strict=True))  # E is the oldest
+# E is the oldest
+A, B, C, D, E, F, G = (member(h, n) for h, n in zip("abcdefg", (5, 4, 3, 2, 1, 5, 6), strict=True))
 
 
 def joining(m: Member) -> Member:
@@ -75,9 +77,13 @@ def reachability(pairs: list[tuple[Member, Member]]) -> Reachability:
 
 
 def strategy(
-    config: DowningStrategy, side: set[Member], *others: set[Member], indirectly: list[tuple[Member, Member]] | None = None
+    config: DowningStrategy,
+    side: set[Member],
+    *others: set[Member],
+    indirectly: list[tuple[Member, Member]] | None = None,
 ) -> _DowningStrategy:
-    """StrategySetup.strategy: this side sees every other side as unreachable, observed by its lowest member."""
+    """StrategySetup.strategy: this side sees every other side as unreachable, observed by its
+    lowest member."""
     s = _DowningStrategy(A.unique_address, config)
     for m in side.union(*others):
         s.add(m)
@@ -91,16 +97,22 @@ def strategy(
     return s
 
 
-# --- settings ----------------------------------------------------------------------------------------------------
+# --- settings ------------------------------------------------------------------------------------
 
 
 def test_settings_defaults_and_validation():
     s = SplitBrainResolverSettings()
-    assert s.strategy == KeepMajority() and s.stable_after == 20.0 and s.down_all_when_unstable is None
+    assert (
+        s.strategy == KeepMajority()
+        and s.stable_after == 20.0
+        and s.down_all_when_unstable is None
+    )
     assert s.effective_down_all_when_unstable == 15.0 and s.tick_interval == 1.0
     assert SplitBrainResolverSettings(stable_after=2.0).effective_down_all_when_unstable == 4.0
     assert SplitBrainResolverSettings(stable_after=0.1).tick_interval == 0.025
-    assert SplitBrainResolverSettings(down_all_when_unstable=0).effective_down_all_when_unstable == 0
+    assert (
+        SplitBrainResolverSettings(down_all_when_unstable=0).effective_down_all_when_unstable == 0
+    )
     with pytest.raises(ValueError):
         SplitBrainResolverSettings(stable_after=0)
     with pytest.raises(ValueError):
@@ -111,13 +123,23 @@ def test_settings_defaults_and_validation():
 
 def test_effective_down_removal_margin():
     assert ClusterSettings().effective_down_removal_margin == 0.0
-    assert ClusterSettings(downing=SplitBrainResolverSettings(stable_after=7.0)).effective_down_removal_margin == 7.0
-    assert ClusterSettings(downing=SplitBrainResolverSettings(stable_after=7.0), down_removal_margin=3.0).effective_down_removal_margin == 3.0
+    assert (
+        ClusterSettings(
+            downing=SplitBrainResolverSettings(stable_after=7.0)
+        ).effective_down_removal_margin
+        == 7.0
+    )
+    assert (
+        ClusterSettings(
+            downing=SplitBrainResolverSettings(stable_after=7.0), down_removal_margin=3.0
+        ).effective_down_removal_margin
+        == 3.0
+    )
     with pytest.raises(ValueError):
         ClusterSettings(down_removal_margin=-1)
 
 
-# --- the DowningStrategy base ------------------------------------------------------------------------------------
+# --- the DowningStrategy base --------------------------------------------------------------------
 
 
 def test_add_and_remove_members_with_address_order():
@@ -174,7 +196,9 @@ def test_set_reachability_keeps_only_unreachable_records_between_members():
         ((A.unique_address, 2), (B.unique_address, 1)),
     )
     s.set_reachability(r)
-    assert [(x.observer, x.subject) for x in s.reachability.records] == [(A.unique_address, B.unique_address)]
+    assert [(x.observer, x.subject) for x in s.reachability.records] == [
+        (A.unique_address, B.unique_address)
+    ]
 
 
 def test_is_all_unreachable_down_or_exiting():
@@ -193,8 +217,12 @@ def test_indirectly_connected_from_cycle_and_from_seen_by():
     assert s.indirectly_connected == nodes(A, B) and s.has_indirectly_connected
     s = strategy(KeepMajority(), {A, B, C}, {D})  # D unreachable, has not seen the gossip
     assert s.indirectly_connected == frozenset()
-    s.set_seen_by(frozenset(m.address for m in (A, B, C, D)))  # D has seen the current gossip: indirectly connected
-    assert s.indirectly_connected == nodes(A, D) and s.unreachable_but_not_indirectly_connected == frozenset()
+    # D has seen the current gossip: indirectly connected
+    s.set_seen_by(frozenset(m.address for m in (A, B, C, D)))
+    assert (
+        s.indirectly_connected == nodes(A, D)
+        and s.unreachable_but_not_indirectly_connected == frozenset()
+    )
 
 
 def test_nodes_to_down_skips_down_and_exiting_and_includes_joining():
@@ -210,16 +238,22 @@ def test_filter_records_keeps_versions():
     assert len(kept.records) == 1 and kept.versions == r.versions
 
 
+# --- the strategies (SplitBrainResolverSpec scenarios) -------------------------------------------
 
-# --- the strategies (SplitBrainResolverSpec scenarios) -----------------------------------------------------------
 
-
-def downing(config: DowningStrategy, members: set[Member], *sides: set[Member], indirectly: list[tuple[Member, Member]] | None = None) -> None:
+def downing(
+    config: DowningStrategy,
+    members: set[Member],
+    *sides: set[Member],
+    indirectly: list[tuple[Member, Member]] | None = None,
+) -> None:
     """assertDowning: every non-empty side reaches the same nodes_to_down."""
     for side in sides:
         if side:
             others = [o for o in sides if o is not side]
-            assert strategy(config, side, *others, indirectly=indirectly).nodes_to_down() == nodes(*members)
+            assert strategy(config, side, *others, indirectly=indirectly).nodes_to_down() == nodes(
+                *members
+            )
 
 
 # StaticQuorum
@@ -311,15 +345,21 @@ def test_keep_majority_indirectly_connected_with_clean_partition():
 
 def test_keep_majority_indirectly_connected_detected_before_partition():
     assert strategy(KeepMajority(), {A, B, C}, {D, E, F, G}).nodes_to_down() == nodes(A, B, C)
-    assert strategy(KeepMajority(), {A, B, C}, {D, E, F, G}, indirectly=[(D, E), (E, D)]).nodes_to_down() == nodes(A, B, C, D, E)
-    assert strategy(KeepMajority(), {D, E, F, G}, {A, B, C}, indirectly=[(D, E), (E, D)]).nodes_to_down() == nodes(A, B, C, D, E)
+    assert strategy(
+        KeepMajority(), {A, B, C}, {D, E, F, G}, indirectly=[(D, E), (E, D)]
+    ).nodes_to_down() == nodes(A, B, C, D, E)
+    assert strategy(
+        KeepMajority(), {D, E, F, G}, {A, B, C}, indirectly=[(D, E), (E, D)]
+    ).nodes_to_down() == nodes(A, B, C, D, E)
 
 
 def test_keep_majority_double_indirectly_connected_raises():
     s1 = strategy(KeepMajority(), {A, B, C}, {D, E, F, G}, indirectly=[(D, E), (G, F)])
-    with pytest.raises(_DoubleDecision):
+    with pytest.raises(_DoubleDecisionError):
         s1.nodes_to_down()
-    assert strategy(KeepMajority(), {D, E, F, G}, {A, B, C}, indirectly=[(D, E), (G, F)]).nodes_to_down() == nodes(A, B, C, D, E, F, G)
+    assert strategy(
+        KeepMajority(), {D, E, F, G}, {A, B, C}, indirectly=[(D, E), (G, F)]
+    ).nodes_to_down() == nodes(A, B, C, D, E, F, G)
 
 
 # KeepOldest (E is the oldest)
@@ -346,8 +386,14 @@ def test_keep_oldest_leaving_edge_cases():
     assert strategy(KeepOldest(), {A, B, C}, {leaving(D), E}).decide() == DownReachable()
     assert strategy(KeepOldest(), {E}, {A, B, leaving(C)}).decide() == DownReachable()
     assert strategy(KeepOldest(), {A, B, leaving(C)}, {E}).decide() == DownUnreachable()
-    assert strategy(KeepOldest(), {E}, {A, leaving(B), leaving(C), leaving(D)}).decide() == DownReachable()
-    assert strategy(KeepOldest(), {A, leaving(B), leaving(C), leaving(D)}, {E}).decide() == DownAllDecision()
+    assert (
+        strategy(KeepOldest(), {E}, {A, leaving(B), leaving(C), leaving(D)}).decide()
+        == DownReachable()
+    )
+    assert (
+        strategy(KeepOldest(), {A, leaving(B), leaving(C), leaving(D)}, {E}).decide()
+        == DownAllDecision()
+    )
 
 
 def test_keep_oldest_exiting_alone_edge_case():
@@ -360,8 +406,14 @@ def test_keep_oldest_exiting_alone_edge_case():
 def test_keep_oldest_joining_edge_case():
     assert strategy(KeepOldest(), {joining(A), E}, {B, C, D}).decide() == DownReachable()
     assert strategy(KeepOldest(), {B, C, D}, {joining(A), E}).decide() == DownAllDecision()
-    assert strategy(KeepOldest(down_if_alone=False), {joining(A), E}, {B, C, D}).decide() == DownUnreachable()
-    assert strategy(KeepOldest(down_if_alone=False), {B, C, D}, {joining(A), E}).decide() == DownReachable()
+    assert (
+        strategy(KeepOldest(down_if_alone=False), {joining(A), E}, {B, C, D}).decide()
+        == DownUnreachable()
+    )
+    assert (
+        strategy(KeepOldest(down_if_alone=False), {B, C, D}, {joining(A), E}).decide()
+        == DownReachable()
+    )
 
 
 def test_keep_oldest_downs_indirectly_connected():
@@ -375,14 +427,18 @@ def test_down_all_downs_everything():
     downing(DownAll(), {A, B, C, D}, {A, B}, {C, D})
 
 
-# --- the resolver, driven by a manual clock (SplitBrainResolverSpec.DowningTestActor) ----------------------------
+# --- the resolver, driven by a manual clock (SplitBrainResolverSpec.DowningTestActor) ------------
 
 
 class Driver:
     """A resolver with a manual clock, recording what it downs."""
 
     def __init__(
-        self, strategy: DowningStrategy = KeepMajority(), stable_after: float = 10.0, down_all_when_unstable: float = 0.0, self_member: Member = A
+        self,
+        strategy: DowningStrategy = KeepMajority(),
+        stable_after: float = 10.0,
+        down_all_when_unstable: float = 0.0,
+        self_member: Member = A,
     ) -> None:
         self.now = 1000.0
         self.downed: list[Address] = []
@@ -524,7 +580,9 @@ def test_down_all_when_unstable_fires_on_non_leader_once():
     d.advance(7)
     d.r.handle(ReachableMember(D))  # C stays unreachable
     d.advance(1.1)  # 15.1 s since the first change: stable_after + down_all_when_unstable exceeded
-    assert sorted(d.downed) == sorted(m.address for m in (A, B, C, D)) and d.downed[-1] == A.address
+    assert (
+        sorted(d.downed) == sorted(m.address for m in (A, B, C, D)) and d.downed[-1] == A.address
+    )
     d.advance(1)
     assert len(d.downed) == 4  # stats reset after acting, and a non-leader takes no decision
 
@@ -545,12 +603,17 @@ def test_double_decision_becomes_down_all():
     d.unreachable(D, E, F, G)
     d.r.handle(SeenChanged(False, frozenset(m.address for m in (A, B, C))))
     d.advance(11)
-    assert set(d.downed) == {m.address for m in (A, B, C, D, E, F, G)} and d.downed[-1] == A.address
+    assert (
+        set(d.downed) == {m.address for m in (A, B, C, D, E, F, G)} and d.downed[-1] == A.address
+    )
 
 
 def test_two_incarnations_at_one_address_order_by_uid():
     """Pekko's Member.ordering is by UniqueAddress: address, then uid."""
-    old, new = Member(UniqueAddress("a", 7355, 1, "sys"), 1, "up"), Member(UniqueAddress("a", 7355, 2, "sys"), 2, "up")
+    old, new = (
+        Member(UniqueAddress("a", 7355, 1, "sys"), 1, "up"),
+        Member(UniqueAddress("a", 7355, 2, "sys"), 2, "up"),
+    )
     s = _DowningStrategy(B.unique_address, KeepMajority())
     for m in (old, new):  # inserted oldest first: only the uid in the key keeps this order
         s.add(m)

@@ -1,4 +1,6 @@
-"""CoordinatedShutdown on a plain system: Pekko's phases, timeouts that continue, run once, the signal hook."""
+"""CoordinatedShutdown on a plain system: Pekko's phases, timeouts that continue, run once, the
+signal hook."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,12 +27,17 @@ from pekko_py import (
 )
 from pekko_py.coordinated_shutdown import PHASES
 
-FAST = CoordinatedShutdownSettings(default_phase_timeout=0.2, phase_timeouts={"actor-system-terminate": 0.5})
+FAST = CoordinatedShutdownSettings(
+    default_phase_timeout=0.2, phase_timeouts={"actor-system-terminate": 0.5}
+)
 
 
 def test_phase_list_and_timeouts():
     names = [p.name for p in PHASES]
-    assert names[:2] == ["before-service-unbind", "service-unbind"] and names[-1] == "actor-system-terminate"
+    assert (
+        names[:2] == ["before-service-unbind", "service-unbind"]
+        and names[-1] == "actor-system-terminate"
+    )
     timeouts = {p.name: p.timeout for p in PHASES}
     assert timeouts["cluster-exiting"] == 10.0 and timeouts["service-stop"] == 5.0
     with pytest.raises(ValueError):
@@ -54,11 +61,14 @@ async def test_phases_run_in_order_and_tasks_in_a_phase_concurrently():
     cs.add_task("service-stop", "c", lambda: slow("stop"))
     await cs.run(ActorSystemTerminateReason())
     await system.when_terminated()
-    assert log[:2] == ["unbind-a-start", "unbind-b-start"] and log[4] == "stop-start"  # a and b overlapped, c after both
+    # a and b overlapped, c after both
+    assert log[:2] == ["unbind-a-start", "unbind-b-start"] and log[4] == "stop-start"
     assert cs.shutdown_reason == ActorSystemTerminateReason()
 
 
-async def test_a_failing_task_and_a_hanging_task_do_not_stop_the_run(caplog: pytest.LogCaptureFixture):
+async def test_a_failing_task_and_a_hanging_task_do_not_stop_the_run(
+    caplog: pytest.LogCaptureFixture,
+):
     caplog.set_level(logging.WARNING, logger="pekko_py.coordinated_shutdown")
     system = ActorSystem(Behaviors.ignore, "cs", shutdown=FAST)
     cs = CoordinatedShutdown(system)
@@ -74,12 +84,17 @@ async def test_a_failing_task_and_a_hanging_task_do_not_stop_the_run(caplog: pyt
     began = asyncio.get_running_loop().time()
     await cs.run(ActorSystemTerminateReason())
     await system.when_terminated()
-    assert 0.2 <= asyncio.get_running_loop().time() - began < 1.0  # the hanging task cost exactly its phase timeout
-    assert any("failing" in r.message for r in caplog.records) and any("timed out" in r.message for r in caplog.records)
+    # the hanging task cost exactly its phase timeout
+    assert 0.2 <= asyncio.get_running_loop().time() - began < 1.0
+    assert any("failing" in r.message for r in caplog.records) and any(
+        "timed out" in r.message for r in caplog.records
+    )
 
 
 async def test_a_hanging_task_delays_only_its_phase():
-    settings = CoordinatedShutdownSettings(default_phase_timeout=5.0, phase_timeouts={"service-stop": 0.1})
+    settings = CoordinatedShutdownSettings(
+        default_phase_timeout=5.0, phase_timeouts={"service-stop": 0.1}
+    )
     system = ActorSystem(Behaviors.ignore, "cs", shutdown=settings)
 
     async def hanging() -> None:
@@ -141,7 +156,8 @@ async def test_actor_termination_task_waits_for_the_actor():
     cs.add_task("before-actor-system-terminate", "check", check)
     system.terminate()
     await system.when_terminated()
-    assert seen_before_terminate == [["worker"]]  # the worker had stopped before the later phase ran
+    # the worker had stopped before the later phase ran
+    assert seen_before_terminate == [["worker"]]
 
 
 async def test_terminate_runs_a_task_before_the_guardian_stops():
@@ -168,7 +184,11 @@ async def test_terminate_runs_a_task_before_the_guardian_stops():
 
 async def test_run_by_actor_system_terminate_off_stops_directly():
     ran: list[str] = []
-    system = ActorSystem(Behaviors.ignore, "cs", shutdown=CoordinatedShutdownSettings(run_by_actor_system_terminate=False))
+    system = ActorSystem(
+        Behaviors.ignore,
+        "cs",
+        shutdown=CoordinatedShutdownSettings(run_by_actor_system_terminate=False),
+    )
 
     async def task() -> None:
         ran.append("x")
@@ -180,20 +200,29 @@ async def test_run_by_actor_system_terminate_off_stops_directly():
 
 
 async def test_signal_runs_the_shutdown_and_handler_is_idempotent_and_removed():
-    settings = CoordinatedShutdownSettings(default_phase_timeout=0.2, run_on_signals=(signal.SIGUSR1,))
+    settings = CoordinatedShutdownSettings(
+        default_phase_timeout=0.2, run_on_signals=(signal.SIGUSR1,)
+    )
     system = ActorSystem(Behaviors.ignore, "cs", shutdown=settings)
     os.kill(os.getpid(), signal.SIGUSR1)
     os.kill(os.getpid(), signal.SIGUSR1)  # twice: the second joins the run
     await asyncio.wait_for(system.when_terminated(), timeout=5)
     assert CoordinatedShutdown(system).shutdown_reason == JvmExitReason()
-    assert asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR1) is False  # already removed
+    # already removed
+    assert asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR1) is False
 
 
 async def test_timeout_arithmetic():
-    settings = CoordinatedShutdownSettings(default_phase_timeout=1.0, phase_timeouts={"cluster-exiting": 2.0})
+    settings = CoordinatedShutdownSettings(
+        default_phase_timeout=1.0, phase_timeouts={"cluster-exiting": 2.0}
+    )
     async with ActorSystem(Behaviors.ignore, "cs", shutdown=settings) as system:
         cs = CoordinatedShutdown(system)
-        assert cs.timeout("service-stop") == 1.0 and cs.timeout("cluster-exiting") == 2.0 and cs.timeout("actor-system-terminate") == 10.0
+        assert (
+            cs.timeout("service-stop") == 1.0
+            and cs.timeout("cluster-exiting") == 2.0
+            and cs.timeout("actor-system-terminate") == 10.0
+        )
         assert cs.total_timeout == 9 * 1.0 + 2.0 + 10.0 + 10.0
 
 

@@ -1,4 +1,5 @@
 """Supervision."""
+
 from __future__ import annotations
 
 import asyncio
@@ -149,7 +150,9 @@ async def test_backoff_grows_and_survives_failing_setup():
             raise ConnectionError("db not ready")
         return fragile([])
 
-    b = Behaviors.supervise(Behaviors.setup(flaky_setup)).on_failure(S.restart_with_backoff(0.01, 1.0, 0.0))
+    b = Behaviors.supervise(Behaviors.setup(flaky_setup)).on_failure(
+        S.restart_with_backoff(0.01, 1.0, 0.0)
+    )
     async with ActorSystem(b, "t") as system:
         system.tell(Add(9))
         assert await system.ask(Get, timeout=2) == 9

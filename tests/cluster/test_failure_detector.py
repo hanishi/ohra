@@ -1,5 +1,6 @@
 """Phi-accrual failure detection and the heartbeat ring, as PhiAccrualFailureDetector.scala and
 ClusterHeartbeat.scala."""
+
 from __future__ import annotations
 
 import math
@@ -33,11 +34,16 @@ class Clock:
 
 def detector(clock: Clock, acceptable_heartbeat_pause: float = 0.0) -> PhiAccrualFailureDetector:
     return PhiAccrualFailureDetector(
-        threshold=8.0, max_sample_size=1000, min_std_deviation=0.1,
-        acceptable_heartbeat_pause=acceptable_heartbeat_pause, first_heartbeat_estimate=1.0, clock=clock)
+        threshold=8.0,
+        max_sample_size=1000,
+        min_std_deviation=0.1,
+        acceptable_heartbeat_pause=acceptable_heartbeat_pause,
+        first_heartbeat_estimate=1.0,
+        clock=clock,
+    )
 
 
-# --- HeartbeatHistory -------------------------------------------------------------------------------
+# --- HeartbeatHistory ----------------------------------------------------------------------------
 
 
 def test_history_mean_variance_and_std_deviation():
@@ -53,7 +59,7 @@ def test_history_drops_the_oldest_beyond_max_sample_size():
     assert h.mean == 2.5
 
 
-# --- PhiAccrualFailureDetector --------------------------------------------------------------------
+# --- PhiAccrualFailureDetector -------------------------------------------------------------------
 
 
 def test_phi_is_zero_before_any_heartbeat_and_available():
@@ -77,8 +83,8 @@ def test_phi_is_small_right_after_a_heartbeat_and_grows_with_silence():
 
 
 def test_phi_is_zero_right_after_a_heartbeat_at_default_settings():
-    # mean 1s + 3s acceptable pause with the 0.1s std floor: y is about -40 and exp overflows in Python where
-    # the JVM gives Infinity; the answer is 0 either way
+    # mean 1s + 3s acceptable pause with the 0.1s std floor: y is about -40 and exp overflows in
+    # Python where the JVM gives Infinity; the answer is 0 either way
     assert phi(0.0, 4.0, 0.1) == 0.0
     assert phi(0.05, 4.0, 0.1) == 0.0
     clock = Clock(0.0)
@@ -117,7 +123,7 @@ def test_a_long_pause_is_not_recorded_in_the_history():
     assert fd.phi < 0.5  # the history still believes in ~1s intervals
 
 
-# --- FailureDetectorRegistry ----------------------------------------------------------------------
+# --- FailureDetectorRegistry ---------------------------------------------------------------------
 
 
 def test_registry_creates_a_detector_on_first_heartbeat_and_defaults_to_available():
@@ -139,7 +145,7 @@ def test_registry_creates_a_detector_on_first_heartbeat_and_defaults_to_availabl
     assert not registry.is_monitoring(a)
 
 
-# --- HeartbeatNodeRing ----------------------------------------------------------------------------
+# --- HeartbeatNodeRing ---------------------------------------------------------------------------
 
 
 def test_ring_picks_the_specified_number_of_receivers_for_every_node():
@@ -155,7 +161,8 @@ def test_ring_includes_intermediate_unreachable_nodes_up_to_the_limit():
     assert set(order) == NODES and len(order) == 6
     me = order[0]
     nxt = order[1:] + order[:1]
-    # the next two are unreachable: both are included and the two reachable after them are still picked
+    # the next two are unreachable: both are included and the two reachable after them are still
+    # picked
     ring = HeartbeatNodeRing(me, NODES, frozenset(nxt[:2]), 2)
     assert ring.my_receivers == frozenset(nxt[:4])
     # three unreachable in a row: only the first two unreachable are kept, the third is skipped
@@ -176,12 +183,14 @@ def test_ring_order_is_the_same_on_every_node():
     assert a == b
 
 
-# --- HeartbeatSenderState -------------------------------------------------------------------------
+# --- HeartbeatSenderState ------------------------------------------------------------------------
 
 
 def state(clock: Clock, n: int = 3) -> HeartbeatSenderState:
     registry = FailureDetectorRegistry(lambda: detector(clock))
-    return HeartbeatSenderState(HeartbeatNodeRing(AA, frozenset({AA}), frozenset(), n), frozenset(), registry)
+    return HeartbeatSenderState(
+        HeartbeatNodeRing(AA, frozenset({AA}), frozenset(), n), frozenset(), registry
+    )
 
 
 def test_sender_state_init_and_add_member():
@@ -205,8 +214,10 @@ def test_sender_state_keeps_heartbeating_an_unavailable_node_that_dropped_out_of
     assert not s.failure_detector.is_available(first.address)
     # a new member joins between me and `first` on the ring, so `first` is no longer my receiver
     joiner = next(
-        n for n in (UniqueAddress("zz", 7355, uid, "sys") for uid in range(100, 10_000))
-        if HeartbeatNodeRing(AA, s.ring.nodes | {n}, frozenset(), 1).my_receivers == frozenset({n}))
+        n
+        for n in (UniqueAddress("zz", 7355, uid, "sys") for uid in range(100, 10_000))
+        if HeartbeatNodeRing(AA, s.ring.nodes | {n}, frozenset(), 1).my_receivers == frozenset({n})
+    )
     s = s.add_member(joiner)
     assert s.ring.my_receivers == frozenset({joiner})
     assert first in s.old_receivers_now_unreachable  # still unavailable: keep heartbeating it

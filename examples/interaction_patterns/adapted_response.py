@@ -1,5 +1,6 @@
 """Adapted response: a message adapter wraps another actor's replies into our own protocol
 (Pekko interaction patterns)."""
+
 import asyncio
 import logging
 import sys
@@ -91,7 +92,9 @@ def frontend(backend_ref: ActorRef[StartTranslationJob]) -> Behavior[Command]:
                             case JobCompleted(task_id, result):
                                 ctx.log.info("Completed %d: %s", task_id, result)
                                 in_progress[task_id].tell(result)
-                                return active({k: v for k, v in in_progress.items() if k != task_id}, count)
+                                return active(
+                                    {k: v for k, v in in_progress.items() if k != task_id}, count
+                                )
                 return Behaviors.same
 
             return on_message
@@ -116,7 +119,10 @@ async def main() -> None:
         return forward
 
     async with ActorSystem(app, "adapted") as system:
-        print("translated:", await system.ask(lambda r: Translate("https://pekko.apache.org/docs/", r), timeout=1))
+        print(
+            "translated:",
+            await system.ask(lambda r: Translate("https://pekko.apache.org/docs/", r), timeout=1),
+        )
 
 
 asyncio.run(main())

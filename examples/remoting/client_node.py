@@ -1,7 +1,8 @@
 """Node "client": resolves the greeter by path on another node, tells it, asks it.
 
-    uv run python examples/remoting/client_node.py [port]    # after greeter_node.py is running
+uv run python examples/remoting/client_node.py [port]    # after greeter_node.py is running
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -20,7 +21,8 @@ async def main(port: int) -> None:
     async with ActorSystem(Behaviors.ignore, "client", address=("127.0.0.1", port)) as system:
         greeter: ActorRef[Greet] = system.resolve(GREETER)  # a RemoteRef: no connection yet
         greeter.tell(Greet("fire-and-forget", system.ignore_ref))
-        reply: Greeted = await ask(greeter, lambda r: Greet("pekko", r), timeout=3)  # the reply ref crosses the wire too
+        # the reply ref crosses the wire too
+        reply: Greeted = await ask(greeter, lambda r: Greet("pekko", r), timeout=3)
         print(f"{reply.text!r} served by {reply.served_by}")
 
 

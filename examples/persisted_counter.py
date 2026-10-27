@@ -1,11 +1,12 @@
 """A counter whose total survives a restart of the actor and of the process.
 
-The state is the factory's parameter, as in counter.py. Behaviors.persisted wraps the factory so that
-returning counter(total + by) writes the new total before it is installed and before the deferred
-reply leaves. recover(id, empty) loads the total in one read.
+The state is the factory's parameter, as in counter.py. Behaviors.persisted wraps the factory so
+that returning counter(total + by) writes the new total before it is installed and before the
+deferred reply leaves. recover(id, empty) loads the total in one read.
 
     uv run python examples/persisted_counter.py          # run it twice: the total carries over
 """
+
 import asyncio
 import os
 import sys
@@ -46,7 +47,8 @@ def counter(total: int) -> Behavior[Command]:
     def on_message(msg: Command) -> Behavior[Command]:
         match msg:
             case Increment(by, reply_to):
-                return counter(total + by).then_reply(reply_to, total + by)  # written, then replied
+                # written, then replied
+                return counter(total + by).then_reply(reply_to, total + by)
             case GetTotal(reply_to):
                 reply_to.tell(total)  # a read: nothing written
                 return Behaviors.same
@@ -57,7 +59,9 @@ def counter(total: int) -> Behavior[Command]:
 
 
 # restart re-runs recover, so the actor comes back with the committed total, not an in-memory one
-durable = Behaviors.supervise(counter.recover("demo", empty=0)).on_failure(SupervisorStrategy.restart())
+durable = Behaviors.supervise(counter.recover("demo", empty=0)).on_failure(
+    SupervisorStrategy.restart()
+)
 
 
 async def main() -> None:
@@ -69,7 +73,8 @@ async def main() -> None:
         system.tell(Crash())
         print("after a crash and restart:", await system.ask(GetTotal, timeout=1))
 
-    async with ActorSystem(durable, "second") as system:  # a new system on the same store, as after a process restart
+    # a new system on the same store, as after a process restart
+    async with ActorSystem(durable, "second") as system:
         print("a new actor system sees:", await system.ask(GetTotal, timeout=1))
     print("run again and the total keeps growing")
 

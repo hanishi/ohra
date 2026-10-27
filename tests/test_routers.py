@@ -1,4 +1,5 @@
 """Pool routers."""
+
 from __future__ import annotations
 
 import asyncio
@@ -49,7 +50,9 @@ async def test_round_robin_spreads_messages_evenly():
 
 async def test_consistent_hashing_sends_a_key_to_one_routee():
     seen: list[tuple[str, int]] = []
-    router = Routers.pool(4, routee(seen)).with_consistent_hashing_routing(lambda m: m.key if isinstance(m, Work) else 0)
+    router = Routers.pool(4, routee(seen)).with_consistent_hashing_routing(
+        lambda m: m.key if isinstance(m, Work) else 0
+    )
     async with ActorSystem(router, "t") as system:
         for i in range(40):
             system.tell(Work(i % 8))

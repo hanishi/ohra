@@ -1,4 +1,5 @@
 """Behaviors, typed refs, ask, pipe_to_self, message adapters."""
+
 from __future__ import annotations
 
 import asyncio
@@ -103,7 +104,11 @@ async def test_stopped_delivers_post_stop_and_dead_letters_later_messages():
 
     def on_message(_ctx: ActorContext[Command], msg: Command) -> Behavior[Command]:
         events.append(type(msg).__name__)
-        return Behaviors.stopped(lambda: events.append("callback")) if isinstance(msg, Stop) else Behaviors.same
+        return (
+            Behaviors.stopped(lambda: events.append("callback"))
+            if isinstance(msg, Stop)
+            else Behaviors.same
+        )
 
     system = ActorSystem(Behaviors.receive(on_message).receive_signal(on_signal), "t")
     system.tell(Increment(1))
@@ -236,7 +241,12 @@ async def test_ctx_ask_and_message_adapter():
             match msg:
                 case Report(reply_to):
                     waiting.append(reply_to)
-                    ctx.ask(c, GetTotal, lambda r: _GotTotal(r.value if isinstance(r, Success) else -1), timeout=1)
+                    ctx.ask(
+                        c,
+                        GetTotal,
+                        lambda r: _GotTotal(r.value if isinstance(r, Success) else -1),
+                        timeout=1,
+                    )
                 case _GotTotal(total):
                     waiting.pop(0).tell(f"total={total}")
             return Behaviors.same

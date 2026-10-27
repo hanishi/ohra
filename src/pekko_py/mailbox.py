@@ -1,4 +1,5 @@
 """Mailbox selection (org.apache.pekko.actor.typed.MailboxSelector). Pass it to ``spawn``."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

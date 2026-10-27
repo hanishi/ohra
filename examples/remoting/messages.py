@@ -1,4 +1,5 @@
 """Messages both nodes share. @remotable registers each type so it can cross the wire as JSON."""
+
 from dataclasses import dataclass
 
 from pekko_py import ActorRef, remotable

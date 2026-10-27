@@ -4,10 +4,11 @@
         greeter = system.resolve("pekko://b@10.0.0.2:2552/user/greeter")
         greeter.tell(Greet("pekko", reply_to))        # Greet is @remotable
 
-Modelled on Apache Pekko's Artery and narrowed: no membership, no remote watch, no quarantine. A node
-has a UniqueAddress (host, port, and a uid per incarnation). Frames are length-prefixed JSON. A message
-for a path nobody owns is a dead letter on the receiving node.
+Modelled on Apache Pekko's Artery and narrowed: no membership, no remote watch, no quarantine. A
+node has a UniqueAddress (host, port, and a uid per incarnation). Frames are length-prefixed JSON.
+A message for a path nobody owns is a dead letter on the receiving node.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +37,8 @@ if TYPE_CHECKING:
 @remotable
 @dataclass(frozen=True)
 class Address:
-    """A system's name and listening address. Ordered by (host, port), as Pekko's addressOrdering."""
+    """A system's name and listening address. Ordered by (host, port), as Pekko's
+    addressOrdering."""
 
     name: str
     host: str
@@ -45,7 +47,11 @@ class Address:
     @staticmethod
     def parse(text: str) -> Address:
         """``pekko://name@host:port``."""
-        if not text.startswith("pekko://") or "@" not in text or ":" not in text.rpartition("@")[2]:
+        if (
+            not text.startswith("pekko://")
+            or "@" not in text
+            or ":" not in text.rpartition("@")[2]
+        ):
             raise ValueError(f"not an address: {text!r}")
         name, _, hostport = text[len("pekko://") :].rstrip("/").rpartition("@")
         host, _, port = hostport.rpartition(":")
@@ -86,7 +92,8 @@ class UniqueAddress:
 
 
 class RemoteRef[T](ActorRef[T]):
-    """A ref to an actor on another node. tell serializes and sends; offer awaits the connection's backpressure."""
+    """A ref to an actor on another node. tell serializes and sends; offer awaits the connection's
+    backpressure."""
 
     __slots__ = ("_path", "_remoting")
 
@@ -117,7 +124,9 @@ class TempRefs:
 
     def __init__(self, root: str) -> None:
         self._root = root
-        self._by_path: weakref.WeakValueDictionary[str, ActorRef[Any]] = weakref.WeakValueDictionary()
+        self._by_path: weakref.WeakValueDictionary[str, ActorRef[Any]] = (
+            weakref.WeakValueDictionary()
+        )
         self._paths: weakref.WeakKeyDictionary[ActorRef[Any], str] = weakref.WeakKeyDictionary()
         self._n = 0
 
@@ -135,7 +144,8 @@ class TempRefs:
 
 
 def resolve_local(system: ActorSystem[Any], path: str) -> ActorRef[Any]:
-    """The local ref at path, walking the actor tree from the root. LookupError if there is none."""
+    """The local ref at path, walking the actor tree from the root. LookupError if there is
+    none."""
     root = system.address.root if system.address is not None else f"pekko://{system.name}"
     if not path.startswith(root + "/"):
         raise LookupError(f"{path} is not on this system ({root})")
@@ -162,7 +172,8 @@ def pack(obj: Json) -> bytes:
 
 
 async def read_frame(reader: asyncio.StreamReader) -> Json | None:
-    """The next frame, or None at a clean end of stream. Raises ValueError for an oversized frame."""
+    """The next frame, or None at a clean end of stream. Raises ValueError for an oversized
+    frame."""
     try:
         (n,) = struct.unpack(">I", await reader.readexactly(4))
         if n > MAX_FRAME:
@@ -173,7 +184,8 @@ async def read_frame(reader: asyncio.StreamReader) -> Json | None:
 
 
 def _authority_of(path: str) -> tuple[str, int]:
-    """(host, port) from pekko://name@host:port/...; LookupError if the path is not shaped like that."""
+    """(host, port) from pekko://name@host:port/...; LookupError if the path is not shaped like
+    that."""
     parts = path.split("/", 3)
     if len(parts) < 4 or not path.startswith("pekko://") or "@" not in parts[2]:
         raise LookupError(f"{path} is not a remote path (pekko://name@host:port/...)")
@@ -206,14 +218,16 @@ class _Association:
     async def drain(self) -> None:
         await self.connected.wait()
         if self.writer is not None:
-            with contextlib.suppress(OSError):  # the connection died under us: the frame is a lost tell, as any
+            # the connection died under us: the frame is a lost tell, as any
+            with contextlib.suppress(OSError):
                 await self.writer.drain()
 
     async def _run(self) -> None:
         try:
             reader, writer = await asyncio.open_connection(self.host, self.port)
         except OSError as e:
-            _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)  # every tick to a dead peer: keep it quiet
+            # every tick to a dead peer: keep it quiet
+            _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)
             for path, msg, _ in self.pending:
                 self.remoting.system.dead_letter(msg, RemoteRef(path, self.remoting))
             self.pending.clear()
@@ -221,7 +235,8 @@ class _Association:
             self.connected.set()
             return
         writer.write(self.remoting.hello())
-        frames = [frame for _path, _msg, frame in self.pending]  # only the bytes: keep no message alive
+        # only the bytes: keep no message alive
+        frames = [frame for _path, _msg, frame in self.pending]
         self.pending.clear()
         for frame in frames:
             writer.write(frame)
@@ -260,9 +275,15 @@ class Remoting:
         """Set once listen() has run, however it went: the cluster waits for it before joining."""
 
     def ref_path(self, ref: ActorRef[Any]) -> str:
-        """The path another node can send to: a local or remote ref's own path, else a temp path here."""
-        if isinstance(ref, LocalRef | RemoteRef) or ref is self.system or ref is self.system.ignore_ref:
-            return ref.path  # the system itself is its guardian's path, which resolves on this node
+        """The path another node can send to: a local or remote ref's own path, else a temp path
+        here."""
+        if (
+            isinstance(ref, LocalRef | RemoteRef)
+            or ref is self.system
+            or ref is self.system.ignore_ref
+        ):
+            # the system itself is its guardian's path, which resolves on this node
+            return ref.path
         return self.temp.register(ref)
 
     def resolve(self, path: str) -> ActorRef[Any]:
@@ -281,8 +302,10 @@ class Remoting:
     # --- outbound -------------------------------------------------------------------------------
 
     def send(self, path: str, msg: object) -> None:
-        """Never blocks and never raises for network reasons; raises SerializationError for an unsendable message."""
-        frame = self._frame(path, msg)  # before touching the network: an unsendable message opens nothing
+        """Never blocks and never raises for network reasons; raises SerializationError for an
+        unsendable message."""
+        # before touching the network: an unsendable message opens nothing
+        frame = self._frame(path, msg)
         if self._closed:
             self.system.dead_letter(msg, RemoteRef(path, self))
             return
@@ -298,9 +321,18 @@ class Remoting:
         await association.drain()
 
     def _frame(self, path: str, msg: object) -> bytes:
-        frame = pack({"kind": "msg", "to": path, "from": None, "message": Serialization.encode(msg, self.ref_path)})
+        frame = pack(
+            {
+                "kind": "msg",
+                "to": path,
+                "from": None,
+                "message": Serialization.encode(msg, self.ref_path),
+            }
+        )
         if len(frame) - 4 > MAX_FRAME:
-            raise SerializationError(f"message of {len(frame) - 4} bytes exceeds the {MAX_FRAME} byte frame limit")
+            raise SerializationError(
+                f"message of {len(frame) - 4} bytes exceeds the {MAX_FRAME} byte frame limit"
+            )
         return frame
 
     def _association(self, path: str) -> _Association:
@@ -317,14 +349,21 @@ class Remoting:
 
     def hello(self) -> bytes:
         a = self.address
-        return pack({"kind": "hello", "address": {"host": a.host, "port": a.port, "uid": a.uid, "name": a.name}})
+        return pack(
+            {
+                "kind": "hello",
+                "address": {"host": a.host, "port": a.port, "uid": a.uid, "name": a.name},
+            }
+        )
 
     # --- inbound --------------------------------------------------------------------------------
 
     async def listen(self) -> None:
         try:
             if self._server is None:
-                self._server = await asyncio.start_server(self._accept, self.address.host, self.address.port)
+                self._server = await asyncio.start_server(
+                    self._accept, self.address.host, self.address.port
+                )
         finally:
             self.listening.set()
 
@@ -359,9 +398,12 @@ class Remoting:
                     if isinstance(target, RemoteRef):
                         raise LookupError(f"{to} is not on this node")
                     target.tell(Serialization.decode(message, self.resolve))
-                except Exception as e:  # one bad message must not take the connection and the frames behind it
+                # one bad message must not take the connection and the frames behind it
+                except Exception as e:
                     _log.debug("dead letter: %r", e)
-                    self.system.dead_letter(message, RemoteRef(to, self) if isinstance(to, str) else self.system)
+                    self.system.dead_letter(
+                        message, RemoteRef(to, self) if isinstance(to, str) else self.system
+                    )
             case other:
                 _log.debug("unknown frame kind %r", other)
 

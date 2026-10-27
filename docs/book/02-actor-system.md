@@ -17,20 +17,29 @@ GREETER = ServiceKey[Greet]("greeter")
 
 def greeter_node(ctx: ActorContext[Listing[Greet]]) -> Behavior[Listing[Greet]]:
     Receptionist(ctx.system).ref.tell(Register(GREETER, ctx.spawn(greeter, "greeter")))
-    Receptionist(ctx.system).ref.tell(Subscribe(GREETER, ctx.self))  # a Listing now, then one per change
-    return Behaviors.receive_message(lambda listing: print(sorted(r.path for r in listing.service_instances)) or Behaviors.same)
+    # a Listing now, then one per change
+    Receptionist(ctx.system).ref.tell(Subscribe(GREETER, ctx.self))
+    return Behaviors.receive_message(
+        lambda listing: print(sorted(r.path for r in listing.service_instances)) or Behaviors.same
+    )
 
 
 def greeter_system(port: int) -> ActorSystem[Listing[Greet]]:
     seeds = (Address("app", "127.0.0.1", 2551),)
-    return ActorSystem(Behaviors.setup(greeter_node), "app", address=("127.0.0.1", port), cluster=ClusterSettings(seed_nodes=seeds))
+    return ActorSystem(
+        Behaviors.setup(greeter_node),
+        "app",
+        address=("127.0.0.1", port),
+        cluster=ClusterSettings(seed_nodes=seeds),
+    )
 
 
 async def main() -> None:
     async with greeter_system(2551) as first, greeter_system(2552) as second:
         await until(lambda: len(Cluster(second).state.members) == 2)
         listing = await ask(Receptionist(second).ref, lambda r: Find(GREETER, r), timeout=1)
-        for ref in listing.service_instances:  # one local ref, one RemoteRef to the greeter on the first node
+        # one local ref, one RemoteRef to the greeter on the first node
+        for ref in listing.service_instances:
             print(await ask(ref, lambda r: Greet("pekko", r), timeout=1))
 ```
 
@@ -60,7 +69,11 @@ import signal
 
 from pekko_py import CoordinatedShutdown, CoordinatedShutdownSettings
 
-system = ActorSystem(guardian, "app", shutdown=CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM)))
+system = ActorSystem(
+    guardian,
+    "app",
+    shutdown=CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM)),
+)
 
 
 async def drain() -> None:
@@ -68,7 +81,8 @@ async def drain() -> None:
 
 
 CoordinatedShutdown(system).add_task("service-unbind", "stop-http", drain)
-await system.when_terminated()  # ctrl-c or SIGTERM runs the phases: user tasks, hand-offs, leave, stop
+# ctrl-c or SIGTERM runs the phases: user tasks, hand-offs, leave, stop
+await system.when_terminated()
 ```
 
 The phases, in order: `before-service-unbind`, `service-unbind`, `service-requests-done`, `service-stop`, `before-cluster-shutdown`, `cluster-sharding-shutdown-region`, `cluster-leave`, `cluster-exiting`, `cluster-exiting-done`, `cluster-shutdown`, `before-actor-system-terminate`, `actor-system-terminate`. Tasks in one phase run concurrently; a task that fails is logged and the run continues, as Pekko's `recover = on`. A phase that outlives its timeout (`default_phase_timeout` 5 s; 10 s for the region, exiting and terminate phases; `phase_timeouts` overrides) is logged and its still-running tasks are cancelled, so a task must tolerate `CancelledError` at any await; Pekko lets such a task run on. `terminate()` returns at once, as Pekko's does: messages told after it may still be processed, so await `when_terminated()`. A guardian that stops on its own also runs the phases, after its actors are gone. `run(reason)` starts the run by hand; `shutdown_reason` says who did. A node that terminates while another member is unreachable and not downed waits out `cluster-exiting`, since the leader cannot move it to Exiting; the split-brain resolver below removes that wait.

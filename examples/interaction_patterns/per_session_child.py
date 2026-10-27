@@ -1,5 +1,6 @@
 """Per session child actor: a short-lived child collects replies from several actors for one
 request and stops when done (Pekko interaction patterns)."""
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -73,7 +74,9 @@ def home() -> Behavior[LeaveHome]:
 
         @Behaviors.receive_message
         def on_message(msg: LeaveHome) -> Behavior[LeaveHome]:
-            ctx.spawn(prepare_to_leave_home(msg.who, msg.reply_to, cabinet, drw), f"leaving-{msg.who}")
+            ctx.spawn(
+                prepare_to_leave_home(msg.who, msg.reply_to, cabinet, drw), f"leaving-{msg.who}"
+            )
             return Behaviors.same
 
         return on_message
@@ -82,7 +85,10 @@ def home() -> Behavior[LeaveHome]:
 
 
 def prepare_to_leave_home(
-    who: str, reply_to: ActorRef[ReadyToLeaveHome], cabinet: ActorRef[GetKeys], drw: ActorRef[GetWallet]
+    who: str,
+    reply_to: ActorRef[ReadyToLeaveHome],
+    cabinet: ActorRef[GetKeys],
+    drw: ActorRef[GetWallet],
 ) -> Behavior[Any]:
     """The session actor accepts anything, since only the replies it asked for will arrive.
     ActorRef is contravariant, so ActorRef[Any] narrows to ActorRef[Keys] and ActorRef[Wallet]."""

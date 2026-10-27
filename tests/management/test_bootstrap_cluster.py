@@ -1,4 +1,6 @@
-"""Cluster bootstrap across nodes over ConfigServiceDiscovery: forming a cluster with no seed nodes, late joiners, and the guards."""
+"""Cluster bootstrap across nodes over ConfigServiceDiscovery: forming a cluster with no seed
+nodes, late joiners, and the guards."""
+
 from __future__ import annotations
 
 import asyncio
@@ -32,24 +34,41 @@ BOOT: dict[str, Any] = dict(
     probing_failure_timeout=0.5,
     resolve_timeout=0.5,
     required_contact_point_nr=2,
-    filter_on_fallback_port=False,  # every node is on 127.0.0.1: Pekko's per-host fallback-port filter would keep one
+    # every node is on 127.0.0.1: Pekko's per-host fallback-port filter would keep one
+    filter_on_fallback_port=False,
 )
 
 
 class LiveDiscovery(ServiceDiscovery):
-    """Like the Kubernetes API: only pods that exist are listed, so the list grows as nodes start."""
+    """Like the Kubernetes API: only pods that exist are listed, so the list grows as nodes
+    start."""
 
     def __init__(self, mgmt_ports: list[int]) -> None:
         self.mgmt_ports = mgmt_ports
 
     async def lookup(self, lookup: Lookup, resolve_timeout: float) -> Resolved:
-        return Resolved(lookup.service_name, tuple(ResolvedTarget("127.0.0.1", p, "127.0.0.1") for p in self.mgmt_ports))
+        return Resolved(
+            lookup.service_name,
+            tuple(ResolvedTarget("127.0.0.1", p, "127.0.0.1") for p in self.mgmt_ports),
+        )
 
 
-def bootstrap_node(port: int, mgmt_ports: list[int], my_mgmt: int, seeds: list[int] | None = None, discovery: ServiceDiscovery | None = None, **boot: Any) -> ActorSystem[Any]:
-    discovery = discovery or ConfigServiceDiscovery({"svc": [ResolvedTarget("127.0.0.1", p, "127.0.0.1") for p in mgmt_ports]})
+def bootstrap_node(
+    port: int,
+    mgmt_ports: list[int],
+    my_mgmt: int,
+    seeds: list[int] | None = None,
+    discovery: ServiceDiscovery | None = None,
+    **boot: Any,
+) -> ActorSystem[Any]:
+    discovery = discovery or ConfigServiceDiscovery(
+        {"svc": [ResolvedTarget("127.0.0.1", p, "127.0.0.1") for p in mgmt_ports]}
+    )
     management = PekkoManagementSettings(
-        hostname="127.0.0.1", port=my_mgmt, discovery=discovery, bootstrap=ClusterBootstrapSettings(service_name="svc", **{**BOOT, **boot})
+        hostname="127.0.0.1",
+        port=my_mgmt,
+        discovery=discovery,
+        bootstrap=ClusterBootstrapSettings(service_name="svc", **{**BOOT, **boot}),
     )
     return cluster_node("c", port, seeds or [], management=management)
 
@@ -61,7 +80,10 @@ def three() -> tuple[list[int], list[int]]:
 async def test_three_nodes_form_one_cluster_and_the_lowest_joins_itself():
     ports, mgmt = three()
     async with AsyncExitStack() as stack:
-        nodes = [await stack.enter_async_context(bootstrap_node(p, mgmt, m)) for p, m in zip(ports, mgmt, strict=True)]
+        nodes = [
+            await stack.enter_async_context(bootstrap_node(p, mgmt, m))
+            for p, m in zip(ports, mgmt, strict=True)
+        ]
         for n in nodes:
             await PekkoManagement(n).start()
         await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=10)
@@ -75,7 +97,10 @@ async def test_a_late_node_joins_through_probing():
     p4, m4 = free_port(), free_port()
     live = LiveDiscovery(list(mgmt))
     async with AsyncExitStack() as stack:
-        nodes = [await stack.enter_async_context(bootstrap_node(p, mgmt, m, discovery=live)) for p, m in zip(ports, mgmt, strict=True)]
+        nodes = [
+            await stack.enter_async_context(bootstrap_node(p, mgmt, m, discovery=live))
+            for p, m in zip(ports, mgmt, strict=True)
+        ]
         for n in nodes:
             await PekkoManagement(n).start()
         await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=10)
@@ -90,7 +115,8 @@ async def test_a_node_missing_itself_in_discovery_joins_once_seed_nodes_appear()
     async with AsyncExitStack() as stack:
         a = await stack.enter_async_context(bootstrap_node(ports[0], mgmt[:2], mgmt[0]))
         b = await stack.enter_async_context(bootstrap_node(ports[1], mgmt[:2], mgmt[1]))
-        c = await stack.enter_async_context(bootstrap_node(ports[2], mgmt[:2], mgmt[2]))  # c does not see itself
+        # c does not see itself
+        c = await stack.enter_async_context(bootstrap_node(ports[2], mgmt[:2], mgmt[2]))
         for n in (a, b, c):
             await PekkoManagement(n).start()
         await eventually(lambda: all(all_up(n, 3) for n in (a, b, c)), timeout=10)
@@ -99,7 +125,12 @@ async def test_a_node_missing_itself_in_discovery_joins_once_seed_nodes_appear()
 async def test_new_cluster_disabled_forms_nothing():
     ports, mgmt = three()
     async with AsyncExitStack() as stack:
-        nodes = [await stack.enter_async_context(bootstrap_node(p, mgmt[:2], m, new_cluster_enabled=False)) for p, m in zip(ports[:2], mgmt[:2], strict=True)]
+        nodes = [
+            await stack.enter_async_context(
+                bootstrap_node(p, mgmt[:2], m, new_cluster_enabled=False)
+            )
+            for p, m in zip(ports[:2], mgmt[:2], strict=True)
+        ]
         for n in nodes:
             await PekkoManagement(n).start()
         await asyncio.sleep(1.5 * BOOT["stable_margin"] + 0.5)
@@ -109,11 +140,22 @@ async def test_new_cluster_disabled_forms_nothing():
 async def test_probe_refuses_own_remoting_address(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.WARNING, logger="pekko_py.management.bootstrap")
     p, m = free_port(), free_port()
-    discovery = ConfigServiceDiscovery({"svc": [ResolvedTarget("127.0.0.1", p, "127.0.0.1")]})  # the remoting port, not management
-    management = PekkoManagementSettings(hostname="127.0.0.1", port=m, discovery=discovery, bootstrap=ClusterBootstrapSettings(service_name="svc", **{**BOOT, "required_contact_point_nr": 1}))
+    # the remoting port, not management
+    discovery = ConfigServiceDiscovery({"svc": [ResolvedTarget("127.0.0.1", p, "127.0.0.1")]})
+    management = PekkoManagementSettings(
+        hostname="127.0.0.1",
+        port=m,
+        discovery=discovery,
+        bootstrap=ClusterBootstrapSettings(
+            service_name="svc", **{**BOOT, "required_contact_point_nr": 1}
+        ),
+    )
     async with cluster_node("c", p, [], management=management) as node:
         await PekkoManagement(node).start()
-        await eventually(lambda: any("Misconfiguration detected" in r.message for r in caplog.records), timeout=5)
+        await eventually(
+            lambda: any("Misconfiguration detected" in r.message for r in caplog.records),
+            timeout=5,
+        )
         await asyncio.sleep(1.5 * BOOT["stable_margin"])
         assert not Cluster(node).state.members
 
@@ -128,8 +170,9 @@ async def test_bootstrap_with_seed_nodes_configured_bails_out(caplog: pytest.Log
 
 
 async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
-    """After a probe is dropped (ProbingFailed or a vanished contact point) its child may still exist while the next
-    discovery lists the same point; spawning a duplicate by name would fail the coordinator. Pekko uses context.child."""
+    """After a probe is dropped (ProbingFailed or a vanished contact point) its child may still
+    exist while the next discovery lists the same point; spawning a duplicate by name would fail
+    the coordinator. Pekko uses context.child."""
     from pekko_py import ActorContext, Behavior, Behaviors
     from pekko_py.management.bootstrap import _Coordinator  # pyright: ignore[reportPrivateUsage]
 
@@ -139,7 +182,9 @@ async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
     settings = ClusterBootstrapSettings(service_name="svc", **BOOT)
 
     def probe_twice(ctx: ActorContext[None]) -> Behavior[None]:
-        coordinator = _Coordinator(ctx, settings, ConfigServiceDiscovery({"svc": [cp]}), ("127.0.0.1", m), "")
+        coordinator = _Coordinator(
+            ctx, settings, ConfigServiceDiscovery({"svc": [cp]}), ("127.0.0.1", m), ""
+        )
         coordinator.ensure_probing(cp)
         coordinator.probes.clear()  # as _ProbingFailed does; the child still exists
         try:
@@ -149,16 +194,24 @@ async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
             outcome.set_result(f"raised {type(e).__name__}")
         return Behaviors.ignore
 
-    async with cluster_node("c", p, [], management=PekkoManagementSettings(hostname="127.0.0.1", port=m)) as node:
+    async with cluster_node(
+        "c", p, [], management=PekkoManagementSettings(hostname="127.0.0.1", port=m)
+    ) as node:
         node._system_root.spawn_child(Behaviors.setup(probe_twice), "probeTwice", None)  # pyright: ignore[reportPrivateUsage]
         assert await asyncio.wait_for(outcome, 5) == "reused"
 
 
 def test_decider_resolves_its_own_hostname_once(monkeypatch: pytest.MonkeyPatch):
-    """matches_self must not call DNS on the event loop per tick: the self IP is resolved once at construction."""
+    """matches_self must not call DNS on the event loop per tick: the self IP is resolved once at
+    construction."""
     import socket
 
-    from pekko_py.management.bootstrap import JoinSelf, LowestAddressJoinDecider, SeedNodesInformation, SeedNodesObservation
+    from pekko_py.management.bootstrap import (
+        JoinSelf,
+        LowestAddressJoinDecider,
+        SeedNodesInformation,
+        SeedNodesObservation,
+    )
 
     calls: list[str] = []
 
@@ -167,9 +220,18 @@ def test_decider_resolves_its_own_hostname_once(monkeypatch: pytest.MonkeyPatch)
         return "10.0.0.1"
 
     monkeypatch.setattr(socket, "gethostbyname", fake)
-    decider = LowestAddressJoinDecider(ClusterBootstrapSettings(service_name="svc", required_contact_point_nr=1), ("mgmt.local", 7626), logging.getLogger("t"))
+    decider = LowestAddressJoinDecider(
+        ClusterBootstrapSettings(service_name="svc", required_contact_point_nr=1),
+        ("mgmt.local", 7626),
+        logging.getLogger("t"),
+    )
     a = ResolvedTarget("10-0-0-1.ns.pod.cluster.local", 7626, "10.0.0.1")
-    info = SeedNodesInformation(200.0, 100.0, frozenset({a}), frozenset({SeedNodesObservation(100.0, a, Address("c", "10.0.0.1", 2552), frozenset())}))
+    info = SeedNodesInformation(
+        200.0,
+        100.0,
+        frozenset({a}),
+        frozenset({SeedNodesObservation(100.0, a, Address("c", "10.0.0.1", 2552), frozenset())}),
+    )
     for _ in range(20):
         assert decider.decide(info) == JoinSelf()
     assert calls == ["mgmt.local"]

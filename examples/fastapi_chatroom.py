@@ -10,6 +10,7 @@ demo with three clients:
 
     uv run --extra web python examples/fastapi_chatroom.py
 """
+
 import asyncio
 import json
 import sys
@@ -159,7 +160,9 @@ def connection(ws: WebSocket, reply_to: ActorRef[JoinResult]) -> Behavior[Sessio
     the actor stays busy during it and later events wait in the mailbox, in order."""
 
     @Behaviors.receive
-    async def on_message(ctx: ActorContext[SessionEvent], msg: SessionEvent) -> Behavior[SessionEvent]:
+    async def on_message(
+        ctx: ActorContext[SessionEvent], msg: SessionEvent
+    ) -> Behavior[SessionEvent]:
         match msg:
             case SessionGranted(handle):
                 reply_to.tell(Joined(handle, ctx.self))
@@ -209,16 +212,17 @@ def lobby() -> Behavior[LobbyCmd]:
     return on_message
 
 
-# --- HTTP and WebSocket ------------------------------------------------------------------------------
+# --- HTTP and WebSocket --------------------------------------------------------------------------
 
 
 actors = Actors(lobby(), "chat")
 app = FastAPI(title="chat", lifespan=actors.lifespan)
 
 
-
 @app.websocket("/ws/{room}/{screen_name}")
-async def chat(ws: WebSocket, room: str, screen_name: str, system: ActorSystem[LobbyCmd] = actors.depends()) -> None:
+async def chat(
+    ws: WebSocket, room: str, screen_name: str, system: ActorSystem[LobbyCmd] = actors.depends()
+) -> None:
     await ws.accept()
     result: JoinResult = await system.ask(lambda r: Join(room, screen_name, ws, r), timeout=2)
     match result:
@@ -264,7 +268,7 @@ $("join").onsubmit=e=>{e.preventDefault();const room=$("room").value.trim()||"lo
   else add(esc(m.text),"n")};
  ws.onclose=()=>{$("status").textContent="disconnected";add("connection closed","n")};
  $("f").onsubmit=e=>{e.preventDefault();const t=$("m").value.trim();if(t&&ws.readyState===1){ws.send(t);$("m").value=""}}};
-</script>"""
+</script>"""  # noqa: E501 (a minified page)
 
 
 @app.get("/")
@@ -272,7 +276,7 @@ async def index() -> HTMLResponse:
     return HTMLResponse(PAGE)
 
 
-# --- scripted demo: three clients in one room ------------------------------------------------------
+# --- scripted demo: three clients in one room ----------------------------------------------------
 
 
 async def demo() -> None:
@@ -288,11 +292,20 @@ async def demo() -> None:
     async def show(name: str, ws: Any) -> None:
         async for raw in ws:
             m = json.loads(raw)
-            print(f"[{name}] " + (f"{m['from']}: {m['text']}" if m["type"] == "message" else f"({m['text']})"))
+            print(
+                f"[{name}] "
+                + (f"{m['from']}: {m['text']}" if m["type"] == "message" else f"({m['text']})")
+            )
 
     try:
-        async with websockets.connect(url + "alice") as alice, websockets.connect(url + "bob") as bob:
-            readers = [asyncio.create_task(show("alice", alice)), asyncio.create_task(show("bob", bob))]
+        async with (
+            websockets.connect(url + "alice") as alice,
+            websockets.connect(url + "bob") as bob,
+        ):
+            readers = [
+                asyncio.create_task(show("alice", alice)),
+                asyncio.create_task(show("bob", bob)),
+            ]
             await asyncio.sleep(0.05)
             await alice.send("hello bob")
             await bob.send("hi alice")

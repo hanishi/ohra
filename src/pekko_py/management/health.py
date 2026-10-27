@@ -1,5 +1,6 @@
-"""Pekko Management's health checks: startup, readiness and liveness, each a list of named async checks run with a
-timeout; the first failing check names the reason, as HealthChecksImpl does."""
+"""Pekko Management's health checks: startup, readiness and liveness, each a list of named async
+checks run with a timeout; the first failing check names the reason, as HealthChecksImpl does."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +17,8 @@ type HealthCheck = Callable[[], Awaitable[bool]]
 
 @dataclass(frozen=True)
 class HealthCheckSettings:
-    """Pekko's ``health-checks`` settings; ``ready_states`` is the cluster-membership readiness check's accepted statuses."""
+    """Pekko's ``health-checks`` settings; ``ready_states`` is the cluster-membership readiness
+    check's accepted statuses."""
 
     startup_path: str = "startup"
     readiness_path: str = "ready"
@@ -55,7 +57,8 @@ class HealthChecks:
         return await self._run(self._liveness, "liveness")
 
     async def _run(self, checks: list[tuple[str, HealthCheck]], kind: str) -> str | None:
-        """None when every check passes, else the first failing check's reason, in registration order."""
+        """None when every check passes, else the first failing check's reason, in registration
+        order."""
         results = await asyncio.gather(*(self._one(name, check) for name, check in checks))
         for reason in results:
             if reason is not None:

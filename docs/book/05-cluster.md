@@ -39,17 +39,27 @@ from pekko_py import Address, Cluster, ClusterSettings, Leave, MemberEvent, Subs
 
 def cluster_node(port: int, seed_port: int) -> ActorSystem[MemberEvent]:
     seeds = (Address("app", "127.0.0.1", seed_port),)
-    system = ActorSystem(listener, "app", address=("127.0.0.1", port), cluster=ClusterSettings(seed_nodes=seeds))
-    Cluster(system).subscriptions.tell(Subscribe(system, MemberEvent))  # current state first, then every change
+    system = ActorSystem(
+        listener, "app", address=("127.0.0.1", port), cluster=ClusterSettings(seed_nodes=seeds)
+    )
+    # current state first, then every change
+    Cluster(system).subscriptions.tell(Subscribe(system, MemberEvent))
     return system
 
 
 async def main() -> None:
     async with cluster_node(2551, 2551) as first, cluster_node(2552, 2551) as second:
-        await until(lambda: all(m.status == "up" for m in Cluster(first).state.members) and len(Cluster(first).state.members) == 2)
-        print(Cluster(first).state.leader)                        # Address(name='app', host='127.0.0.1', port=2551)
+        await until(
+            lambda: (
+                all(m.status == "up" for m in Cluster(first).state.members)
+                and len(Cluster(first).state.members) == 2
+            )
+        )
+        # Address(name='app', host='127.0.0.1', port=2551)
+        print(Cluster(first).state.leader)
         Cluster(first).manager.tell(Leave(Cluster(second).self_address))
-        await second.when_terminated()                            # exiting nodes shut themselves down
+        # exiting nodes shut themselves down
+        await second.when_terminated()
 ```
 
 `listener` is any `Behavior[MemberEvent]`; it receives `MemberJoined`, `MemberUp`, `MemberLeft`, `MemberExited`, `MemberRemoved(member, previous_status)` and, under `ReachabilityEvent`, `UnreachableMember` / `ReachableMember`; `LeaderChanged`, `SelfUp` and `SelfRemoved` arrive when subscribing to `ClusterDomainEvent`, as do the internal `SeenChanged` and `ReachabilityChanged`, which fire on most gossip rounds, so a listener for every event should match what it wants and ignore the rest. The first seed node forms the cluster alone once the other seeds have not answered within `seed_node_timeout`; any other node asks every seed and joins the first to answer, and a node with no seed nodes waits for a `Join(address)` or `JoinSeedNodes(...)` command. All settings are `ClusterSettings` fields with Pekko's defaults in seconds (`gossip_interval`, `heartbeat_interval`, `acceptable_heartbeat_pause`, `failure_detector_threshold`, `monitored_by_nr_of_members`, `allow_weakly_up_members`, ...). A member that rejoins from a restarted process is a new incarnation: the old one is marked terminated and removed before the new one is let in. `terminate()`, or leaving the `async with`, stops a node gracefully through the coordinated shutdown below: it leaves, hands over, and only then stops. Actors on different nodes find each other through the Receptionist, next.
@@ -63,7 +73,9 @@ from pekko_py import ClusterSettings, KeepMajority, SplitBrainResolverSettings
 
 settings = ClusterSettings(
     seed_nodes=seeds,
-    downing=SplitBrainResolverSettings(strategy=KeepMajority(), stable_after=20.0, down_all_when_unstable=None),
+    downing=SplitBrainResolverSettings(
+        strategy=KeepMajority(), stable_after=20.0, down_all_when_unstable=None
+    ),
     down_removal_margin=0.0,  # 0: use stable_after
 )
 ```

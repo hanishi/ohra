@@ -1,5 +1,6 @@
 """Request-response with ask between two actors: ctx.ask turns the reply (or timeout) into
 a message of our own protocol (Pekko interaction patterns)."""
+
 import asyncio
 import logging
 import sys
@@ -8,7 +9,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Failure, Success, Try
+from pekko_py import (
+    ActorContext,
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    Failure,
+    Success,
+    Try,
+)
 
 
 @dataclass(frozen=True)

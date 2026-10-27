@@ -1,5 +1,6 @@
 """Request-response with ask from outside an actor: await the reply in plain async code
 (Pekko interaction patterns)."""
+
 import asyncio
 import sys
 from dataclasses import dataclass

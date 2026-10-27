@@ -1,4 +1,5 @@
 """Pool routers (org.apache.pekko.actor.typed.scaladsl.Routers)."""
+
 from __future__ import annotations
 
 import itertools

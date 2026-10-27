@@ -4,6 +4,7 @@ and wait times. The batch handler does a numpy update plus a fixed per-batch cos
 
     uv run --extra numpy python examples/batching.py
 """
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -28,7 +29,8 @@ class Reward:
 
 
 async def run(max_n: int, max_wait: float, rate: float | None) -> tuple[float, float, int]:
-    """rate=None: send as fast as possible. Otherwise send ``rate`` messages per second in 1ms bursts."""
+    """rate=None: send as fast as possible. Otherwise send ``rate`` messages per second in 1ms
+    bursts."""
     loop = asyncio.get_running_loop()
     totals = np.zeros(N_ARMS)
     latencies: list[float] = []

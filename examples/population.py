@@ -5,6 +5,7 @@ Thompson sampling is one vectorized draw per shard instead of one ask per arm.
 
     uv run --extra numpy python examples/population.py
 """
+
 import asyncio
 import random
 import sys
@@ -17,7 +18,16 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Routers, ask, batching
+from pekko_py import (
+    ActorContext,
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    Routers,
+    ask,
+    batching,
+)
 
 N_ARMS = 100_000
 N_SHARDS = 16
@@ -77,7 +87,8 @@ def population(arms: list[ActorRef[Cmd]], applied: list[int]) -> Behavior[Reward
 
 def shard(applied: list[int]) -> Behavior[Cmd]:
     @Behaviors.setup
-    def setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:  # per-actor arrays: the pool spawns this value 16 times
+    # per-actor arrays: the pool spawns this value 16 times
+    def setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         size = -(-N_ARMS // N_SHARDS)
         counts = np.zeros(size)
         totals = np.zeros(size)
@@ -104,7 +115,8 @@ def shard(applied: list[int]) -> Behavior[Cmd]:
 
 def shard_pool(applied: list[int]) -> Behavior[Cmd]:
     def key(m: Cmd) -> int:
-        return m.arm if isinstance(m, Reward) else m.shard  # hash(int) is the int, so shard k gets key k
+        # hash(int) is the int, so shard k gets key k
+        return m.arm if isinstance(m, Reward) else m.shard
 
     return Routers.pool(N_SHARDS, shard(applied)).with_consistent_hashing_routing(key)
 
@@ -147,7 +159,10 @@ async def measure[M](
         t0 = loop.time()
         best = await sample(system)
         sample_ms = (loop.time() - t0) * 1000
-    print(f"{name:8} spawn {spawn_s:5.2f}s  memory {mem_mb:7.1f}MB  updates {rate:9.0f}/s  sample {sample_ms:8.1f}ms  best arm {best}")
+    print(
+        f"{name:8} spawn {spawn_s:5.2f}s  memory {mem_mb:7.1f}MB  updates {rate:9.0f}/s  sample "
+        f"{sample_ms:8.1f}ms  best arm {best}"
+    )
 
 
 async def main() -> None:
@@ -164,10 +179,16 @@ async def main() -> None:
     async def sample_arms(_system: ActorSystem[Reward]) -> int:
         return best_of(await asyncio.gather(*(ask(a, sample_from(0), timeout=30) for a in arms)))
 
-    await measure("per-arm", lambda applied: population(arms, applied), lambda s, m: s.tell(m), sample_arms)
+    await measure(
+        "per-arm", lambda applied: population(arms, applied), lambda s, m: s.tell(m), sample_arms
+    )
 
     async def sample_shards(system: ActorSystem[Cmd]) -> int:
-        return best_of(await asyncio.gather(*(system.ask(sample_from(k), timeout=30) for k in range(N_SHARDS))))
+        return best_of(
+            await asyncio.gather(
+                *(system.ask(sample_from(k), timeout=30) for k in range(N_SHARDS))
+            )
+        )
 
     await measure("shards", shard_pool, lambda s, m: s.tell(m), sample_shards)
 

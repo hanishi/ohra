@@ -1,11 +1,13 @@
 """Serialization for messages that cross a node boundary.
 
 A message type is sendable once registered, with ``@remotable`` on a frozen dataclass or
-``Serialization.register(cls)``, as Pekko's serialization bindings. Encoding is self-describing JSON:
-a dataclass is ``{"$type": manifest, ...fields}``, an ``ActorRef`` is ``{"$ref": path}``, scalars pass
-through, lists and tuples become lists, string-keyed dicts become objects. Decoding needs no type hints,
-so union-typed fields and nested messages work; a field annotated ``tuple[...]`` or ``frozenset[...]`` is rebuilt as one.
+``Serialization.register(cls)``, as Pekko's serialization bindings. Encoding is self-describing
+JSON: a dataclass is ``{"$type": manifest, ...fields}``, an ``ActorRef`` is ``{"$ref": path}``,
+scalars pass through, lists and tuples become lists, string-keyed dicts become objects. Decoding
+needs no type hints, so union-typed fields and nested messages work; a field annotated
+``tuple[...]`` or ``frozenset[...]`` is rebuilt as one.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -42,7 +44,9 @@ class Serialization:
         manifest = name or klass.__name__
         existing = _registry.get(manifest)
         if existing is not None and existing is not klass:
-            raise SerializationError(f"manifest {manifest!r} is already taken by {existing.__qualname__}")
+            raise SerializationError(
+                f"manifest {manifest!r} is already taken by {existing.__qualname__}"
+            )
         _registry[manifest] = klass
         _manifests[klass] = manifest
         _hints[klass] = _hints_of(klass)
@@ -53,7 +57,8 @@ class Serialization:
         if value is None or isinstance(value, bool | int | float | str):
             return value
         if isinstance(value, ActorRef):
-            from ..cluster.sharding.shard import EntityRef  # an EntityRef is a region plus an id; the other node rebuilds it
+            # an EntityRef is a region plus an id; the other node rebuilds it
+            from ..cluster.sharding.shard import EntityRef
 
             if isinstance(value, EntityRef):
                 entity = cast(EntityRef[Any], value)
@@ -70,7 +75,9 @@ class Serialization:
             return out
         manifest = _manifests.get(type(value))
         if manifest is None or not dataclasses.is_dataclass(value):
-            raise SerializationError(f"{type(value).__qualname__} is not registered; decorate it with @remotable")
+            raise SerializationError(
+                f"{type(value).__qualname__} is not registered; decorate it with @remotable"
+            )
         encoded: dict[str, Json] = {"$type": manifest}
         for f in dataclasses.fields(value):
             encoded[f.name] = Serialization.encode(getattr(value, f.name), ref_path)
@@ -109,7 +116,8 @@ class Serialization:
 def _hints_of(klass: type[Any]) -> dict[str, Any]:
     try:
         return typing.get_type_hints(klass)
-    except Exception:  # a locally defined class whose annotations cannot be evaluated: no tuple rebuilding
+    # a locally defined class whose annotations cannot be evaluated: no tuple rebuilding
+    except Exception:
         return {}
 
 
@@ -149,6 +157,8 @@ def _rebuild(value: object, hint: Any) -> object:
             return rebuilt
         return items
     if isinstance(value, dict) and origin is dict and len(args) == 2:
-        mapping: dict[str, object] = {k: _rebuild(v, args[1]) for k, v in cast(dict[str, object], value).items()}
+        mapping: dict[str, object] = {
+            k: _rebuild(v, args[1]) for k, v in cast(dict[str, object], value).items()
+        }
         return mapping
     return cast(object, value)

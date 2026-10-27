@@ -1,4 +1,5 @@
 """Lifecycle signals, delivered to ``Receive.on_signal``."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

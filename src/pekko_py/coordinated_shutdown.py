@@ -1,8 +1,9 @@
-"""Apache Pekko's CoordinatedShutdown: a fixed sequence of phases, each with a timeout, run by ``ActorSystem.
-terminate()``, by the cluster when this node leaves or is downed, and, opted in, on a signal. Tasks are added to
-phases; a phase's tasks run concurrently, a failing task is logged and the run continues (Pekko's ``recover = on``),
-a phase that outlives its timeout is logged and its tasks are cancelled (Pekko lets them run on), and the last phase
-stops the system."""
+"""Apache Pekko's CoordinatedShutdown: a fixed sequence of phases, each with a timeout, run by
+``ActorSystem. terminate()``, by the cluster when this node leaves or is downed, and, opted in, on
+a signal. Tasks are added to phases; a phase's tasks run concurrently, a failing task is logged and
+the run continues (Pekko's ``recover = on``), a phase that outlives its timeout is logged and its
+tasks are cancelled (Pekko lets them run on), and the last phase stops the system."""
+
 from __future__ import annotations
 
 import asyncio
@@ -42,17 +43,20 @@ PHASES: tuple[Phase, ...] = (
     Phase("before-actor-system-terminate", DEFAULT_PHASE_TIMEOUT),
     Phase("actor-system-terminate", 10.0),
 )
-"""Pekko's phases in order, with reference.conf's timeouts; the three with their own timeout keep it when
-``default_phase_timeout`` changes, as in Pekko's config."""
+"""Pekko's phases in order, with reference.conf's timeouts; the three with their own timeout keep
+it when ``default_phase_timeout`` changes, as in Pekko's config."""
 PHASE_NAMES: frozenset[str] = frozenset(p.name for p in PHASES)
-_OWN_TIMEOUT: frozenset[str] = frozenset(p.name for p in PHASES if p.timeout != DEFAULT_PHASE_TIMEOUT)
+_OWN_TIMEOUT: frozenset[str] = frozenset(
+    p.name for p in PHASES if p.timeout != DEFAULT_PHASE_TIMEOUT
+)
 
 
 @dataclass(frozen=True)
 class CoordinatedShutdownSettings:
-    """Pekko's ``coordinated-shutdown`` settings, in seconds. ``run_on_signals`` installs a handler per signal that
-    runs the shutdown with ``JvmExitReason``; off by default, where Pekko's JVM shutdown hook is on. A handler owns its
-    signal for the whole event loop: use it only when this system owns the process's signals."""
+    """Pekko's ``coordinated-shutdown`` settings, in seconds. ``run_on_signals`` installs a handler
+    per signal that runs the shutdown with ``JvmExitReason``; off by default, where Pekko's JVM
+    shutdown hook is on. A handler owns its signal for the whole event loop: use it only when this
+    system owns the process's signals."""
 
     default_phase_timeout: float = DEFAULT_PHASE_TIMEOUT
     phase_timeouts: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
@@ -69,7 +73,7 @@ class CoordinatedShutdownSettings:
                 raise ValueError(f"timeout of phase {phase!r} must be > 0")
 
 
-# --- reasons --------------------------------------------------------------------------------------------------------
+# --- reasons -------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -94,13 +98,14 @@ class ClusterDowningReason(Reason): ...
 class ClusterLeavingReason(Reason): ...
 
 
-# --- the extension ----------------------------------------------------------------------------------------------------
+# --- the extension -------------------------------------------------------------------------------
 
 type Task = Callable[[], Awaitable[None]]
 
 
 class CoordinatedShutdown:
-    """``CoordinatedShutdown(system)``: add tasks to phases with ``add_task``; ``run(reason)`` runs the phases once."""
+    """``CoordinatedShutdown(system)``: add tasks to phases with ``add_task``; ``run(reason)`` runs
+    the phases once."""
 
     system: ActorSystem[Any]
     settings: CoordinatedShutdownSettings
@@ -113,7 +118,9 @@ class CoordinatedShutdown:
         return system.coordinated_shutdown
 
     @classmethod
-    def _start(cls, system: ActorSystem[Any], settings: CoordinatedShutdownSettings) -> CoordinatedShutdown:
+    def _start(
+        cls, system: ActorSystem[Any], settings: CoordinatedShutdownSettings
+    ) -> CoordinatedShutdown:
         self = object.__new__(cls)
         self.system = system
         self.settings = settings
@@ -124,7 +131,7 @@ class CoordinatedShutdown:
         self.add_task("actor-system-terminate", "terminate-system", self._terminate_system)
         return self
 
-    # --- timeouts ----------------------------------------------------------------------------------------------
+    # --- timeouts --------------------------------------------------------------------------------
 
     def timeout(self, phase: str) -> float:
         if phase not in PHASE_NAMES:
@@ -139,10 +146,11 @@ class CoordinatedShutdown:
     def total_timeout(self) -> float:
         return sum(self.timeout(p.name) for p in PHASES)
 
-    # --- tasks ---------------------------------------------------------------------------------------------------
+    # --- tasks -----------------------------------------------------------------------------------
 
     def add_task(self, phase: str, name: str, task: Task) -> None:
-        """Run ``task`` in ``phase``. Tasks in one phase run concurrently; the phase waits for them up to its timeout."""
+        """Run ``task`` in ``phase``. Tasks in one phase run concurrently; the phase waits for them
+        up to its timeout."""
         if phase not in PHASE_NAMES:
             raise ValueError(f"unknown phase {phase!r}; known phases: {sorted(PHASE_NAMES)}")
         if not name:
@@ -152,7 +160,9 @@ class CoordinatedShutdown:
             return
         self._tasks.setdefault(phase, []).append((name, task))
 
-    def add_actor_termination_task(self, phase: str, name: str, actor: ActorRef[Any], stop_msg: object | None = None) -> None:
+    def add_actor_termination_task(
+        self, phase: str, name: str, actor: ActorRef[Any], stop_msg: object | None = None
+    ) -> None:
         """Tell ``actor`` ``stop_msg``, if given, and wait for it to stop."""
         from .cell import _cell_of  # pyright: ignore[reportPrivateUsage]
 
@@ -169,7 +179,7 @@ class CoordinatedShutdown:
         self.system._final_terminate()  # pyright: ignore[reportPrivateUsage]
         await asyncio.shield(self.system._system_root.done)  # pyright: ignore[reportPrivateUsage]
 
-    # --- running -------------------------------------------------------------------------------------------------
+    # --- running ---------------------------------------------------------------------------------
 
     @property
     def shutdown_reason(self) -> Reason | None:
@@ -190,12 +200,21 @@ class CoordinatedShutdown:
             if not tasks:
                 _log.debug("Performing phase [%s] with [0] tasks", phase.name)
                 continue
-            _log.debug("Performing phase [%s] with [%d] tasks: [%s]", phase.name, len(tasks), ", ".join(n for n, _ in tasks))
+            _log.debug(
+                "Performing phase [%s] with [%d] tasks: [%s]",
+                phase.name,
+                len(tasks),
+                ", ".join(n for n, _ in tasks),
+            )
             timeout = self.timeout(phase.name)
             try:
-                await asyncio.wait_for(asyncio.gather(*(self._guarded(phase.name, n, t) for n, t in tasks)), timeout)
+                await asyncio.wait_for(
+                    asyncio.gather(*(self._guarded(phase.name, n, t) for n, t in tasks)), timeout
+                )
             except TimeoutError:
-                _log.warning("Coordinated shutdown phase [%s] timed out after %s s", phase.name, timeout)
+                _log.warning(
+                    "Coordinated shutdown phase [%s] timed out after %s s", phase.name, timeout
+                )
 
     @staticmethod
     async def _guarded(phase: str, name: str, task: Task) -> None:

@@ -1,6 +1,7 @@
 """Latency tail chopping: send the request to one replica, and after a short wait send it to
 the next too; the first reply wins. Trades extra load for a shorter latency tail
 (Pekko interaction patterns)."""
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -35,7 +36,8 @@ type Command[R] = _RequestTimeout | _FinalTimeout | _WrappedReply[R]
 
 
 def tail_chopping[Reply](
-    send_request: Callable[[int, ActorRef[Reply]], bool],  # (attempt, reply_to) -> False when out of replicas
+    # (attempt, reply_to) -> False when out of replicas
+    send_request: Callable[[int, ActorRef[Reply]], bool],
     next_request_after: float,
     reply_to: ActorRef[Reply],
     final_timeout: float,

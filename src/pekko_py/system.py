@@ -1,4 +1,5 @@
 """ActorSystem: owns the guardian actor. It is itself an ActorRef to the guardian."""
+
 from __future__ import annotations
 
 import asyncio
@@ -45,20 +46,29 @@ class ActorSystem[T](ActorRef[T]):
         if cluster is not None and address is None:
             raise ValueError("a cluster node needs an address=(host, port)")
         if management is not None and management.bootstrap is not None and cluster is None:
-            raise ValueError("cluster bootstrap needs a cluster node: pass cluster=ClusterSettings(...)")
+            raise ValueError(
+                "cluster bootstrap needs a cluster node: pass cluster=ClusterSettings(...)"
+            )
         self.address: UniqueAddress | None = unique_address(*address, name) if address else None
-        """Set when the system is reachable from other nodes; paths then read pekko://name@host:port/..."""
+        """Set when the system is reachable from other nodes; paths then read
+        pekko://name@host:port/..."""
         self.remoting: Remoting | None = Remoting(self, self.address) if self.address else None
         self._shutdown: asyncio.Task[None] | None = None
-        self._stop_requested = False  # set by _final_terminate; a guardian stopping on its own leaves it False
+        # set by _final_terminate; a guardian stopping on its own leaves it False
+        self._stop_requested = False
         root = self.address.root if self.address else f"pekko://{name}"
-        self._root: ActorCell[T] = ActorCell(self, None, "user", f"{root}/user", guardian, mailbox or MailboxSelector())
+        self._root: ActorCell[T] = ActorCell(
+            self, None, "user", f"{root}/user", guardian, mailbox or MailboxSelector()
+        )
         self.ignore_ref: ActorRef[Any] = FunctionRef(f"{root}/ignore", lambda _: None)
         """A ref that drops everything: pass it as reply_to when you do not want the reply."""
-        self._system_root: ActorCell[Any] = ActorCell(self, None, "system", f"{root}/system", Behaviors.empty)
+        self._system_root: ActorCell[Any] = ActorCell(
+            self, None, "system", f"{root}/system", Behaviors.empty
+        )
         """Pekko's /system guardian: hosts the receptionist and the cluster daemon."""
         self.receptionist: Receptionist | None = None
-        """The receptionist extension, reached as ``Receptionist(system)``; started below, as Pekko's."""
+        """The receptionist extension, reached as ``Receptionist(system)``; started below, as
+        Pekko's."""
         self.cluster: Cluster | None = None
         """The cluster extension, reached as ``Cluster(system)``."""
         self.cluster_singleton: ClusterSingleton | None = None
@@ -69,19 +79,24 @@ class ActorSystem[T](ActorRef[T]):
         from .coordinated_shutdown import CoordinatedShutdownSettings as _CSSettings
 
         self.coordinated_shutdown = _CoordinatedShutdown._start(self, shutdown or _CSSettings())  # pyright: ignore[reportPrivateUsage]
-        """Pekko's CoordinatedShutdown, reached as ``CoordinatedShutdown(system)``; before the cluster, which adds its tasks."""
+        """Pekko's CoordinatedShutdown, reached as ``CoordinatedShutdown(system)``; before the
+        cluster, which adds its tasks."""
         if cluster is not None:
             from .cluster.core import Cluster as _Cluster
 
             self.cluster = _Cluster._start(self, cluster)  # pyright: ignore[reportPrivateUsage]
         from .receptionist import Receptionist as _Receptionist
 
-        _Receptionist(self)  # after the cluster, so a cluster node's receptionist replicates from the start
+        # after the cluster, so a cluster node's receptionist replicates from the start
+        _Receptionist(self)
         from .management import PekkoManagement as _PekkoManagement
         from .management import PekkoManagementSettings as _PMSettings
 
-        self.management: PekkoManagement = _PekkoManagement._start(self, management or _PMSettings())  # pyright: ignore[reportPrivateUsage]
-        """Pekko Management, reached as ``PekkoManagement(system)``; binds nothing until ``start()``."""
+        self.management: PekkoManagement = _PekkoManagement._start(  # pyright: ignore[reportPrivateUsage]
+            self, management or _PMSettings()
+        )
+        """Pekko Management, reached as ``PekkoManagement(system)``; binds nothing until
+        ``start()``."""
         self._management_stop: asyncio.Task[None] | None = None
         # Shutdown order: user root, then system root, then remoting, however the user root went.
         self._root.done.add_done_callback(lambda _: self._user_root_stopped())
@@ -103,19 +118,22 @@ class ActorSystem[T](ActorRef[T]):
     async def offer(self, msg: T) -> None:
         await self._root.offer(msg)
 
-    async def ask[Res](self, make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float) -> Res:
+    async def ask[Res](
+        self, make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float
+    ) -> Res:
         return await ask(self, make, timeout)
 
     def resolve(self, path: str) -> ActorRef[Any]:
-        """The ref at a path: a local actor, a temp ref, or a RemoteRef on another node (needs an address).
-        Pekko's ActorRefResolver."""
+        """The ref at a path: a local actor, a temp ref, or a RemoteRef on another node (needs an
+        address). Pekko's ActorRefResolver."""
         if self.remoting is not None:
             return self.remoting.resolve(path)
         return resolve_local(self, path)
 
     def terminate(self) -> None:
-        """Run the coordinated shutdown, whose last phase stops the guardian and its subtree, then the system root;
-        complete it with when_terminated. With ``run_by_actor_system_terminate=False`` the roots stop at once."""
+        """Run the coordinated shutdown, whose last phase stops the guardian and its subtree, then
+        the system root; complete it with when_terminated. With
+        ``run_by_actor_system_terminate=False`` the roots stop at once."""
         if self._system_root.done.done():
             return
         if self.coordinated_shutdown.settings.run_by_actor_system_terminate:
@@ -146,10 +164,15 @@ class ActorSystem[T](ActorRef[T]):
 
     def _user_root_stopped(self) -> None:
         if self.remoting is not None:
-            self.remoting.listening.set()  # a cluster daemon still waiting to listen must not block the stop
-        if not self._stop_requested and self.coordinated_shutdown.settings.run_by_actor_system_terminate:
-            # The guardian stopped on its own: Pekko Typed's guardian wrapper turns that into terminate(), so a cluster
-            # node still leaves gracefully; the phases run after the user actors are gone.
+            # a cluster daemon still waiting to listen must not block the stop
+            self.remoting.listening.set()
+        if (
+            not self._stop_requested
+            and self.coordinated_shutdown.settings.run_by_actor_system_terminate
+        ):
+            # The guardian stopped on its own: Pekko Typed's guardian wrapper turns that into
+            # terminate(), so a cluster node still leaves gracefully; the phases run after the user
+            # actors are gone.
             from .coordinated_shutdown import ActorSystemTerminateReason
 
             self.coordinated_shutdown.run(ActorSystemTerminateReason())
@@ -167,7 +190,8 @@ class ActorSystem[T](ActorRef[T]):
     async def when_terminated(self) -> None:
         await asyncio.shield(self._root.done)
         await asyncio.shield(self._system_root.done)
-        self._close_remoting()  # the done callback above may still be queued behind this very resumption
+        # the done callback above may still be queued behind this very resumption
+        self._close_remoting()
         if self._shutdown is not None:
             await asyncio.shield(self._shutdown)
         self._stop_management()
@@ -175,7 +199,8 @@ class ActorSystem[T](ActorRef[T]):
             await asyncio.shield(self._management_stop)
         run = self.coordinated_shutdown._run  # pyright: ignore[reportPrivateUsage]
         if run is not None:
-            await asyncio.shield(run)  # the phases after the stop are only the run's own bookkeeping; no task outlives us
+            # the phases after the stop are only the run's own bookkeeping; no task outlives us
+            await asyncio.shield(run)
 
     @property
     def is_terminated(self) -> bool:
@@ -191,7 +216,8 @@ class ActorSystem[T](ActorRef[T]):
         if self.remoting is not None:
             try:
                 await self.remoting.listen()
-            except BaseException:  # the port is taken or the host is wrong: do not leave the guardian running
+            # the port is taken or the host is wrong: do not leave the guardian running
+            except BaseException:
                 self.terminate()
                 await self.when_terminated()
                 raise

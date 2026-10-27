@@ -1,4 +1,5 @@
 """Remoting: actors on other pekko-py nodes, by path, over TCP."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,7 @@ from pekko_py.ref import PromiseRef
 
 from .util import eventually, free_port
 
-# --- Task 2: addressing and resolve ---------------------------------------------------------------
+# --- Task 2: addressing and resolve --------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -32,11 +33,17 @@ async def test_system_address_shapes_paths():
         assert system.path == f"pekko://a@127.0.0.1:{port}/user"
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
         assert child.path == f"pekko://a@127.0.0.1:{port}/user/child"
-        assert system.address is not None and system.address.name == "a" and system.address.port == port
+        assert (
+            system.address is not None
+            and system.address.name == "a"
+            and system.address.port == port
+        )
 
 
 async def test_resolve_local_path_returns_the_local_ref():
-    async with ActorSystem(Behaviors.receive(parent), "a", address=("127.0.0.1", free_port())) as system:
+    async with ActorSystem(
+        Behaviors.receive(parent), "a", address=("127.0.0.1", free_port())
+    ) as system:
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
         assert system.resolve(child.path) is child
         assert system.resolve(system.path) is system._root.ref  # pyright: ignore[reportPrivateUsage]
@@ -140,7 +147,10 @@ async def test_tell_across_nodes():
 
 async def test_ask_across_nodes():
     log: list[str] = []
-    async with node(greeter(log), "a", free_port()) as a, node(Behaviors.ignore, "b", free_port()) as b:
+    async with (
+        node(greeter(log), "a", free_port()) as a,
+        node(Behaviors.ignore, "b", free_port()) as b,
+    ):
         remote: ActorRef[Greet] = b.resolve(a.path)
         assert await ask(remote, lambda r: Greet("pekko", r), timeout=1) == Greeted("hello pekko")
         assert await ask(remote, lambda r: Greet("again", r), timeout=1) == Greeted("hello again")
@@ -157,10 +167,17 @@ async def test_actor_asks_remote_with_ctx_ask():
     seen: list[str] = []
 
     def asker(target_path: str) -> Behavior[str | Answer]:
-        def on_message(ctx: ActorContext[str | Answer], msg: str | Answer) -> Behavior[str | Answer]:
+        def on_message(
+            ctx: ActorContext[str | Answer], msg: str | Answer
+        ) -> Behavior[str | Answer]:
             match msg:
                 case str(name):
-                    ctx.ask(ctx.system.resolve(target_path), lambda r: Greet(name, r), Answer, timeout=1)
+                    ctx.ask(
+                        ctx.system.resolve(target_path),
+                        lambda r: Greet(name, r),
+                        Answer,
+                        timeout=1,
+                    )
                 case Answer(Success(Greeted(text))):
                     seen.append(text)
                 case Answer(Failure(e)):
@@ -222,7 +239,10 @@ async def test_entity_ref_crosses_nodes():
 async def test_unknown_recipient_is_a_dead_letter(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
     log: list[str] = []
-    async with node(greeter(log), "a", free_port()) as a, node(Behaviors.ignore, "b", free_port()) as b:
+    async with (
+        node(greeter(log), "a", free_port()) as a,
+        node(Behaviors.ignore, "b", free_port()) as b,
+    ):
         b.resolve(f"{a.path}/nobody").tell(Greet("lost", b.ignore_ref))
         await eventually(lambda: any("nobody" in r.getMessage() for r in caplog.records))
         b.resolve(a.path).tell(Greet("found", b.ignore_ref))  # the connection is still usable
@@ -230,7 +250,10 @@ async def test_unknown_recipient_is_a_dead_letter(caplog: pytest.LogCaptureFixtu
 
 
 async def test_unregistered_message_raises_at_tell():
-    async with node(Behaviors.ignore, "a", free_port()) as a, node(Behaviors.ignore, "b", free_port()) as b:
+    async with (
+        node(Behaviors.ignore, "a", free_port()) as a,
+        node(Behaviors.ignore, "b", free_port()) as b,
+    ):
         from pekko_py import SerializationError
 
         with pytest.raises(SerializationError):
@@ -243,7 +266,9 @@ async def test_unreachable_node_dead_letters_without_blocking(caplog: pytest.Log
     async with node(Behaviors.ignore, "b", free_port()) as b:
         ref = b.resolve(f"pekko://a@127.0.0.1:{closed}/user")
         ref.tell(Greet("nobody home", b.ignore_ref))  # returns at once
-        await eventually(lambda: any("nobody home" in r.getMessage() for r in caplog.records), timeout=3)
+        await eventually(
+            lambda: any("nobody home" in r.getMessage() for r in caplog.records), timeout=3
+        )
 
 
 async def test_peer_restart_is_detected(caplog: pytest.LogCaptureFixture):
@@ -275,11 +300,12 @@ async def test_shutdown_closes_everything():
         b.resolve(a.path).tell(Greet("x", b.ignore_ref))
         await eventually(lambda: log == ["x"])
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:  # the listener released its port
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as a new listener would; TIME_WAIT pairs do not count
+        # as a new listener would; TIME_WAIT pairs do not count
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", port_a))
 
 
-# --- review fixes ----------------------------------------------------------------------------------
+# --- review fixes --------------------------------------------------------------------------------
 
 import gc as _gc  # noqa: E402
 
@@ -287,15 +313,20 @@ from pekko_py import SerializationError  # noqa: E402
 
 
 async def test_adapter_reply_refs_survive_garbage_collection():
-    """Replies to inline ctx.message_adapter refs must arrive for every message, not just the first."""
+    """Replies to inline ctx.message_adapter refs must arrive for every message, not just the
+    first."""
     log: list[str] = []
     seen: list[str] = []
 
     def asker(target_path: str) -> Behavior[str | Greeted]:
-        def on_message(ctx: ActorContext[str | Greeted], msg: str | Greeted) -> Behavior[str | Greeted]:
+        def on_message(
+            ctx: ActorContext[str | Greeted], msg: str | Greeted
+        ) -> Behavior[str | Greeted]:
             match msg:
                 case str(name):
-                    ctx.system.resolve(target_path).tell(Greet(name, ctx.message_adapter(lambda g: g)))
+                    ctx.system.resolve(target_path).tell(
+                        Greet(name, ctx.message_adapter(lambda g: g))
+                    )
                 case Greeted(text):
                     seen.append(text)
             return Behaviors.same
@@ -324,9 +355,12 @@ def ponger(msg: Ping) -> Behavior[Ping]:
 
 
 async def test_entity_ref_is_rebuilt_on_the_other_node():
-    """An EntityRef crosses the wire as region path plus id; the other node sends straight to the region."""
+    """An EntityRef crosses the wire as region path plus id; the other node sends straight to the
+    region."""
     region = Sharding.init(Entity(Counter, counter_entity))
-    async with ActorSystem(Behaviors.receive_message(ponger), "a", address=("127.0.0.1", free_port())) as a:
+    async with ActorSystem(
+        Behaviors.receive_message(ponger), "a", address=("127.0.0.1", free_port())
+    ) as a:
         async with ActorSystem(region, "b", address=("127.0.0.1", free_port())) as b:
             remote_ponger: ActorRef[Ping] = b.resolve(a.path)
             for entity_id in ("x", "y", "x"):
@@ -358,7 +392,10 @@ class Positive:
 async def test_bad_inbound_message_does_not_close_the_connection(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
     log: list[str] = []
-    async with node(greeter(log), "a", free_port()) as a, node(Behaviors.ignore, "b", free_port()) as b:
+    async with (
+        node(greeter(log), "a", free_port()) as a,
+        node(Behaviors.ignore, "b", free_port()) as b,
+    ):
         remote = b.resolve(a.path)
         object.__setattr__(bad := Positive(1), "n", -1)  # encodes fine, fails to decode on a
         remote.tell(bad)
@@ -368,7 +405,10 @@ async def test_bad_inbound_message_does_not_close_the_connection(caplog: pytest.
 
 
 async def test_oversize_message_raises_at_tell():
-    async with node(Behaviors.ignore, "a", free_port()) as a, node(Behaviors.ignore, "b", free_port()) as b:
+    async with (
+        node(Behaviors.ignore, "a", free_port()) as a,
+        node(Behaviors.ignore, "b", free_port()) as b,
+    ):
         with pytest.raises(SerializationError):
             b.resolve(a.path).tell(Greet("x" * (17 * 2**20), b.ignore_ref))
 

@@ -1,4 +1,5 @@
 """Serialization: registered dataclasses to self-describing JSON, refs as paths."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -56,7 +57,8 @@ def test_round_trip_nested_dataclasses_with_union_fields():
         "maybe": {"$type": "A", "n": 3},
         "many": [{"$type": "A", "n": 1}, {"$type": "B", "s": "y"}],
     }
-    assert Serialization.decode(data, lambda _p: _never()) == value  # tuple field comes back as a tuple
+    # tuple field comes back as a tuple
+    assert Serialization.decode(data, lambda _p: _never()) == value
 
 
 def _never() -> ActorRef[Any]:
@@ -123,4 +125,8 @@ def test_tuples_inside_unions_and_lists_are_rebuilt():
     value = MaybeTuple(xs=(1, 2), nested=[("a", 1)])
     back = Serialization.decode(Serialization.encode(value, lambda r: r.path), lambda _p: _never())
     assert back == value
-    assert isinstance(back, MaybeTuple) and isinstance(back.xs, tuple) and isinstance(back.nested[0], tuple)
+    assert (
+        isinstance(back, MaybeTuple)
+        and isinstance(back.xs, tuple)
+        and isinstance(back.nested[0], tuple)
+    )

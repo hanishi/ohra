@@ -1,4 +1,6 @@
-"""Members, Gossip merge, convergence and leader selection, as Gossip.scala and MembershipState.scala."""
+"""Members, Gossip merge, convergence and leader selection, as Gossip.scala and
+MembershipState.scala."""
+
 from __future__ import annotations
 
 import pytest
@@ -43,13 +45,28 @@ def test_member_transitions_follow_the_table():
 def test_highest_priority_of():
     assert highest_priority_of(up(A, 1), up(A, 1).with_status("down")).status == "down"
     assert highest_priority_of(Member(A, 0, "joining"), up(A, 1)).status == "up"
-    assert highest_priority_of(up(A, 1).with_status("leaving"), up(A, 1).with_status("leaving").with_status("exiting")).status == "exiting"
+    assert (
+        highest_priority_of(
+            up(A, 1).with_status("leaving"), up(A, 1).with_status("leaving").with_status("exiting")
+        ).status
+        == "exiting"
+    )
     assert highest_priority_of(up(A, 2), up(A, 1)).up_number == 1  # same status keeps the older
 
 
 def test_gossip_merge_is_union_with_highest_priority():
-    g1 = Gossip.empty().with_member(up(A, 1)).with_member(Member(B, 0, "joining")).increment(vclock_name(A))
-    g2 = Gossip.empty().with_member(up(A, 1)).with_member(up(B, 2)).with_member(Member(C, 0, "joining"))
+    g1 = (
+        Gossip.empty()
+        .with_member(up(A, 1))
+        .with_member(Member(B, 0, "joining"))
+        .increment(vclock_name(A))
+    )
+    g2 = (
+        Gossip.empty()
+        .with_member(up(A, 1))
+        .with_member(up(B, 2))
+        .with_member(Member(C, 0, "joining"))
+    )
     g2 = g2.increment(vclock_name(B)).seen(B)
     assert g1.version.compare(g2.version) == "concurrent"
     merged = g1.merge(g2)
@@ -63,7 +80,8 @@ def test_tombstoned_or_down_members_present_on_one_side_only_are_dropped():
     g2 = g1.remove(B, removal_timestamp=1.0)  # B removed on one side: tombstone
     assert g1.merge(g2).has_member(B) is False and g2.merge(g1).has_member(B) is False
     g3 = Gossip.empty().with_member(up(A, 1)).with_member(up(C, 3).with_status("down"))
-    assert g3.merge(Gossip.empty().with_member(up(A, 1))).has_member(C) is False  # Down on one side only: dropped
+    # Down on one side only: dropped
+    assert g3.merge(Gossip.empty().with_member(up(A, 1))).has_member(C) is False
     assert g3.merge(g3).member(C).status == "down"  # on both sides: kept
 
 
@@ -71,7 +89,9 @@ def test_mark_as_down_and_seen_digest():
     g = Gossip.empty().with_member(up(A, 1)).with_member(up(B, 2)).seen(A).seen(B)
     downed = g.mark_as_down(g.member(B))
     assert downed.member(B).status == "down" and downed.seen_by == (A,)
-    assert g.seen_digest != downed.seen_digest and g.seen_digest == g.only_seen(A).seen(B).seen_digest
+    assert (
+        g.seen_digest != downed.seen_digest and g.seen_digest == g.only_seen(A).seen(B).seen_digest
+    )
 
 
 def test_convergence_rules():
@@ -79,27 +99,53 @@ def test_convergence_rules():
     assert MembershipState(base.seen(A), A).convergence(frozenset()) is False  # B has not seen it
     assert MembershipState(base.seen(A).seen(B), A).convergence(frozenset()) is True
     unreachable_b = base.seen(A).seen(B).with_reachability(base.reachability.unreachable(A, B))
-    assert MembershipState(unreachable_b, A).convergence(frozenset()) is False  # unreachable Up member
-    assert MembershipState(unreachable_b.mark_as_down(unreachable_b.member(B)), A).convergence(frozenset()) is True
+    # unreachable Up member
+    assert MembershipState(unreachable_b, A).convergence(frozenset()) is False
+    assert (
+        MembershipState(unreachable_b.mark_as_down(unreachable_b.member(B)), A).convergence(
+            frozenset()
+        )
+        is True
+    )
     with_joiner = base.with_member(Member(C, 0, "joining")).seen(A).seen(B)
-    assert MembershipState(with_joiner, A).convergence(frozenset()) is True  # a Joining member need not have seen it
-    # ... unless nobody is Up or Leaving yet: then Joining and WeaklyUp members must have seen it too (firstMemberInDc)
-    only_joiners = Gossip.empty().with_member(Member(A, 0, "joining")).with_member(Member(B, 0, "weakly_up")).seen(A)
+    # a Joining member need not have seen it
+    assert MembershipState(with_joiner, A).convergence(frozenset()) is True
+    # ... unless nobody is Up or Leaving yet: then Joining and WeaklyUp members must have seen it
+    # too (firstMemberInDc)
+    only_joiners = (
+        Gossip.empty()
+        .with_member(Member(A, 0, "joining"))
+        .with_member(Member(B, 0, "weakly_up"))
+        .seen(A)
+    )
     assert MembershipState(only_joiners, A).convergence(frozenset()) is False
     assert MembershipState(only_joiners.seen(B), A).convergence(frozenset()) is True
 
 
 def test_leader_is_first_reachable_member_with_a_leader_status():
-    g = Gossip.empty().with_member(Member(A, 0, "joining")).with_member(up(B, 1)).with_member(up(C, 2))
+    g = (
+        Gossip.empty()
+        .with_member(Member(A, 0, "joining"))
+        .with_member(up(B, 1))
+        .with_member(up(C, 2))
+    )
     assert MembershipState(g, B).leader == B  # A is only Joining
     assert MembershipState(g.with_reachability(g.reachability.unreachable(C, B)), C).leader == C
     assert MembershipState(g.mark_as_down(g.member(B)), C).leader == C
-    assert MembershipState(Gossip.empty().with_member(Member(A, 0, "joining")), A).leader == A  # nobody Up yet: lowest
+    # nobody Up yet: lowest
+    assert MembershipState(Gossip.empty().with_member(Member(A, 0, "joining")), A).leader == A
     assert MembershipState(g, B).youngest_member == up(C, 2)
 
 
 def test_target_selector_prefers_nodes_that_have_not_seen_the_gossip():
-    g = Gossip.empty().with_member(up(A, 1)).with_member(up(B, 2)).with_member(up(C, 3)).seen(A).seen(B)
+    g = (
+        Gossip.empty()
+        .with_member(up(A, 1))
+        .with_member(up(B, 2))
+        .with_member(up(C, 3))
+        .seen(A)
+        .seen(B)
+    )
     state = MembershipState(g, A)
     selector = GossipTargetSelector(gossip_different_view_probability=1.0)
     assert selector.gossip_target(state) == C

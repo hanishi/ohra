@@ -4,6 +4,7 @@ Mirrors org.apache.pekko.actor.typed.scaladsl.Behaviors. A handler returns the
 next behavior; returning ``Behaviors.same`` keeps the current one.
 Handlers may be plain functions or coroutines.
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -192,8 +193,9 @@ class Behaviors:
 
     @staticmethod
     def persisted[S](store: Store[S]) -> _Persister[S]:
-        """Make a state-to-behavior factory persisted: ``@Behaviors.persisted(store)`` on ``def cart(items)``.
-        Calling the factory writes the state before becoming; ``factory.recover(id, empty)`` starts it."""
+        """Make a state-to-behavior factory persisted: ``@Behaviors.persisted(store)`` on ``def
+        cart(items)``. Calling the factory writes the state before becoming; ``factory.recover(id,
+        empty)`` starts it."""
         from .persistence import persisted
 
         return persisted(store)

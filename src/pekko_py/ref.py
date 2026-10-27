@@ -1,5 +1,6 @@
 """Actor references. ``ActorRef[T]`` is contravariant: a ref accepting a base
 message type can be used where a ref to a subtype is expected."""
+
 from __future__ import annotations
 
 import asyncio
@@ -51,7 +52,8 @@ class LocalRef[T](ActorRef[T]):
 
 
 class PromiseRef[T](ActorRef[T]):
-    """Temporary ref used by ask: the first message completes the future, later ones are dead letters."""
+    """Temporary ref used by ask: the first message completes the future, later ones are dead
+    letters."""
 
     __slots__ = ("_future", "_path")
 
@@ -65,18 +67,22 @@ class PromiseRef[T](ActorRef[T]):
 
     def tell(self, msg: T) -> None:
         if self._future.done():
-            _dead_letters.debug("dead letter to %s (ask already completed or timed out): %r", self._path, msg)
+            _dead_letters.debug(
+                "dead letter to %s (ask already completed or timed out): %r", self._path, msg
+            )
         else:
             self._future.set_result(msg)
 
 
 class FunctionRef[T](ActorRef[T]):
-    """A ref that runs a callback on tell. Used for message adapters, which name the actor they belong to in
-    ``owner`` so that watching the adapter watches that actor."""
+    """A ref that runs a callback on tell. Used for message adapters, which name the actor they
+    belong to in ``owner`` so that watching the adapter watches that actor."""
 
     __slots__ = ("_fn", "_path", "owner")
 
-    def __init__(self, path: str, fn: Callable[[T], None], owner: ActorCell[Any] | None = None) -> None:
+    def __init__(
+        self, path: str, fn: Callable[[T], None], owner: ActorCell[Any] | None = None
+    ) -> None:
         self._path = path
         self._fn = fn
         self.owner = owner

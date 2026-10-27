@@ -1,4 +1,5 @@
 """Shared memory handles. Skipped without numpy."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +10,8 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Success, Try
-from pekko_py.ext.shm import SharedArray
+from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Success, Try  # noqa: E402
+from pekko_py.ext.shm import SharedArray  # noqa: E402
 
 
 def total_in_worker(handle: SharedArray) -> float:
@@ -72,7 +73,8 @@ def scaler(pool: ProcessPoolExecutor) -> Behavior[Cmd]:
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Scale(data, reply_to):
-                    fut = loop.run_in_executor(pool, double_in_worker, data)  # ownership moves to the worker
+                    # ownership moves to the worker
+                    fut = loop.run_in_executor(pool, double_in_worker, data)
                     ctx.pipe_to_self(fut, lambda r: Scaled(r, reply_to))
                 case Scaled(Success(out), reply_to):
                     with out.open() as arr:  # the reply handed ownership back to us

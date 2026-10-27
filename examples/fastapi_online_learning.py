@@ -1,4 +1,4 @@
-"""Online learning behind FastAPI: a feedback loop between predictions and outcomes.
+r"""Online learning behind FastAPI: a feedback loop between predictions and outcomes.
 
 POST /predict returns a prediction with an id. POST /feedback brings back the true label for
 that id. A predictor actor micro-batches predictions into one numpy call per batch. A learner
@@ -7,16 +7,20 @@ every few hundred milliseconds takes gradient steps on it in a thread, then hand
 model to the predictor, which swaps it in between batches. The model starts untrained and
 learns only from feedback.
 
-    uv run --extra web --extra numpy python examples/fastapi_online_learning.py   # server + demo client
+    # server + demo client
+    uv run --extra web --extra numpy python examples/fastapi_online_learning.py
     uv run --extra web --extra numpy uvicorn examples.fastapi_online_learning:app --port 8000
 
 then open http://localhost:8000 for a page to play with: predict, report the outcome, watch
 the weights move.
 
-    curl -X POST localhost:8000/predict  -H 'content-type: application/json' -d '{"features": [1.2, -0.3, 0.8, 2.1]}'
-    curl -X POST localhost:8000/feedback -H 'content-type: application/json' -d '{"prediction_id": 1, "label": 1}'
+    curl -X POST localhost:8000/predict -H 'content-type: application/json' \
+        -d '{"features": [1.2, -0.3, 0.8, 2.1]}'
+    curl -X POST localhost:8000/feedback -H 'content-type: application/json' \
+        -d '{"prediction_id": 1, "label": 1}'
     curl localhost:8000/model
 """
+
 import asyncio
 import itertools
 import json
@@ -68,7 +72,9 @@ def untrained() -> Model:
     return Model(0, w, 0.0)
 
 
-def sgd_steps(model: Model, x: np.ndarray, y: np.ndarray, steps: int = 20, lr: float = 0.5) -> Model:
+def sgd_steps(
+    model: Model, x: np.ndarray, y: np.ndarray, steps: int = 20, lr: float = 0.5
+) -> Model:
     """Logistic regression gradient steps on a minibatch. Runs in a thread."""
     w, b = model.weights.copy(), model.bias
     for _ in range(steps):
@@ -106,7 +112,8 @@ type PredictorCmd = Predict | UseModel
 def predictor(learner: ActorRef["Predicted"]) -> Behavior[PredictorCmd]:
     @Behaviors.setup
     def setup(_ctx: ActorContext[PredictorCmd]) -> Behavior[PredictorCmd]:
-        current = [untrained()]  # the batching handler is a closure, so the live model lives in a cell
+        # the batching handler is a closure, so the live model lives in a cell
+        current = [untrained()]
         ids = itertools.count(1)
 
         def handle(batch: list[PredictorCmd]) -> None:
@@ -126,7 +133,8 @@ def predictor(learner: ActorRef["Predicted"]) -> Behavior[PredictorCmd]:
                 return
             model = current[0]
             x = np.array([r.features for r in requests])
-            probs = 1 / (1 + np.exp(-(x @ model.weights + model.bias)))  # one call for the whole batch
+            # one call for the whole batch
+            probs = 1 / (1 + np.exp(-(x @ model.weights + model.bias)))
             for r, p in zip(requests, probs.tolist()):
                 pid = next(ids)
                 r.reply_to.tell(Prediction(pid, float(p), model.version))
@@ -220,7 +228,9 @@ def learner(predict_ref: Callable[[], ActorRef[UseModel]]) -> Behavior[LearnerCm
                             return Behaviors.same
                         features, prob = found
                         minibatch.append((features, label))
-                        new_stats = Stats(stats.feedback + 1, stats.correct + ((prob > 0.5) == bool(label)))
+                        new_stats = Stats(
+                            stats.feedback + 1, stats.correct + ((prob > 0.5) == bool(label))
+                        )
                         reply_to.tell(FeedbackResult(True, new_stats.accuracy, model.version))
                         return learning(model, new_stats, stepping)
                     case _Step() if not stepping and len(minibatch) >= MIN_STEP_SAMPLES:
@@ -236,7 +246,14 @@ def learner(predict_ref: Callable[[], ActorRef[UseModel]]) -> Behavior[LearnerCm
                         ctx.log.error("step failed: %r", result.exception)
                         return learning(model, stats, stepping=False)
                     case GetModel(reply_to):
-                        reply_to.tell(ModelInfo(model.version, stats.feedback, stats.accuracy, tuple(model.weights.tolist())))
+                        reply_to.tell(
+                            ModelInfo(
+                                model.version,
+                                stats.feedback,
+                                stats.accuracy,
+                                tuple(model.weights.tolist()),
+                            )
+                        )
                     case _Step():
                         pass
                 return Behaviors.same
@@ -258,7 +275,8 @@ def service() -> Behavior[Cmd]:
     @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         refs: dict[str, ActorRef[Any]] = {}
-        lrn = ctx.spawn(learner(lambda: refs["predictor"]), "learner")  # the two refer to each other
+        # the two refer to each other
+        lrn = ctx.spawn(learner(lambda: refs["predictor"]), "learner")
         refs["predictor"] = ctx.spawn(predictor(lrn), "predictor")
         pred: ActorRef[Predict] = refs["predictor"]
 
@@ -276,7 +294,7 @@ def service() -> Behavior[Cmd]:
     return setup
 
 
-# --- HTTP ---------------------------------------------------------------------------------------------
+# --- HTTP ----------------------------------------------------------------------------------------
 
 
 actors = Actors(service(), "online")
@@ -295,19 +313,33 @@ class Outcome(BaseModel):
 @app.post("/predict")
 async def predict(body: Features, system: ActorSystem[Cmd] = actors.depends()) -> dict[str, Any]:
     p = await system.ask(lambda r: Predict(tuple(body.features), r), timeout=5)
-    return {"prediction_id": p.prediction_id, "probability": p.probability, "label": int(p.probability > 0.5), "model_version": p.model_version}
+    return {
+        "prediction_id": p.prediction_id,
+        "probability": p.probability,
+        "label": int(p.probability > 0.5),
+        "model_version": p.model_version,
+    }
 
 
 @app.post("/feedback")
 async def feedback(body: Outcome, system: ActorSystem[Cmd] = actors.depends()) -> dict[str, Any]:
     r = await system.ask(lambda r: Feedback(body.prediction_id, body.label, r), timeout=5)
-    return {"accepted": r.accepted, "online_accuracy": round(r.online_accuracy, 3), "model_version": r.model_version}
+    return {
+        "accepted": r.accepted,
+        "online_accuracy": round(r.online_accuracy, 3),
+        "model_version": r.model_version,
+    }
 
 
 @app.get("/model")
 async def model(system: ActorSystem[Cmd] = actors.depends()) -> dict[str, Any]:
     m = await system.ask(GetModel, timeout=5)
-    return {"version": m.version, "feedback_count": m.feedback_count, "online_accuracy": round(m.online_accuracy, 3), "weights": m.weights}
+    return {
+        "version": m.version,
+        "feedback_count": m.feedback_count,
+        "online_accuracy": round(m.online_accuracy, 3),
+        "weights": m.weights,
+    }
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>online learning</title>
@@ -356,7 +388,7 @@ async function run(n){$("run").disabled=true;for(let i=1;i<=n;i++){randomize();c
  if(i%10==0){$("prog").textContent=`round ${i}: accuracy ${(r.online_accuracy*100).toFixed(1)}%, model v${r.model_version}`;model()}}
  $("run").disabled=false;model()}
 $("rnd").onclick=randomize;$("predict").onclick=predict;$("y1").onclick=()=>feedback(1);$("y0").onclick=()=>feedback(0);$("run").onclick=()=>run(100);model();
-</script>"""
+</script>"""  # noqa: E501 (a minified page)
 
 
 @app.get("/")
@@ -364,12 +396,14 @@ async def index() -> HTMLResponse:
     return HTMLResponse(PAGE)
 
 
-# --- demo client: the world has a hidden rule; the service learns it from feedback alone ------------
+# --- demo client: the world has a hidden rule; the service learns it from feedback alone ---------
 
 
 def _call(base: str, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(base + path, data=data, method=method, headers={"content-type": "application/json"})
+    req = urllib.request.Request(
+        base + path, data=data, method=method, headers={"content-type": "application/json"}
+    )
     with urllib.request.urlopen(req) as r:
         return json.loads(r.read())
 
@@ -388,10 +422,20 @@ async def demo(rounds: int = 600) -> None:
         for i in range(1, rounds + 1):
             x = rng.normal(size=N_FEATURES)
             p = await asyncio.to_thread(_call, base, "POST", "/predict", {"features": x.tolist()})
-            label = int(x @ hidden_rule + rng.normal(scale=0.5) > 0)  # the outcome the world reveals
-            r = await asyncio.to_thread(_call, base, "POST", "/feedback", {"prediction_id": p["prediction_id"], "label": label})
+            # the outcome the world reveals
+            label = int(x @ hidden_rule + rng.normal(scale=0.5) > 0)
+            r = await asyncio.to_thread(
+                _call,
+                base,
+                "POST",
+                "/feedback",
+                {"prediction_id": p["prediction_id"], "label": label},
+            )
             if i % 100 == 0:
-                print(f"round {i:4}  model v{r['model_version']:<3}  online accuracy {r['online_accuracy']:.3f}")
+                print(
+                    f"round {i:4}  model v{r['model_version']:<3}  online accuracy "
+                    f"{r['online_accuracy']:.3f}"
+                )
         print(await asyncio.to_thread(_call, base, "GET", "/model"))
     finally:
         server.should_exit = True

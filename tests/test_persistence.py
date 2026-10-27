@@ -1,4 +1,5 @@
 """Persisted state: the latest state is written before a reply and recovered in one read."""
+
 from __future__ import annotations
 
 import asyncio
@@ -171,7 +172,11 @@ async def test_then_run_runs_after_the_write_in_order():
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add(n, _):
-                    return runner(total + n).then_run(lambda: seen.append("first")).then_run(lambda: seen.append("second"))
+                    return (
+                        runner(total + n)
+                        .then_run(lambda: seen.append("first"))
+                        .then_run(lambda: seen.append("second"))
+                    )
                 case Get(reply_to):
                     reply_to.tell(total)
                 case Boom():
@@ -196,7 +201,9 @@ async def test_same_and_reads_do_not_write():
     assert store.events == [] and store.states == {}
 
 
-def watcher(child_behavior: Behavior[Cmd], log: list[str], holder: list[ActorRef[Cmd]]) -> Behavior[str]:
+def watcher(
+    child_behavior: Behavior[Cmd], log: list[str], holder: list[ActorRef[Cmd]]
+) -> Behavior[str]:
     """Spawns the child, watches it, and records how it ended."""
 
     def setup(ctx: ActorContext[str]) -> Behavior[str]:
@@ -230,7 +237,9 @@ async def test_failed_write_fails_the_actor_before_any_reply():
 
 async def test_restart_recovers_the_committed_state():
     store, log = InMemoryStore[int](), []
-    supervised = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(SupervisorStrategy.restart())
+    supervised = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(
+        SupervisorStrategy.restart()
+    )
     async with ActorSystem(supervised, "s") as system:
         system.tell(Add(1))
         assert await system.ask(Get, timeout=1) == 1
@@ -250,7 +259,8 @@ async def test_revision_conflict_fails_the_second_writer():
         await eventually(lambda: bool(holder_a) and bool(holder_b))
         assert await ask(holder_a[0], lambda r: Add(1, r), timeout=1) == 1
         with pytest.raises(AskTimeoutError):
-            await ask(holder_b[0], lambda r: Add(10, r), timeout=0.05)  # b still thinks revision 0: conflict
+            # b still thinks revision 0: conflict
+            await ask(holder_b[0], lambda r: Add(10, r), timeout=0.05)
         await eventually(lambda: "failed RevisionConflictError" in log)
     assert store.states["c"] == (1, 1)
 
@@ -265,9 +275,13 @@ async def test_persist_outside_recover_fails_the_actor():
 
 async def test_persisted_entity_survives_passivation():
     store, log = InMemoryStore[int](), []
-    Counter = EntityTypeKey[Cmd]("Counter")
+    counter_key = EntityTypeKey[Cmd]("Counter")
     persisted = counter(store, log)
-    region = Sharding.init(Entity(Counter, lambda e: persisted.recover(e.entity_id, empty=0)).with_passivate_after(0.02))
+    region = Sharding.init(
+        Entity(
+            counter_key, lambda e: persisted.recover(e.entity_id, empty=0)
+        ).with_passivate_after(0.02)
+    )
     async with ActorSystem(region, "s") as system:
         c = Sharding.entity_ref_for(system, "c")
         c.tell(Add(3))
@@ -278,7 +292,7 @@ async def test_persisted_entity_survives_passivation():
     assert log == ["become 0", "become 3", "become 3"]
 
 
-# --- Task 3: SqliteStore ----------------------------------------------------------------------------
+# --- Task 3: SqliteStore -------------------------------------------------------------------------
 
 import contextlib  # noqa: E402
 import json  # noqa: E402
@@ -312,7 +326,9 @@ def test_sqlite_store_bad_directory_raises_at_construction(tmp_path: Path):
 
 async def test_sqlite_store_custom_codec(tmp_path: Path):
     path = tmp_path / "s.db"
-    store = SqliteStore[dict[str, int]](path, codec=(lambda s: json.dumps(s).encode(), lambda b: json.loads(b)))
+    store = SqliteStore[dict[str, int]](
+        path, codec=(lambda s: json.dumps(s).encode(), lambda b: json.loads(b))
+    )
     await store.save("a", {"x": 1}, 1)
     assert await store.load("a") == ({"x": 1}, 1)
     with contextlib.closing(sqlite3.connect(path)) as conn:
@@ -331,11 +347,12 @@ async def test_state_survives_a_process_restart(tmp_path: Path):
     async with system_on(SqliteStore[int](path)) as system:
         system.tell(Add(4))
         assert await system.ask(Get, timeout=1) == 4
-    async with system_on(SqliteStore[int](path)) as system:  # a new store object, as after a process restart
+    # a new store object, as after a process restart
+    async with system_on(SqliteStore[int](path)) as system:
         assert await system.ask(Get, timeout=1) == 4
 
 
-# --- review fixes -----------------------------------------------------------------------------------
+# --- review fixes --------------------------------------------------------------------------------
 
 import logging  # noqa: E402
 
@@ -355,7 +372,8 @@ async def test_persist_from_another_factory_fails_the_actor():
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add():
-                    return other("hello")  # a Persist from a different factory: must not write into store_a
+                    # a Persist from a different factory: must not write into store_a
+                    return other("hello")
                 case Get(reply_to):
                     reply_to.tell(total)
                 case Boom():
@@ -379,7 +397,8 @@ async def test_child_of_a_persisted_actor_cannot_use_its_incarnation():
         def on_message(ctx: ActorContext[Cmd], msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add():
-                    ctx.watch(ctx.spawn(parent(99), "child"))  # a Persist spawned directly, in a child task
+                    # a Persist spawned directly, in a child task
+                    ctx.watch(ctx.spawn(parent(99), "child"))
                 case Get(reply_to):
                     reply_to.tell(total)
                 case Boom():
@@ -400,7 +419,9 @@ async def test_child_of_a_persisted_actor_cannot_use_its_incarnation():
     assert store.states == {}  # the child did not write 99 under the parent's id
 
 
-async def test_effect_failure_after_the_write_does_not_roll_back_memory(caplog: pytest.LogCaptureFixture):
+async def test_effect_failure_after_the_write_does_not_roll_back_memory(
+    caplog: pytest.LogCaptureFixture,
+):
     caplog.set_level(logging.ERROR, logger="pekko_py.actor")
     store, log = InMemoryStore[int](), []
 
@@ -425,7 +446,9 @@ async def test_effect_failure_after_the_write_does_not_roll_back_memory(caplog: 
         system.tell(Add(1))
         assert await system.ask(Get, timeout=1) == 1  # memory matches the committed store
     assert store.states["f"] == (1, 1)
-    assert any("effect failed" in r.getMessage() or "effect" in r.getMessage() for r in caplog.records)
+    assert any(
+        "effect failed" in r.getMessage() or "effect" in r.getMessage() for r in caplog.records
+    )
 
 
 async def test_factory_failure_after_the_write_sends_no_reply():
@@ -452,14 +475,16 @@ async def test_factory_failure_after_the_write_sends_no_reply():
     async with ActorSystem(watcher(picky.recover("p", empty=0), log, holder), "s"):
         await eventually(lambda: bool(holder))
         with pytest.raises(AskTimeoutError):
-            await ask(holder[0], lambda r: Add(2, r), timeout=0.05)  # written, but the behavior could not be built
+            # written, but the behavior could not be built
+            await ask(holder[0], lambda r: Add(2, r), timeout=0.05)
         await eventually(lambda: "failed ValueError" in log)
     assert store.states["p"] == (2, 1)
 
 
 def test_sqlite_store_rejects_in_memory_databases():
     with pytest.raises(ValueError):
-        SqliteStore[int](":memory:")  # each call opens a fresh connection, so the table would vanish between calls
+        # each call opens a fresh connection, so the table would vanish between calls
+        SqliteStore[int](":memory:")
 
 
 def _open_store(path: str, barrier: object, out: object) -> None:
@@ -474,15 +499,19 @@ def _open_store(path: str, barrier: object, out: object) -> None:
 
 
 def test_sqlite_store_opens_a_fresh_database_from_racing_processes(tmp_path):
-    # Pods starting together on one shared file: switching a fresh database to WAL fails at once with
-    # "database is locked" for the losers (SQLite's deadlock avoidance skips the busy timeout), so it is retried.
+    # Pods starting together on one shared file: switching a fresh database to WAL fails at once
+    # with "database is locked" for the losers (SQLite's deadlock avoidance skips the busy
+    # timeout), so it is retried.
     import multiprocessing as mp
 
     ctx = mp.get_context("spawn")
     results: list[str] = []
     for i in range(10):
         barrier, out = ctx.Barrier(4), ctx.Queue()
-        procs = [ctx.Process(target=_open_store, args=(str(tmp_path / f"r{i}.db"), barrier, out)) for _ in range(4)]
+        procs = [
+            ctx.Process(target=_open_store, args=(str(tmp_path / f"r{i}.db"), barrier, out))
+            for _ in range(4)
+        ]
         for p in procs:
             p.start()
         results += [out.get(timeout=30) for _ in procs]

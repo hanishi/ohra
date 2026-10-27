@@ -3,6 +3,7 @@ narrowed refs through contravariance, message adapters, and DeathWatch.
 
     uv run python examples/chatroom.py
 """
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -72,7 +73,8 @@ def chat_room(sessions: tuple[ActorRef[SessionCommand], ...] = ()) -> Behavior[R
                     client.tell(SessionDenied(f"{screen_name!r} is taken"))
                     return Behaviors.same
                 ses = ctx.spawn(session(ctx.self, screen_name, client), screen_name)
-                client.tell(SessionGranted(ses))  # ActorRef[SessionCommand] narrows to ActorRef[PostMessage]
+                # ActorRef[SessionCommand] narrows to ActorRef[PostMessage]
+                client.tell(SessionGranted(ses))
                 return chat_room((*sessions, ses))
             case PublishSessionMessage(screen_name, message):
                 for s in sessions:
@@ -128,7 +130,8 @@ def main_actor(ctx: ActorContext[None]) -> Behavior[None]:
     @Behaviors.receive_signal
     def on_signal(ctx: ActorContext[None], sig: Signal) -> Behavior[None]:
         if isinstance(sig, Terminated):
-            return Behaviors.same if len(ctx.children) > 1 else Behaviors.stopped()  # only the room left
+            # only the room left
+            return Behaviors.same if len(ctx.children) > 1 else Behaviors.stopped()
         return Behaviors.unhandled
 
     return on_signal

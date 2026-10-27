@@ -1,4 +1,5 @@
-"""FastAPI integration: an ActorSystem owned by the app's lifespan, reached through a typed dependency.
+"""FastAPI integration: an ActorSystem owned by the app's lifespan, reached through a typed
+dependency.
 
     actors = Actors(guardian, "app")
     app = FastAPI(lifespan=actors.lifespan)
@@ -9,6 +10,7 @@
 
 An ``AskTimeoutError`` escaping a route becomes a 504. Requires the ``web`` extra.
 """
+
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
@@ -25,7 +27,8 @@ from ..system import ActorSystem
 
 class Actors[T]:
     def __init__(self, guardian: Behavior[T], name: str = "app", **settings: Any) -> None:
-        """``settings`` go to ``ActorSystem``: ``address``, ``cluster``, ``shutdown``, ``management``, ``mailbox``."""
+        """``settings`` go to ``ActorSystem``: ``address``, ``cluster``, ``shutdown``,
+        ``management``, ``mailbox``."""
         self._guardian = guardian
         self._name = name
         self._settings = settings
@@ -35,7 +38,9 @@ class Actors[T]:
     def system(self) -> ActorSystem[T]:
         """The running system. Only valid between startup and shutdown."""
         if self._system is None:
-            raise RuntimeError("ActorSystem is not running: pass actors.lifespan to FastAPI(lifespan=...)")
+            raise RuntimeError(
+                "ActorSystem is not running: pass actors.lifespan to FastAPI(lifespan=...)"
+            )
         return self._system
 
     @asynccontextmanager

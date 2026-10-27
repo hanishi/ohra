@@ -31,13 +31,20 @@ The decider is Pekko's lowest-address rule. If any probe saw a cluster, join its
 Apache Pekko Management, narrowed to what a Kubernetes deployment uses: an HTTP endpoint on port 7626 with the health checks Kubernetes probes (`/startup`, `/ready`, `/alive`; a cluster node is ready when it is Up or WeaklyUp), read-only cluster routes (`/cluster/members`, `/cluster/members/{address}`, `/cluster/shards/{type}`), and cluster bootstrap: with no seed nodes configured, each node lists its peers through service discovery, probes their endpoints for seed nodes, joins any cluster it sees, and when nobody has one and the peer set has been stable for `stable_margin`, the lowest address joins itself. `KubernetesApiServiceDiscovery` lists the pods carrying the app label through the API server with the pod's service account; `ConfigServiceDiscovery` is a fixed list for local runs, and any `ServiceDiscovery` subclass with one `lookup` method works.
 
 ```python
-from pekko_py import ClusterBootstrapSettings, KubernetesApiServiceDiscovery, PekkoManagement, PekkoManagementSettings
+from pekko_py import (
+    ClusterBootstrapSettings,
+    KubernetesApiServiceDiscovery,
+    PekkoManagement,
+    PekkoManagementSettings,
+)
 
 management = PekkoManagementSettings(
     discovery=KubernetesApiServiceDiscovery(),
     bootstrap=ClusterBootstrapSettings(service_name="myapp", port_name="management"),
 )
-system = ActorSystem(guardian, "myapp", address=(pod_ip, 2552), cluster=ClusterSettings(), management=management)
+system = ActorSystem(
+    guardian, "myapp", address=(pod_ip, 2552), cluster=ClusterSettings(), management=management
+)
 await PekkoManagement(system).start()  # binds 7626, then starts the bootstrap
 PekkoManagement(system).health.add_readiness_check("db", db.ping)  # your own checks join Pekko's
 ```

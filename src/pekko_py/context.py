@@ -1,4 +1,5 @@
 """ActorContext: the actor's handle on itself and the system. Only use it from inside the actor."""
+
 from __future__ import annotations
 
 import logging
@@ -91,10 +92,12 @@ class ActorContext[T]:
         self._cell.pipe_to_self(awaitable, adapt)
 
     def message_adapter[U](self, f: Callable[[U], T]) -> ActorRef[U]:
-        """A ref that accepts U and delivers f(u) to this actor. f runs inside the actor.
-        The actor keeps the adapter for its lifetime, so create adapters in setup rather than per message."""
+        """A ref that accepts U and delivers f(u) to this actor. f runs inside the actor. The actor
+        keeps the adapter for its lifetime, so create adapters in setup rather than per message."""
         ref: FunctionRef[U] = FunctionRef(
-            f"{self._cell.path}/$adapter", lambda u: self._cell.send_adapted(lambda: f(u)), owner=self._cell
+            f"{self._cell.path}/$adapter",
+            lambda u: self._cell.send_adapted(lambda: f(u)),
+            owner=self._cell,
         )
         self._cell.adapters.append(ref)
         return ref

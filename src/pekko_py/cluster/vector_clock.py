@@ -1,4 +1,5 @@
 """VectorClock, as Pekko's: one counter per node, compared causally."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

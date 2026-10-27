@@ -1,5 +1,6 @@
-"""Cluster singleton across nodes: one instance on the oldest member, hand-over when it leaves, proxies on every
-node, as ClusterSingletonManager.scala and ClusterSingletonProxy.scala."""
+"""Cluster singleton across nodes: one instance on the oldest member, hand-over when it leaves,
+proxies on every node, as ClusterSingletonManager.scala and ClusterSingletonProxy.scala."""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +35,9 @@ from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node, unreachable_ports
 
 FAST_SINGLETON = ClusterSingletonSettings(
-    hand_over_retry_interval=0.05, min_number_of_hand_over_retries=5, singleton_identification_interval=0.02
+    hand_over_retry_interval=0.05,
+    min_number_of_hand_over_retries=5,
+    singleton_identification_interval=0.02,
 )
 
 type Log = list[tuple[str, int, float]]
@@ -79,14 +82,29 @@ def counter(log: Log, port: int) -> Behavior[Hit | Crash]:
     return Behaviors.setup(setup)
 
 
-def node(port: int, seeds: list[int], exiting_timeout: float = 1.0, **settings: Any) -> ActorSystem[Any]:
-    """A node whose hand-off phases (region shutdown and cluster-exiting) are bounded by ``exiting_timeout``."""
-    phases = {"cluster-sharding-shutdown-region": exiting_timeout, "cluster-exiting": exiting_timeout}
-    return cluster_node("c", port, seeds, shutdown=CoordinatedShutdownSettings(phase_timeouts=phases), **settings)
+def node(
+    port: int, seeds: list[int], exiting_timeout: float = 1.0, **settings: Any
+) -> ActorSystem[Any]:
+    """A node whose hand-off phases (region shutdown and cluster-exiting) are bounded by
+    ``exiting_timeout``."""
+    phases = {
+        "cluster-sharding-shutdown-region": exiting_timeout,
+        "cluster-exiting": exiting_timeout,
+    }
+    return cluster_node(
+        "c", port, seeds, shutdown=CoordinatedShutdownSettings(phase_timeouts=phases), **settings
+    )
 
 
-def start(system: ActorSystem[Any], log: Log, port: int, settings: ClusterSingletonSettings = FAST_SINGLETON) -> ActorRef[Hit | Crash]:
-    return ClusterSingleton(system).init(SingletonActor(counter(log, port), "counter").with_settings(settings))
+def start(
+    system: ActorSystem[Any],
+    log: Log,
+    port: int,
+    settings: ClusterSingletonSettings = FAST_SINGLETON,
+) -> ActorRef[Hit | Crash]:
+    return ClusterSingleton(system).init(
+        SingletonActor(counter(log, port), "counter").with_settings(settings)
+    )
 
 
 def starts(log: Log) -> list[int]:
@@ -134,7 +152,8 @@ async def test_messages_before_identification_are_buffered():
         start(a, log, p1)
         proxy = start(b, log, p2)
         replies: list[int] = []
-        probes = [FunctionRef("probe", replies.append) for _ in range(3)]  # held here: a temp reply path lives as long as its ref
+        # held here: a temp reply path lives as long as its ref
+        probes = [FunctionRef("probe", replies.append) for _ in range(3)]
         for p in probes:
             proxy.tell(Hit(p))  # before the proxy has found the instance
         assert await ask(proxy, Hit, timeout=3) == 4
@@ -181,7 +200,14 @@ async def test_crashed_oldest_is_replaced_only_after_removal():
         proxies = [start(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
         assert await ask(proxies[2], Hit, timeout=3) == 1
         removed_at: list[float] = []
-        Cluster(b).subscriptions.tell(Subscribe(FunctionRef("removed", lambda _e: removed_at.append(asyncio.get_running_loop().time())), MemberRemoved))
+        Cluster(b).subscriptions.tell(
+            Subscribe(
+                FunctionRef(
+                    "removed", lambda _e: removed_at.append(asyncio.get_running_loop().time())
+                ),
+                MemberRemoved,
+            )
+        )
         await crash(a)
         await eventually(lambda: unreachable_ports(b) == {p1}, timeout=5)
         await asyncio.sleep(0.3)
@@ -190,8 +216,9 @@ async def test_crashed_oldest_is_replaced_only_after_removal():
         await eventually(lambda: starts(log) == [p1, p2], timeout=5)
         start_at = next(t for kind, port, t in log if kind == "start" and port == p2)
         assert removed_at and removed_at[0] <= start_at
-        # until c has seen the removal its proxy still points at the dead instance, as Pekko's does until its
-        # remote DeathWatch fires on removal; a message sent in that window is lost on both
+        # until c has seen the removal its proxy still points at the dead instance, as Pekko's does
+        # until its remote DeathWatch fires on removal; a message sent in that window is lost on
+        # both
         await eventually(lambda: all_up(c, 2), timeout=5)
         assert await ask(proxies[2], Hit, timeout=3) == 1
 
@@ -221,8 +248,12 @@ async def test_two_leaves_in_a_row_keep_one_instance():
         assert await ask(proxies[3], Hit, timeout=3) == 1
         Cluster(nodes[3]).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         Cluster(nodes[3]).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
-        await asyncio.wait_for(asyncio.gather(nodes[0].when_terminated(), nodes[1].when_terminated()), timeout=8)
-        await eventually(lambda: starts(log)[-1:] == [p3] and len(starts(log)) - len(stops(log)) == 1, timeout=5)
+        await asyncio.wait_for(
+            asyncio.gather(nodes[0].when_terminated(), nodes[1].when_terminated()), timeout=8
+        )
+        await eventually(
+            lambda: starts(log)[-1:] == [p3] and len(starts(log)) - len(stops(log)) == 1, timeout=5
+        )
         assert never_two_at_once(log)
         assert await ask(proxies[3], Hit, timeout=3) == 1
 
@@ -240,9 +271,12 @@ async def test_a_failed_instance_is_not_restarted_and_proxies_buffer():
         with pytest.raises(AskTimeoutError):
             await ask(proxy_b, Hit, timeout=0.3)  # buffered: nobody is there to answer
         assert starts(log) == [p1]
-        await asyncio.sleep(0.1)  # past one identification interval: b's proxy has noticed the instance is gone
-        pending = asyncio.ensure_future(ask(proxy_b, Hit, timeout=5))  # buffered now, not sent into the void
-        Cluster(b).manager.tell(Leave(Address("c", "127.0.0.1", p1)))  # a hands over nothing; b starts a fresh instance
+        # past one identification interval: b's proxy has noticed the instance is gone
+        await asyncio.sleep(0.1)
+        # buffered now, not sent into the void
+        pending = asyncio.ensure_future(ask(proxy_b, Hit, timeout=5))
+        # a hands over nothing; b starts a fresh instance
+        Cluster(b).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         assert await pending == 1
         assert starts(log) == [p1, p2]
 
@@ -252,7 +286,12 @@ async def test_buffer_size_drops_the_oldest_message():
     async with node(port, [port]) as a:
         await eventually(lambda: all_up(a, 1), timeout=3)
         log: Log = []
-        proxy = start(a, log, port, ClusterSingletonSettings(singleton_identification_interval=0.02, buffer_size=1))
+        proxy = start(
+            a,
+            log,
+            port,
+            ClusterSingletonSettings(singleton_identification_interval=0.02, buffer_size=1),
+        )
         received: list[str] = []
         for name in ("first", "second", "third"):
             proxy.tell(Hit(FunctionRef(name, lambda _n, name=name: received.append(name))))
@@ -262,8 +301,8 @@ async def test_buffer_size_drops_the_oldest_message():
 
 
 async def test_a_leaver_whose_successor_never_answers_gives_up_after_the_take_over_retries():
-    """As Pekko's WasOldest with selfExited: after max_take_over_retries the leaver stops its instance and exits,
-    well before the exiting-phase timeout."""
+    """As Pekko's WasOldest with selfExited: after max_take_over_retries the leaver stops its
+    instance and exits, well before the exiting-phase timeout."""
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:
         a = await stack.enter_async_context(node(p1, [p1], exiting_timeout=2.0))
@@ -279,7 +318,10 @@ async def test_a_leaver_whose_successor_never_answers_gives_up_after_the_take_ov
 
         def deaf_to_hand_over(frame: Json) -> None:  # a never hears b's hand-over requests
             message = frame.get("message") if isinstance(frame, dict) else None
-            if isinstance(message, dict) and message.get("$type") in ("TakeOverFromMe", "HandOverToMe"):
+            if isinstance(message, dict) and message.get("$type") in (
+                "TakeOverFromMe",
+                "HandOverToMe",
+            ):
                 return
             deliver(frame)
 
@@ -287,14 +329,15 @@ async def test_a_leaver_whose_successor_never_answers_gives_up_after_the_take_ov
         began = asyncio.get_running_loop().time()
         Cluster(b).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         await asyncio.wait_for(a.when_terminated(), timeout=3)
-        assert asyncio.get_running_loop().time() - began < 2.0  # the retries ran out, not the exiting timeout
+        # the retries ran out, not the exiting timeout
+        assert asyncio.get_running_loop().time() - began < 2.0
         assert stops(log) == [p1]
 
 
 async def test_a_stuck_manager_restarts_and_takes_over():
-    """b's hand-over requests never reach a, so b runs out of retries while a is still a member and fails with
-    ClusterSingletonManagerIsStuck; its manager restarts, as under Pekko's system guardian, and takes over once a
-    is gone."""
+    """b's hand-over requests never reach a, so b runs out of retries while a is still a member and
+    fails with ClusterSingletonManagerIsStuck; its manager restarts, as under Pekko's system
+    guardian, and takes over once a is gone."""
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:
         a = await stack.enter_async_context(node(p1, [p1], exiting_timeout=0.5))
@@ -307,7 +350,15 @@ async def test_a_stuck_manager_restarts_and_takes_over():
         remoting = a.remoting
         assert remoting is not None
         deliver = remoting._handle  # pyright: ignore[reportPrivateUsage]
-        remoting._handle = lambda frame: None if (isinstance(frame, dict) and isinstance(frame.get("message"), dict) and frame["message"].get("$type") == "HandOverToMe") else deliver(frame)  # pyright: ignore[reportPrivateUsage]
+        remoting._handle = lambda frame: (
+            None
+            if (
+                isinstance(frame, dict)
+                and isinstance(frame.get("message"), dict)
+                and frame["message"].get("$type") == "HandOverToMe"
+            )
+            else deliver(frame)
+        )  # pyright: ignore[reportPrivateUsage]
         Cluster(b).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         await asyncio.wait_for(a.when_terminated(), timeout=5)
         await eventually(lambda: starts(log) == [p1, p2], timeout=5)
@@ -322,7 +373,8 @@ async def test_a_single_node_leave_exits_promptly():
         proxy = start(a, log, port)
         assert await ask(proxy, Hit, timeout=3) == 1
         Cluster(a).manager.tell(Leave(Address("c", "127.0.0.1", port)))
-        await asyncio.wait_for(a.when_terminated(), timeout=2)  # it removes itself from the age order: no 5 s wait
+        # it removes itself from the age order: no 5 s wait
+        await asyncio.wait_for(a.when_terminated(), timeout=2)
         assert stops(log) == [port]
 
 

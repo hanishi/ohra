@@ -3,6 +3,7 @@ and the event loop stays responsive either way.
 
     uv run --extra numpy python examples/compute.py
 """
+
 import asyncio
 import os
 import sys
@@ -117,7 +118,8 @@ def probe(period: float = 0.005) -> Behavior[Tick | Report]:
                         return ticking(now, [*lateness, (now - last) - period])
                     case Report(reply_to):
                         reply_to.tell(lateness)
-                        ctx.timers.start_timer_with_fixed_delay("tick", Tick(), period)  # drops a queued stale Tick
+                        # drops a queued stale Tick
+                        ctx.timers.start_timer_with_fixed_delay("tick", Tick(), period)
                         return ticking(loop.time(), [])
 
             return on_message
@@ -188,13 +190,19 @@ def timed_sequential(job: str) -> float:
 
 async def main() -> None:
     gil = getattr(sys, "_is_gil_enabled", lambda: True)()
-    print(f"python {sys.version.split()[0]}  GIL {'on' if gil else 'off'}  workers {WORKERS}  cores {os.cpu_count()}")
+    print(
+        f"python {sys.version.split()[0]}  GIL {'on' if gil else 'off'}  workers {WORKERS}  cores "
+        f"{os.cpu_count()}"
+    )
     print("job      sequential  parallel  speedup  5ms-timer lateness meanwhile (median / max)")
     async with ActorSystem(guardian, "bench") as system, ActorSystem(probe(), "probe") as p:
         await p.ask(Report, timeout=1)  # reset the probe
         await asyncio.sleep(0.2)
         late = await p.ask(Report, timeout=1)
-        print(f"idle                                     {median(late) * 1000:6.1f}ms / {max(late) * 1000:6.1f}ms")
+        print(
+            f"idle                                     {median(late) * 1000:6.1f}ms / "
+            f"{max(late) * 1000:6.1f}ms"
+        )
         for job in ("numpy", "python"):
             JOBS[job](0)  # warm up
             seq = timed_sequential(job)

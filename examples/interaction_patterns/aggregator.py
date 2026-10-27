@@ -7,6 +7,7 @@ single timer for the whole aggregation, which is the deadline a caller usually m
 
     uv run python examples/interaction_patterns/aggregator.py
 """
+
 import asyncio
 import logging
 import sys
@@ -134,17 +135,25 @@ def customer(
             case FindCheapest():
 
                 def send_requests(reply_to: ActorRef[Quote | Price]) -> None:
-                    a.tell(RequestQuote(reply_to))  # ActorRef[Quote | Price] narrows to ActorRef[Quote]
+                    # ActorRef[Quote | Price] narrows to ActorRef[Quote]
+                    a.tell(RequestQuote(reply_to))
                     b.tell(RequestPrice(reply_to))
                     c.tell(RequestQuote(reply_to))
 
                 def aggregate(replies: list[Quote | Price]) -> AggregatedQuotes:
-                    quotes = [r if isinstance(r, Quote) else Quote(r.hotel, r.cents / 100) for r in replies]
+                    quotes = [
+                        r if isinstance(r, Quote) else Quote(r.hotel, r.cents / 100)
+                        for r in replies
+                    ]
                     return AggregatedQuotes(sorted(quotes, key=lambda q: q.price))
 
                 ctx.spawn_anonymous(aggregator(send_requests, 3, ctx.self, aggregate, timeout=0.2))
             case AggregatedQuotes(quotes):
-                ctx.log.info("%d of 3 answered in time; cheapest: %s", len(quotes), quotes[0] if quotes else "none")
+                ctx.log.info(
+                    "%d of 3 answered in time; cheapest: %s",
+                    len(quotes),
+                    quotes[0] if quotes else "none",
+                )
         return Behaviors.same
 
     return on_message

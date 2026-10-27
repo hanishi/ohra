@@ -5,6 +5,7 @@ death notifications, backoff timers) always go before user messages, as in Pekko
 A handler that awaits keeps the actor busy: messages are processed strictly one
 at a time, including across awaits inside the handler.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -187,21 +188,26 @@ class ActorCell[T]:
         self.mailbox = mailbox
         self.ref: LocalRef[T] = LocalRef(self)
         self.ctx: ActorContext[T] = ActorContext(self)
-        self.log = logging.getLogger("pekko_py.actor." + path.split("://", 1)[-1].replace("/", "."))
+        self.log = logging.getLogger(
+            "pekko_py.actor." + path.split("://", 1)[-1].replace("/", ".")
+        )
         loop = asyncio.get_running_loop()
         self.done: asyncio.Future[None] = loop.create_future()
         self.children: dict[str, ActorCell[Any]] = {}
-        self.adapters: list[ActorRef[Any]] = []  # message_adapter refs live as long as the actor, as in Pekko
+        # message_adapter refs live as long as the actor, as in Pekko
+        self.adapters: list[ActorRef[Any]] = []
         self.watching: dict[ActorCell[Any], tuple[T] | None] = {}
         self.watched_by: set[ActorCell[Any]] = set()
         self.failure: BaseException | None = None
         self.stopping = False
         self.terminated = False
-        self._poisoned = False  # a _POISON sits in _user: it takes no capacity and is never evicted
+        # a _POISON sits in _user: it takes no capacity and is never evicted
+        self._poisoned = False
         self._initial = behavior
         self._behavior: Behavior[T] = behavior
         self._last_live: Behavior[T] | None = None
-        self._sys: deque[object] | None = None  # created on the first system message; most actors never get one
+        # created on the first system message; most actors never get one
+        self._sys: deque[object] | None = None
         self._user: deque[object] = deque()
         self._waiter: asyncio.Future[None] | None = None  # set while the loop is idle in _run
         self._space: deque[asyncio.Future[None]] | None = None  # senders parked in offer()
@@ -225,7 +231,8 @@ class ActorCell[T]:
                     return
                 case "drop_old":
                     victim = self._user.popleft()
-                    if victim is _POISON:  # the oldest real message goes, the pending stop stays in front
+                    # the oldest real message goes, the pending stop stays in front
+                    if victim is _POISON:
                         victim = self._user.popleft()
                         self._user.appendleft(_POISON)
                     self.system.dead_letter(victim, self.ref)
@@ -516,7 +523,9 @@ class ActorCell[T]:
         sup.inner = nb
         return sup
 
-    async def _on_failure(self, sup: _Supervisor[T], e: Exception, during_start: bool = False) -> Behavior[T]:
+    async def _on_failure(
+        self, sup: _Supervisor[T], e: Exception, during_start: bool = False
+    ) -> Behavior[T]:
         strategy = sup.template.strategy
         now = asyncio.get_running_loop().time()
         match strategy:
@@ -546,7 +555,10 @@ class ActorCell[T]:
                 sup.inner = inner
                 return sup
             case Backoff():
-                if strategy.reset_after is not None and now - sup.last_failure > strategy.reset_after:
+                if (
+                    strategy.reset_after is not None
+                    and now - sup.last_failure > strategy.reset_after
+                ):
                     sup.attempt = 0
                 if 0 <= strategy.max_restarts <= sup.attempt:
                     raise e
@@ -646,7 +658,8 @@ class ActorCell[T]:
 def _cell_of(ref: ActorRef[Any]) -> ActorCell[Any]:
     if isinstance(ref, LocalRef):
         return ref._cell  # pyright: ignore[reportPrivateUsage]
-    if isinstance(ref, FunctionRef) and ref.owner is not None:  # a message adapter: watch its actor
+    # a message adapter: watch its actor
+    if isinstance(ref, FunctionRef) and ref.owner is not None:
         return ref.owner
     raise TypeError(f"{ref!r} is not a local actor")
 

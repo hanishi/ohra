@@ -1,4 +1,5 @@
 """The management module's HTTP/1.1 server and client, tested against each other."""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +24,10 @@ async def test_get_json_404_405_and_500():
     server = await serve("127.0.0.1", 0, handler)
     port = server.sockets[0].getsockname()[1]
     try:
-        assert await get(f"http://127.0.0.1:{port}/hello?x=1", timeout=2) == (200, b'{"hello": "world"}')
+        assert await get(f"http://127.0.0.1:{port}/hello?x=1", timeout=2) == (
+            200,
+            b'{"hello": "world"}',
+        )
         assert (await get(f"http://127.0.0.1:{port}/nope", timeout=2))[0] == 404
         assert (await get(f"http://127.0.0.1:{port}/boom", timeout=2))[0] == 500
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -52,7 +56,11 @@ async def test_server_rejects_garbage_and_closes():
     server = await serve("127.0.0.1", 0, handler)
     port = server.sockets[0].getsockname()[1]
     try:
-        for payload in (b"\r\n\r\n", b"GET\r\n\r\n", b"GET /hello HTTP/1.1\r\nX: " + b"a" * 100_000 + b"\r\n\r\n"):
+        for payload in (
+            b"\r\n\r\n",
+            b"GET\r\n\r\n",
+            b"GET /hello HTTP/1.1\r\nX: " + b"a" * 100_000 + b"\r\n\r\n",
+        ):
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             writer.write(payload)
             await writer.drain()
@@ -60,7 +68,11 @@ async def test_server_rejects_garbage_and_closes():
             assert first == b"" or first.startswith(b"HTTP/1.1 400"), payload[:20]
             writer.close()
             await writer.wait_closed()
-        assert await get(f"http://127.0.0.1:{port}/hello", timeout=2) == (200, b'{"hello": "world"}')  # still serving
+        # still serving
+        assert await get(f"http://127.0.0.1:{port}/hello", timeout=2) == (
+            200,
+            b'{"hello": "world"}',
+        )
     finally:
         server.close()
         await server.wait_closed()

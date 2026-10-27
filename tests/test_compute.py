@@ -1,11 +1,21 @@
 """Parallel compute with pipe_to_self(asyncio.to_thread(...)) and a stashing behavior."""
+
 from __future__ import annotations
 
 import asyncio
 import time
 from dataclasses import dataclass
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, StashBuffer, Success, Try
+from pekko_py import (
+    ActorContext,
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    StashBuffer,
+    Success,
+    Try,
+)
 
 from .util import eventually
 
@@ -44,7 +54,9 @@ def worker() -> Behavior[Cmd]:
                     pass
             return Behaviors.same
 
-        def computing(ctx: ActorContext[Cmd], seconds: float, reply_to: ActorRef[str]) -> Behavior[Cmd]:
+        def computing(
+            ctx: ActorContext[Cmd], seconds: float, reply_to: ActorRef[str]
+        ) -> Behavior[Cmd]:
             ctx.pipe_to_self(asyncio.to_thread(blocking_work, seconds), Done)
 
             def on_message(msg: Cmd) -> Behavior[Cmd]:
@@ -114,7 +126,10 @@ async def test_event_loop_stays_responsive_during_parallel_compute():
 
     tick = asyncio.create_task(ticker())
     try:
-        async with ActorSystem(collector, "sink") as sink, ActorSystem(Behaviors.setup(guardian), "t") as system:
+        async with (
+            ActorSystem(collector, "sink") as sink,
+            ActorSystem(Behaviors.setup(guardian), "t") as system,
+        ):
             t0 = time.perf_counter()
             system.tell(Compute(0.1, sink))
             await eventually(lambda: len(replies) == 8)

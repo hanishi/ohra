@@ -3,6 +3,7 @@ passing a SharedArray handle. The worker sums the array either way.
 
     uv run --extra numpy python examples/shared_memory.py
 """
+
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor

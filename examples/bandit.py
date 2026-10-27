@@ -7,6 +7,7 @@ reports progress while it runs.
 
     uv run --extra numpy python examples/bandit.py
 """
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -171,7 +172,10 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
             return collecting(steps, reply_to, p, ())
 
         def collecting(
-            steps: int, reply_to: ActorRef[Summary], p: Progress, got: tuple[tuple[int, float], ...]
+            steps: int,
+            reply_to: ActorRef[Summary],
+            p: Progress,
+            got: tuple[tuple[int, float], ...],
         ) -> Behavior[AgentCmd]:
             @Behaviors.receive_message
             def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
@@ -193,7 +197,9 @@ def agent(means: np.ndarray) -> Behavior[AgentCmd]:
 
             return on_message
 
-        def pulling(steps: int, reply_to: ActorRef[Summary], p: Progress, arm: int) -> Behavior[AgentCmd]:
+        def pulling(
+            steps: int, reply_to: ActorRef[Summary], p: Progress, arm: int
+        ) -> Behavior[AgentCmd]:
             @Behaviors.receive_message
             def on_message(msg: AgentCmd) -> Behavior[AgentCmd]:
                 match msg:
@@ -230,8 +236,10 @@ async def main() -> None:
     async with ActorSystem(agent(means), "bandit") as system:
         s = await system.ask(lambda r: Run(STEPS, r), timeout=60)
     random_regret = STEPS * (means.max() - means.mean())
-    print(f"\ndone: regret {s.regret:.1f} (uniform random play would be about {random_regret:.0f}), "
-          f"best arm pulled {s.pulls_of_best} of {s.steps} times")
+    print(
+        f"\ndone: regret {s.regret:.1f} (uniform random play would be about {random_regret:.0f}), "
+        f"best arm pulled {s.pulls_of_best} of {s.steps} times"
+    )
 
 
 asyncio.run(main())

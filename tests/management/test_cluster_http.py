@@ -1,4 +1,6 @@
-"""Read-only cluster HTTP management: Pekko's JSON for members and shards; mutating methods are 405."""
+"""Read-only cluster HTTP management: Pekko's JSON for members and shards; mutating methods are
+405."""
+
 from __future__ import annotations
 
 import asyncio
@@ -26,11 +28,24 @@ async def test_cluster_members_json():
         uri = await PekkoManagement(a).start()
         status, body = await get(uri + "/cluster/members", timeout=2)
         doc = json.loads(body)
-        assert status == 200 and doc["selfNode"] == f"pekko://c@127.0.0.1:{p1}" and doc["leader"] == f"pekko://c@127.0.0.1:{p1}"
-        assert sorted(m["node"] for m in doc["members"]) == [f"pekko://c@127.0.0.1:{p1}", f"pekko://c@127.0.0.1:{p2}"]
+        assert (
+            status == 200
+            and doc["selfNode"] == f"pekko://c@127.0.0.1:{p1}"
+            and doc["leader"] == f"pekko://c@127.0.0.1:{p1}"
+        )
+        assert sorted(m["node"] for m in doc["members"]) == [
+            f"pekko://c@127.0.0.1:{p1}",
+            f"pekko://c@127.0.0.1:{p2}",
+        ]
         assert all(m["status"] == "Up" and m["roles"] == [] for m in doc["members"])
-        assert doc["unreachable"] == [] and doc["oldestPerRole"] == {} and doc["oldest"] == f"pekko://c@127.0.0.1:{p1}"
-        one = json.loads((await get(uri + f"/cluster/members/pekko://c@127.0.0.1:{p2}", timeout=2))[1])
+        assert (
+            doc["unreachable"] == []
+            and doc["oldestPerRole"] == {}
+            and doc["oldest"] == f"pekko://c@127.0.0.1:{p1}"
+        )
+        one = json.loads(
+            (await get(uri + f"/cluster/members/pekko://c@127.0.0.1:{p2}", timeout=2))[1]
+        )
         assert one["node"] == f"pekko://c@127.0.0.1:{p2}" and isinstance(one["nodeUid"], int)
         assert (await get(uri + "/cluster/members/pekko://c@127.0.0.1:1", timeout=2))[0] == 404
 
@@ -44,7 +59,9 @@ async def test_unreachable_members_list_their_observers():
         await crash(b)
         await eventually(lambda: unreachable_ports(a) == {p2}, timeout=5)
         doc = json.loads((await get(uri + "/cluster/members", timeout=2))[1])
-        assert doc["unreachable"] == [{"node": f"pekko://c@127.0.0.1:{p2}", "observedBy": [f"pekko://c@127.0.0.1:{p1}"]}]
+        assert doc["unreachable"] == [
+            {"node": f"pekko://c@127.0.0.1:{p2}", "observedBy": [f"pekko://c@127.0.0.1:{p1}"]}
+        ]
 
 
 async def test_cluster_shards_route():
@@ -68,7 +85,10 @@ async def test_mutating_routes_are_405():
     async with cluster_node("c", p, [p]) as a:
         uri = await PekkoManagement(a).start()
         host, port = uri.removeprefix("http://").split("/")[0].split(":")
-        for request in (b"PUT /cluster/members/x HTTP/1.1\r\nHost: x\r\n\r\n", b"POST /cluster/members HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"):
+        for request in (
+            b"PUT /cluster/members/x HTTP/1.1\r\nHost: x\r\n\r\n",
+            b"POST /cluster/members HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n",
+        ):
             reader, writer = await asyncio.open_connection(host, int(port))
             writer.write(request)
             await writer.drain()

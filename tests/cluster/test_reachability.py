@@ -1,4 +1,5 @@
 """Reachability: per-observer, versioned observations, as Reachability.scala."""
+
 from __future__ import annotations
 
 from pekko_py.cluster.reachability import Reachability

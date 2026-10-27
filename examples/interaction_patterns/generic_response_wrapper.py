@@ -1,6 +1,7 @@
 """Generic response wrapper: instead of a Reply union per protocol, reply with Try[Cookies],
 so the asking side handles success and failure uniformly. Pekko uses StatusReply for this;
 pekko-py's Success / Failure already have that shape (Pekko interaction patterns)."""
+
 import asyncio
 import sys
 from dataclasses import dataclass

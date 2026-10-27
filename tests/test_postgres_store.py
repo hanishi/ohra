@@ -1,10 +1,12 @@
-"""PostgresStore: the SqliteStore contract on a database every node can reach.
+r"""PostgresStore: the SqliteStore contract on a database every node can reach.
 
 Runs against the server in PEKKO_PY_POSTGRES_DSN, for example
     docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=pg postgres:17
-    PEKKO_PY_POSTGRES_DSN=postgresql://postgres:pg@localhost:55432/postgres pytest tests/test_postgres_store.py
+    PEKKO_PY_POSTGRES_DSN=postgresql://postgres:pg@localhost:55432/postgres \
+        pytest tests/test_postgres_store.py
 and is skipped without it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -68,8 +70,13 @@ async def test_postgres_store_custom_codec(table: str):
 
 async def test_two_nodes_racing_for_the_first_revision_one_wins(table: str):
     # Two incarnations of one entity, on two nodes, both writing revision 1: exactly one commits.
-    async with PostgresStore[int](DSN, table=table) as a, PostgresStore[int](DSN, table=table) as b:
-        results = await asyncio.gather(a.save("e", 1, 1), b.save("e", 2, 1), return_exceptions=True)
+    async with (
+        PostgresStore[int](DSN, table=table) as a,
+        PostgresStore[int](DSN, table=table) as b,
+    ):
+        results = await asyncio.gather(
+            a.save("e", 1, 1), b.save("e", 2, 1), return_exceptions=True
+        )
         assert sorted(type(r).__name__ for r in results) == ["NoneType", "RevisionConflictError"]
         state, revision = await a.load("e") or (None, 0)
         assert revision == 1 and state in (1, 2)
@@ -84,7 +91,8 @@ async def test_state_survives_a_restart_on_another_node(table: str):
     async with PostgresStore[int](DSN, table=table) as store, system_on(store) as system:
         system.tell(Add(4))
         assert await system.ask(Get, timeout=1) == 4
-    async with PostgresStore[int](DSN, table=table) as store, system_on(store) as system:  # a new pool, as on another pod
+    # a new pool, as on another pod
+    async with PostgresStore[int](DSN, table=table) as store, system_on(store) as system:
         assert await system.ask(Get, timeout=1) == 4
 
 
@@ -100,7 +108,8 @@ def test_postgres_store_rejects_a_table_name_that_is_not_an_identifier():
 
 
 async def test_nodes_starting_together_create_the_table_once(table: str):
-    # Pods starting at once: concurrent CREATE TABLE IF NOT EXISTS can fail in Postgres on the catalog's unique index.
+    # Pods starting at once: concurrent CREATE TABLE IF NOT EXISTS can fail in Postgres on the
+    # catalog's unique index.
     stores = [PostgresStore[int](DSN, table=table) for _ in range(8)]
     try:
         await asyncio.gather(*(s.__aenter__() for s in stores))
@@ -111,13 +120,18 @@ async def test_nodes_starting_together_create_the_table_once(table: str):
 
 
 async def test_the_store_reconnects_after_the_database_restarts(table: str):
-    # A restarted server leaves the pool holding closed connections; the next calls must still succeed.
+    # A restarted server leaves the pool holding closed connections; the next calls must still
+    # succeed.
     async with PostgresStore[int](DSN, table=table) as store:
         await store.save("a", 1, 1)
         async with await psycopg.AsyncConnection.connect(DSN, autocommit=True) as admin:
-            await admin.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database()")
+            await admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> "
+                "pg_backend_pid() AND datname = current_database()"
+            )
         started = time.monotonic()
         for revision in range(2, 8):  # more calls than the pool has connections
             assert await store.load("a") == (revision - 1, revision - 1)
             await store.save("a", revision, revision)
-        assert time.monotonic() - started < 2  # every broken connection dropped at once, not one per backoff step
+        # every broken connection dropped at once, not one per backoff step
+        assert time.monotonic() - started < 2

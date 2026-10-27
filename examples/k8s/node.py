@@ -1,17 +1,20 @@
-"""A cluster node for Kubernetes: the pods find each other through the API server and Pekko's bootstrap, and spread a
-simulated calculation over the cluster with sharding.
+"""A cluster node for Kubernetes: the pods find each other through the API server and Pekko's
+bootstrap, and spread a simulated calculation over the cluster with sharding.
 
-Each pod hosts a sharded "calculator" entity type. Every second each pod submits one task, with a rotating id, to
-`ClusterSharding.entity_ref_for`; whichever pod owns the task's shard computes it (the sum of the primes below n) and
-replies with the result and its own pod name, which the submitter prints:
+Each pod hosts a sharded "calculator" entity type. Every second each pod submits one task, with a
+rotating id, to `ClusterSharding.entity_ref_for`; whichever pod owns the task's shard computes it
+(the sum of the primes below n) and replies with the result and its own pod name, which the
+submitter prints:
 
     task 17 (n=60000) = 157_016_522 on cluster-7d9f6c9b8-xk2p
 
-Member events are printed too, so the logs show the pods joining, going Up and leaving. Deleting a pod runs the
-coordinated shutdown (SIGTERM): its shards hand off and its tasks continue on the others. The pod IP and name come
-from the downward API (POD_IP, POD_NAME); discovery needs the pods labelled app=cluster and a service account that
-may list them. See docs/book/08-management-and-kubernetes.md.
+Member events are printed too, so the logs show the pods joining, going Up and leaving. Deleting a
+pod runs the coordinated shutdown (SIGTERM): its shards hand off and its tasks continue on the
+others. The pod IP and name come from the downward API (POD_IP, POD_NAME); discovery needs the pods
+labelled app=cluster and a service account that may list them. See
+docs/book/08-management-and-kubernetes.md.
 """
+
 import asyncio
 import os
 import signal
@@ -96,7 +99,9 @@ def calculator(pod: str) -> Callable[[EntityContext[Compute]], Behavior[Compute]
     def create(entity: EntityContext[Compute]) -> Behavior[Compute]:
         @Behaviors.receive_message
         def on_compute(msg: Compute) -> Behavior[Compute]:
-            msg.reply_to.tell(Result(int(entity.entity_id), msg.n, sum_of_primes_below(msg.n), pod))
+            msg.reply_to.tell(
+                Result(int(entity.entity_id), msg.n, sum_of_primes_below(msg.n), pod)
+            )
             return Behaviors.same
 
         return on_compute
@@ -109,7 +114,8 @@ def submitter(pod: str) -> Behavior[Event]:
 
     @Behaviors.setup
     def setup(ctx: ActorContext[Event]) -> Behavior[Event]:
-        ClusterSharding(ctx.system).init(Entity(CALCULATOR, calculator(pod)))  # the same on every pod
+        # the same on every pod
+        ClusterSharding(ctx.system).init(Entity(CALCULATOR, calculator(pod)))
         ctx.timers.start_timer_with_fixed_delay("tick", Tick(), 1.0)
         next_task = 0
 
@@ -120,7 +126,9 @@ def submitter(pod: str) -> Behavior[Event]:
                 case Tick():
                     task_id, next_task = next_task, (next_task + 1) % TASKS
                     n = 50_000 + task_id * 5_000
-                    ClusterSharding(ctx.system).entity_ref_for(CALCULATOR, str(task_id)).tell(Compute(n, ctx.self))
+                    ClusterSharding(ctx.system).entity_ref_for(CALCULATOR, str(task_id)).tell(
+                        Compute(n, ctx.self)
+                    )
                 case Result(task_id, n, value, on):
                     print(f"task {task_id} (n={n}) = {value:_} on {on}")
                 case MemberEvent(member=m):
@@ -139,24 +147,42 @@ def submitter(pod: str) -> Behavior[Event]:
 
 
 async def main(pod: str, ip: str) -> None:
-    settings = ClusterSettings(downing=SplitBrainResolverSettings(stable_after=5.0))  # no seed nodes: the bootstrap joins
-    shutdown = CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM))  # a deleted pod leaves gracefully
+    # no seed nodes: the bootstrap joins
+    settings = ClusterSettings(downing=SplitBrainResolverSettings(stable_after=5.0))
+    # a deleted pod leaves gracefully
+    shutdown = CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM))
     management = PekkoManagementSettings(
         hostname=ip,
         port=MANAGEMENT_PORT,
-        bind_hostname="0.0.0.0",  # the probes and the peers come in on the pod IP, kubectl port-forward on localhost
+        # the probes and the peers come in on the pod IP, kubectl port-forward on localhost
+        bind_hostname="0.0.0.0",
         discovery=KubernetesApiServiceDiscovery(KubernetesApiSettings(use_raw_ip=True)),
-        bootstrap=ClusterBootstrapSettings(service_name="cluster", port_name="management", required_contact_point_nr=2),
+        bootstrap=ClusterBootstrapSettings(
+            service_name="cluster", port_name="management", required_contact_point_nr=2
+        ),
     )
-    async with ActorSystem(submitter(pod), "cluster", address=(ip, REMOTING_PORT), cluster=settings, shutdown=shutdown, management=management) as system:
+    async with ActorSystem(
+        submitter(pod),
+        "cluster",
+        address=(ip, REMOTING_PORT),
+        cluster=settings,
+        shutdown=shutdown,
+        management=management,
+    ) as system:
         Cluster(system).subscriptions.tell(Subscribe(system, ClusterDomainEvent))
         uri = await PekkoManagement(system).start()
-        print(f"{pod}: {Cluster(system).self_address.root} bootstrapping; management at {uri}", flush=True)
+        print(
+            f"{pod}: {Cluster(system).self_address.root} bootstrapping; management at {uri}",
+            flush=True,
+        )
         await system.when_terminated()
 
 
 if __name__ == "__main__":
     pod, ip = os.environ.get("POD_NAME"), os.environ.get("POD_IP")
     if not pod or not ip:
-        sys.exit("POD_NAME and POD_IP must be set (the downward API does so in examples/k8s/cluster.yaml)")
+        sys.exit(
+            "POD_NAME and POD_IP must be set (the downward API does so in "
+            "examples/k8s/cluster.yaml)"
+        )
     asyncio.run(main(pod, ip))

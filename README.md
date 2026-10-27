@@ -30,7 +30,7 @@ def counter(total: int = 0) -> Behavior[Command]:
     def on_message(msg: Command) -> Behavior[Command]:
         match msg:
             case Increment(by):
-                return counter(total + by)        # state is the next behavior
+                return counter(total + by)  # state is the next behavior
             case GetTotal(reply_to):
                 reply_to.tell(total)
                 return Behaviors.same

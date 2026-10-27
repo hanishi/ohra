@@ -1,6 +1,8 @@
-"""Apache Pekko Management narrowed to the Kubernetes path: the management HTTP endpoint with health checks,
-read-only cluster routes, cluster bootstrap over service discovery, and Kubernetes API discovery. Reached as
-``PekkoManagement(system)``; nothing binds until ``await PekkoManagement(system).start()``."""
+"""Apache Pekko Management narrowed to the Kubernetes path: the management HTTP endpoint with
+health checks, read-only cluster routes, cluster bootstrap over service discovery, and Kubernetes
+API discovery. Reached as ``PekkoManagement(system)``; nothing binds until ``await
+PekkoManagement(system).start()``."""
+
 from __future__ import annotations
 
 import asyncio
@@ -26,8 +28,9 @@ type RouteHandler = Callable[[str], Awaitable[Response]]
 
 @dataclass(frozen=True)
 class PekkoManagementSettings:
-    """Pekko's ``pekko.management.http`` settings. ``hostname=None`` is this host's address; ``bind_*`` default to the
-    hostname and port; ``port=0`` binds an ephemeral port. ``bootstrap`` needs ``discovery``."""
+    """Pekko's ``pekko.management.http`` settings. ``hostname=None`` is this host's address;
+    ``bind_*`` default to the hostname and port; ``port=0`` binds an ephemeral port. ``bootstrap``
+    needs ``discovery``."""
 
     hostname: str | None = None
     port: int = 7626
@@ -46,7 +49,10 @@ class PekkoManagementSettings:
         if self.base_path and not self.base_path.startswith("/"):
             raise ValueError("base_path must start with '/'")
         if self.bootstrap is not None and self.discovery is None:
-            raise ValueError("bootstrap needs a discovery: pass discovery=KubernetesApiServiceDiscovery() or another ServiceDiscovery")
+            raise ValueError(
+                "bootstrap needs a discovery: pass discovery=KubernetesApiServiceDiscovery() or "
+                "another ServiceDiscovery"
+            )
 
     @property
     def effective_hostname(self) -> str:
@@ -62,7 +68,8 @@ class PekkoManagementSettings:
 
 
 class PekkoManagement:
-    """``PekkoManagement(system)``: ``health`` for the checks, ``start()`` to bind the endpoint, ``uri`` once bound."""
+    """``PekkoManagement(system)``: ``health`` for the checks, ``start()`` to bind the endpoint,
+    ``uri`` once bound."""
 
     system: ActorSystem[Any]
     settings: PekkoManagementSettings
@@ -78,7 +85,9 @@ class PekkoManagement:
         return system.management
 
     @classmethod
-    def _start(cls, system: ActorSystem[Any], settings: PekkoManagementSettings) -> PekkoManagement:
+    def _start(
+        cls, system: ActorSystem[Any], settings: PekkoManagementSettings
+    ) -> PekkoManagement:
         self = object.__new__(cls)
         self.system = system
         self.settings = settings
@@ -107,17 +116,25 @@ class PekkoManagement:
             bootstrap_settings = settings.bootstrap
 
             async def seed_nodes(_path: str) -> Response:
-                return json_response(200, seed_nodes_json(system, bootstrap_settings or ClusterBootstrapSettings(service_name="-")))
+                return json_response(
+                    200,
+                    seed_nodes_json(
+                        system, bootstrap_settings or ClusterBootstrapSettings(service_name="-")
+                    ),
+                )
 
             self.add_route("/bootstrap/seed-nodes", seed_nodes)
             if bootstrap_settings is not None and settings.discovery is not None:
-                self.bootstrap = ClusterBootstrap._start(system, bootstrap_settings, settings.discovery)  # pyright: ignore[reportPrivateUsage]
+                self.bootstrap = ClusterBootstrap._start(  # pyright: ignore[reportPrivateUsage]
+                    system, bootstrap_settings, settings.discovery
+                )
         return self
 
-    # --- routes ---------------------------------------------------------------------------------------------------
+    # --- routes ----------------------------------------------------------------------------------
 
     def add_route(self, path: str, handler: RouteHandler) -> None:
-        """A GET route under ``base_path``: exact, or a prefix when ``path`` ends with ``/`` (the handler gets the rest)."""
+        """A GET route under ``base_path``: exact, or a prefix when ``path`` ends with ``/`` (the
+        handler gets the rest)."""
         if path.endswith("/"):
             self._prefixes.append((path, handler))
         else:
@@ -144,21 +161,30 @@ class PekkoManagement:
             return Response(200, b"OK", "text/plain")
         return Response(500, f"Not Healthy: {reason}".encode(), "text/plain")
 
-    # --- lifecycle ------------------------------------------------------------------------------------------------
+    # --- lifecycle -------------------------------------------------------------------------------
 
     async def start(self) -> str:
-        """Bind the endpoint once and return its base URI; a second call returns the same URI. After ``stop()`` a call
-        binds again, as Pekko's; after the system has stopped it raises, since nothing would ever close the server."""
+        """Bind the endpoint once and return its base URI; a second call returns the same URI.
+        After ``stop()`` a call binds again, as Pekko's; after the system has stopped it raises,
+        since nothing would ever close the server."""
         async with self._starting:
             if self.system._system_root.done.done():  # pyright: ignore[reportPrivateUsage]
-                raise RuntimeError("the ActorSystem has terminated; the management endpoint cannot start")
+                raise RuntimeError(
+                    "the ActorSystem has terminated; the management endpoint cannot start"
+                )
             if self.uri is None:
                 s = self.settings
-                server = await serve(s.effective_bind_hostname, s.effective_bind_port, self._dispatch)
+                server = await serve(
+                    s.effective_bind_hostname, s.effective_bind_port, self._dispatch
+                )
                 port = server.port
                 self._server = server
                 self.uri = f"http://{s.effective_hostname}:{port}{s.base_path}"
-                _log.info("Bound Pekko Management (HTTP) endpoint to: %s:%s", s.effective_bind_hostname, port)
+                _log.info(
+                    "Bound Pekko Management (HTTP) endpoint to: %s:%s",
+                    s.effective_bind_hostname,
+                    port,
+                )
                 if self.bootstrap is not None:
                     self.bootstrap.start((s.effective_hostname, port), s.base_path)
             return self.uri

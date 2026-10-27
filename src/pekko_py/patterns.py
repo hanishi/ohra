@@ -1,4 +1,5 @@
 """Patterns built on the core: ask, batching, SpawnProtocol."""
+
 from __future__ import annotations
 
 import asyncio
@@ -49,7 +50,9 @@ async def ask[Res](
     except TimeoutError:
         raise AskTimeoutError(f"ask to {target.path} timed out after {timeout}s") from None
     finally:
-        del reply_to  # held until here on purpose: remoting keeps only a weak temp path for it while the ask is pending
+        # held until here on purpose: remoting keeps only a weak temp path for it while the ask is
+        # pending
+        del reply_to
 
 
 class _Flush:
@@ -117,7 +120,9 @@ class SpawnProtocol:
 
     @staticmethod
     def apply() -> Behavior[Command]:
-        def on_message(ctx: ActorContext[SpawnProtocol.Command], msg: SpawnProtocol.Command) -> Behavior[SpawnProtocol.Command]:
+        def on_message(
+            ctx: ActorContext[SpawnProtocol.Command], msg: SpawnProtocol.Command
+        ) -> Behavior[SpawnProtocol.Command]:
             if not msg.name:
                 ref = ctx.spawn_anonymous(msg.behavior, msg.mailbox)
             else:

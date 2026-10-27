@@ -1,4 +1,6 @@
-"""The Receptionist on one node, as Pekko's LocalReceptionist: register, find, subscribe, and the watches."""
+"""The Receptionist on one node, as Pekko's LocalReceptionist: register, find, subscribe, and the
+watches."""
+
 from __future__ import annotations
 
 import asyncio
@@ -64,10 +66,14 @@ async def test_register_then_find_lists_the_service():
     async with ActorSystem(Behaviors.receive(spawner), "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
         rec = Receptionist(system).ref
-        assert await ask(rec, lambda r: Register(GREETER, svc, r), timeout=1) == Registered(GREETER, svc)
+        assert await ask(rec, lambda r: Register(GREETER, svc, r), timeout=1) == Registered(
+            GREETER, svc
+        )
         listing = await ask(rec, lambda r: Find(GREETER, r), timeout=1)
         assert listing == Listing(GREETER, frozenset({svc}), frozenset({svc}), True)
-        assert await ask(rec, lambda r: Find(OTHER, r), timeout=1) == Listing(OTHER, frozenset(), frozenset(), True)
+        assert await ask(rec, lambda r: Find(OTHER, r), timeout=1) == Listing(
+            OTHER, frozenset(), frozenset(), True
+        )
 
 
 async def test_subscribe_gets_current_listing_then_each_change():
@@ -96,9 +102,15 @@ async def test_deregister_removes_one_binding():
         rec = Receptionist(system).ref
         rec.tell(Register(GREETER, svc))
         rec.tell(Register(OTHER, svc))
-        assert await ask(rec, lambda r: Deregister(GREETER, svc, r), timeout=1) == Deregistered(GREETER, svc)
-        assert (await ask(rec, lambda r: Find(GREETER, r), timeout=1)).service_instances == frozenset()
-        assert (await ask(rec, lambda r: Find(OTHER, r), timeout=1)).service_instances == frozenset({svc})
+        assert await ask(rec, lambda r: Deregister(GREETER, svc, r), timeout=1) == Deregistered(
+            GREETER, svc
+        )
+        assert (
+            await ask(rec, lambda r: Find(GREETER, r), timeout=1)
+        ).service_instances == frozenset()
+        assert (
+            await ask(rec, lambda r: Find(OTHER, r), timeout=1)
+        ).service_instances == frozenset({svc})
 
 
 async def test_a_stopped_service_leaves_every_key():
@@ -113,8 +125,14 @@ async def test_a_stopped_service_leaves_every_key():
         rec.tell(Register(OTHER, svc))
         rec.tell(Subscribe(GREETER, sub1))
         rec.tell(Subscribe(OTHER, sub2))
-        await eventually(lambda: greeter_events[-1:] == [Listing(GREETER, frozenset({svc}), frozenset({svc}), True)])
-        await eventually(lambda: other_events[-1:] == [Listing(OTHER, frozenset({svc}), frozenset({svc}), True)])
+        await eventually(
+            lambda: (
+                greeter_events[-1:] == [Listing(GREETER, frozenset({svc}), frozenset({svc}), True)]
+            )
+        )
+        await eventually(
+            lambda: other_events[-1:] == [Listing(OTHER, frozenset({svc}), frozenset({svc}), True)]
+        )
         svc.tell("stop")
         await eventually(lambda: greeter_events[-1].service_instances == frozenset())
         await eventually(lambda: other_events[-1].service_instances == frozenset())
@@ -132,7 +150,9 @@ async def test_a_stopped_subscriber_is_dropped_from_every_key(caplog: pytest.Log
         with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
             rec.tell(Register(GREETER, svc))
             rec.tell(Register(OTHER, svc))
-            assert (await ask(rec, lambda r: Find(OTHER, r), timeout=1)).service_instances == frozenset({svc})
+            assert (
+                await ask(rec, lambda r: Find(OTHER, r), timeout=1)
+            ).service_instances == frozenset({svc})
         assert not [r for r in caplog.records if sub.path in r.getMessage()]
 
 
@@ -141,7 +161,9 @@ async def test_only_local_refs_can_register():
         rec = Receptionist(system).ref
         rec.tell(Register(GREETER, FunctionRef("fn", lambda _: None)))
         rec.tell(Register(GREETER, system.resolve("pekko://x@127.0.0.1:1/user/greeter")))
-        assert (await ask(rec, lambda r: Find(GREETER, r), timeout=1)).service_instances == frozenset()
+        assert (
+            await ask(rec, lambda r: Find(GREETER, r), timeout=1)
+        ).service_instances == frozenset()
 
 
 async def test_receptionist_is_one_per_system_and_lives_under_system():
@@ -162,23 +184,34 @@ async def test_plain_system_still_stops_cleanly():
 
 async def test_receptionist_exists_from_the_start():
     async with ActorSystem(Behaviors.ignore, "r") as system:
-        assert system.receptionist is not None  # created with the system, as Pekko's library extension
+        # created with the system, as Pekko's library extension
+        assert system.receptionist is not None
         assert system.resolve("pekko://r/system/receptionist") is Receptionist(system).ref
 
 
-async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(caplog: pytest.LogCaptureFixture):
+async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
+    caplog: pytest.LogCaptureFixture,
+):
     def subscribing(ctx: ActorContext[Any]) -> Behavior[Any]:
-        Receptionist(ctx.system).ref.tell(Subscribe(GREETER, ctx.message_adapter(lambda listing: ("listing", listing))))
-        return Behaviors.receive_message(lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same)
+        Receptionist(ctx.system).ref.tell(
+            Subscribe(GREETER, ctx.message_adapter(lambda listing: ("listing", listing)))
+        )
+        return Behaviors.receive_message(
+            lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
+        )
 
     async with ActorSystem(Behaviors.receive(spawner), "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
-        actor = await ask(system, lambda r: Spawn(Behaviors.setup(subscribing), "subscriber", r), timeout=1)
+        actor = await ask(
+            system, lambda r: Spawn(Behaviors.setup(subscribing), "subscriber", r), timeout=1
+        )
         rec = Receptionist(system).ref
         await asyncio.sleep(0.05)
         actor.tell("stop")
         await eventually(lambda: gone(system, actor.path))
         with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
             rec.tell(Register(GREETER, svc))
-            assert (await ask(rec, lambda r: Find(GREETER, r), timeout=1)).service_instances == frozenset({svc})
+            assert (
+                await ask(rec, lambda r: Find(GREETER, r), timeout=1)
+            ).service_instances == frozenset({svc})
         assert not [r for r in caplog.records if actor.path in r.getMessage()]

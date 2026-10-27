@@ -1,5 +1,7 @@
 """Phi-accrual failure detection and the heartbeat ring, as Pekko's PhiAccrualFailureDetector,
-DefaultFailureDetectorRegistry, HeartbeatNodeRing and ClusterHeartbeatSenderState. Times are seconds."""
+DefaultFailureDetectorRegistry, HeartbeatNodeRing and ClusterHeartbeatSenderState. Times are
+seconds."""
+
 from __future__ import annotations
 
 import math
@@ -14,7 +16,8 @@ from ..remote import Address, UniqueAddress
 
 @dataclass(frozen=True)
 class HeartbeatHistory:
-    """Mean and variance of the last ``max_sample_size`` heartbeat intervals, kept as running sums."""
+    """Mean and variance of the last ``max_sample_size`` heartbeat intervals, kept as running
+    sums."""
 
     max_sample_size: int
     intervals: tuple[float, ...] = ()
@@ -128,7 +131,8 @@ def phi(time_diff: float, mean: float, std_deviation: float) -> float:
     except OverflowError:  # the JVM's exp gives Infinity here: long before the mean, phi is 0
         e = math.inf
     if time_diff > mean:
-        return math.inf if e == 0.0 else -math.log10(e / (1.0 + e))  # the JVM's log10(0) is -Infinity
+        # the JVM's log10(0) is -Infinity
+        return math.inf if e == 0.0 else -math.log10(e / (1.0 + e))
     return -math.log10(1.0 - 1.0 / (1.0 + e))
 
 
@@ -161,15 +165,15 @@ class FailureDetectorRegistry:
 
 
 def _ring_hash(node: UniqueAddress) -> int:
-    # ponytail: Pekko orders the ring by hashCode; Python's hash() is salted per process, and every node
-    # must compute the same ring, so use a stable checksum instead.
+    # ponytail: Pekko orders the ring by hashCode; Python's hash() is salted per process, and every
+    # node must compute the same ring, so use a stable checksum instead.
     return zlib.crc32(f"{node.host}:{node.port}:{node.uid}".encode())
 
 
 @dataclass(frozen=True)
 class HeartbeatNodeRing:
-    """Who heartbeats whom: each node monitors the next ``monitored_by_nr_of_members`` reachable nodes in
-    a ring sorted by hash, plus up to that many unreachable nodes in between."""
+    """Who heartbeats whom: each node monitors the next ``monitored_by_nr_of_members`` reachable
+    nodes in a ring sorted by hash, plus up to that many unreachable nodes in between."""
 
     self_address: UniqueAddress
     nodes: frozenset[UniqueAddress]
@@ -182,7 +186,9 @@ class HeartbeatNodeRing:
 
     @cached_property
     def node_ring(self) -> tuple[UniqueAddress, ...]:
-        return tuple(sorted(self.nodes, key=lambda n: (_ring_hash(n), n.address.host, n.address.port)))
+        return tuple(
+            sorted(self.nodes, key=lambda n: (_ring_hash(n), n.address.host, n.address.port))
+        )
 
     @cached_property
     def my_receivers(self) -> frozenset[UniqueAddress]:
@@ -195,13 +201,15 @@ class HeartbeatNodeRing:
     def receivers(self, sender: UniqueAddress) -> frozenset[UniqueAddress]:
         if self._use_all_as_receivers:
             return self.nodes - {sender}
-        # Pick nodes after `sender` until n reachable ones have been selected. Intermediate unreachable nodes,
-        # up to `monitored_by_nr_of_members` of them, are included too, so the leader can keep removing
-        # downed nodes when many are shut down at once and nobody else is watching them (Akka #16624).
+        # Pick nodes after `sender` until n reachable ones have been selected. Intermediate
+        # unreachable nodes, up to `monitored_by_nr_of_members` of them, are included too, so the
+        # leader can keep removing downed nodes when many are shut down at once and nobody else is
+        # watching them (Akka #16624).
         n = self.monitored_by_nr_of_members
         acc: set[UniqueAddress] = set()
         at = self.node_ring.index(sender)
-        for node in self.node_ring[at + 1 :] + self.node_ring[:at]:  # the ring, starting after the sender
+        # the ring, starting after the sender
+        for node in self.node_ring[at + 1 :] + self.node_ring[:at]:
             if n == 0:
                 break
             if node in self.unreachable:
@@ -223,8 +231,9 @@ class HeartbeatNodeRing:
 
 @dataclass(frozen=True)
 class HeartbeatSenderState:
-    """The sender's view: the ring, plus receivers that dropped out of it while unreachable and are still
-    heartbeated until they answer or leave. The registry is shared and mutable, as Pekko's."""
+    """The sender's view: the ring, plus receivers that dropped out of it while unreachable and are
+    still heartbeated until they answer or leave. The registry is shared and mutable, as
+    Pekko's."""
 
     ring: HeartbeatNodeRing
     old_receivers_now_unreachable: frozenset[UniqueAddress]
@@ -238,8 +247,13 @@ class HeartbeatSenderState:
     def self_address(self) -> UniqueAddress:
         return self.ring.self_address
 
-    def init(self, nodes: frozenset[UniqueAddress], unreachable: frozenset[UniqueAddress]) -> HeartbeatSenderState:
-        return replace(self, ring=replace(self.ring, nodes=nodes | {self.self_address}, unreachable=unreachable))
+    def init(
+        self, nodes: frozenset[UniqueAddress], unreachable: frozenset[UniqueAddress]
+    ) -> HeartbeatSenderState:
+        return replace(
+            self,
+            ring=replace(self.ring, nodes=nodes | {self.self_address}, unreachable=unreachable),
+        )
 
     def contains(self, node: UniqueAddress) -> bool:
         return node in self.ring.nodes
@@ -251,14 +265,20 @@ class HeartbeatSenderState:
         new = self._membership_change(self.ring.remove(node))
         self.failure_detector.remove(node.address)
         if node in new.old_receivers_now_unreachable:
-            return replace(new, old_receivers_now_unreachable=new.old_receivers_now_unreachable - {node})
+            return replace(
+                new, old_receivers_now_unreachable=new.old_receivers_now_unreachable - {node}
+            )
         return new
 
     def unreachable_member(self, node: UniqueAddress) -> HeartbeatSenderState:
-        return self._membership_change(replace(self.ring, unreachable=self.ring.unreachable | {node}))
+        return self._membership_change(
+            replace(self.ring, unreachable=self.ring.unreachable | {node})
+        )
 
     def reachable_member(self, node: UniqueAddress) -> HeartbeatSenderState:
-        return self._membership_change(replace(self.ring, unreachable=self.ring.unreachable - {node}))
+        return self._membership_change(
+            replace(self.ring, unreachable=self.ring.unreachable - {node})
+        )
 
     def _membership_change(self, new_ring: HeartbeatNodeRing) -> HeartbeatSenderState:
         removed = self.ring.my_receivers - new_ring.my_receivers
@@ -278,5 +298,7 @@ class HeartbeatSenderState:
             # back from unreachable: ok to stop heartbeating to it
             if from_ not in self.ring.my_receivers:
                 self.failure_detector.remove(from_.address)
-            return replace(self, old_receivers_now_unreachable=self.old_receivers_now_unreachable - {from_})
+            return replace(
+                self, old_receivers_now_unreachable=self.old_receivers_now_unreachable - {from_}
+            )
         return self

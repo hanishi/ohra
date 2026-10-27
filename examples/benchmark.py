@@ -4,6 +4,7 @@ from this file.
 
     uv run python examples/benchmark.py
 """
+
 import asyncio
 import sys
 import time

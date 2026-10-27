@@ -44,7 +44,8 @@ Cart = EntityTypeKey[Command]("Cart")
 
 
 def cart(entity: EntityContext[Command]) -> Behavior[Command]:
-    return counter()  # entity.entity_id names this cart; entity.shard.tell(Passivate(ctx.self)) stops it early
+    # entity.entity_id names this cart; entity.shard.tell(Passivate(ctx.self)) stops it early
+    return counter()
 
 
 region = Sharding.init(Entity(Cart, cart).with_passivate_after(30.0))
@@ -60,7 +61,7 @@ Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "car
 from pekko_py import ClusterSharding, Entity, EntityTypeKey
 
 COUNTER = EntityTypeKey[CountUp]("Counter")
-region = ClusterSharding(system).init(Entity(COUNTER, counter))          # call it on every node
+region = ClusterSharding(system).init(Entity(COUNTER, counter))  # call it on every node
 print(await ask(ClusterSharding(system).entity_ref_for(COUNTER, "alice"), CountUp, timeout=3))
 ```
 

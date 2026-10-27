@@ -1,4 +1,5 @@
 """Micro-batching and bounded mailboxes."""
+
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +65,9 @@ async def test_messages_during_an_async_flush_form_the_next_batch():
 
 async def test_pending_batch_is_flushed_on_stop():
     batches: list[list[int]] = []
-    async with ActorSystem(batching(10, 10.0, lambda batch: batches.append(list(batch))), "t") as system:
+    async with ActorSystem(
+        batching(10, 10.0, lambda batch: batches.append(list(batch))), "t"
+    ) as system:
         system.tell(1)
         system.tell(2)
         await asyncio.sleep(0.01)  # stop is a system message; let the two be collected first
@@ -216,7 +219,8 @@ async def test_cancelling_a_granted_offer_hands_the_slot_to_the_next_waiter():
             second = asyncio.create_task(system.offer(3))
             await asyncio.sleep(0.01)
             gate.set()
-            await asyncio.sleep(0)  # the actor dequeues 1 and grants the slot to `first`, which has not run yet
+            # the actor dequeues 1 and grants the slot to `first`, which has not run yet
+            await asyncio.sleep(0)
             first.cancel()
             await asyncio.wait_for(second, 1)  # the grant must pass on, not die with `first`
             await eventually(lambda: seen == [0, 1, 3])

@@ -1,5 +1,6 @@
 """The pure parts of cluster sharding: LeastShardAllocationStrategy and the coordinator's state, as
 LeastShardAllocationStrategy.scala and ShardCoordinator.State."""
+
 from __future__ import annotations
 
 import pytest
@@ -29,7 +30,10 @@ def member(node: UniqueAddress, up_number: int, status: MemberStatus = "up") -> 
 MEMBERS = {RA: member(A, 1), RB: member(B, 2), RC: member(C, 3)}
 
 
-def cluster_state(members: tuple[Member, ...] = tuple(MEMBERS.values()), unreachable: frozenset[Member] = frozenset()) -> CurrentClusterState:
+def cluster_state(
+    members: tuple[Member, ...] = tuple(MEMBERS.values()),
+    unreachable: frozenset[Member] = frozenset(),
+) -> CurrentClusterState:
     return CurrentClusterState(members, unreachable, frozenset(), Address("c", "127.0.0.1", 1))
 
 
@@ -39,40 +43,82 @@ def shards(*ids: int) -> tuple[str, ...]:
 
 def test_allocate_picks_the_region_with_fewest_shards_oldest_on_ties():
     strategy = LeastShardAllocationStrategy(absolute_limit=0, relative_limit=0.1)
-    assert strategy.allocate_shard("9", {RA: shards(1, 2), RB: shards(3), RC: shards(4, 5)}, MEMBERS) == RB
-    assert strategy.allocate_shard("9", {RA: shards(1), RB: shards(3), RC: shards()}, MEMBERS) == RC
-    assert strategy.allocate_shard("9", {RA: (), RB: (), RC: ()}, MEMBERS) == RA  # the oldest on a tie
+    assert (
+        strategy.allocate_shard("9", {RA: shards(1, 2), RB: shards(3), RC: shards(4, 5)}, MEMBERS)
+        == RB
+    )
+    assert (
+        strategy.allocate_shard("9", {RA: shards(1), RB: shards(3), RC: shards()}, MEMBERS) == RC
+    )
+    # the oldest on a tie
+    assert strategy.allocate_shard("9", {RA: (), RB: (), RC: ()}, MEMBERS) == RA
     assert strategy.allocate_shard("9", {}, MEMBERS) is None
 
 
 def test_rebalance_phase_one_moves_shards_from_regions_above_optimal():
     strategy = LeastShardAllocationStrategy(absolute_limit=0, relative_limit=0.1)
-    allocations = {RA: shards(1, 2, 3, 4, 5), RB: shards(6), RC: ()}  # 6 shards, optimal 2 per region
+    # 6 shards, optimal 2 per region
+    allocations = {RA: shards(1, 2, 3, 4, 5), RB: shards(6), RC: ()}
     moved = strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state())
-    assert len(moved) == 1 and moved <= {"1", "2", "3", "4", "5"}  # limit(6) = max(1, int(0.1 * 6)) = 1
+    # limit(6) = max(1, int(0.1 * 6)) = 1
+    assert len(moved) == 1 and moved <= {"1", "2", "3", "4", "5"}
 
 
 def test_rebalance_phase_two_fills_regions_below_optimal():
     strategy = LeastShardAllocationStrategy(absolute_limit=0, relative_limit=1.0)
-    allocations = {RA: shards(1, 2), RB: shards(3, 4), RC: ()}  # 4 shards, optimal 2: phase one has nothing
+    # 4 shards, optimal 2: phase one has nothing
+    allocations = {RA: shards(1, 2), RB: shards(3, 4), RC: ()}
     moved = strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state())
-    assert moved == {"1"} or moved == {"3"}  # countBelowOptimal = (optimal - 1) - 0 = 1: one shard from a full region
+    # countBelowOptimal = (optimal - 1) - 0 = 1: one shard from a full region
+    assert moved == {"1"} or moved == {"3"}
 
 
 def test_rebalance_limits():
     allocations = {RA: shards(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), RB: (), RC: ()}
-    assert len(LeastShardAllocationStrategy(absolute_limit=2, relative_limit=1.0).rebalance(allocations, MEMBERS, frozenset(), cluster_state())) == 2
-    assert len(LeastShardAllocationStrategy(absolute_limit=0, relative_limit=0.5).rebalance(allocations, MEMBERS, frozenset(), cluster_state())) == 5
-    assert len(LeastShardAllocationStrategy(absolute_limit=0, relative_limit=1.0).rebalance(allocations, MEMBERS, frozenset(), cluster_state())) == 6  # down to optimal 4 = 10 // 3 + 1
+    assert (
+        len(
+            LeastShardAllocationStrategy(absolute_limit=2, relative_limit=1.0).rebalance(
+                allocations, MEMBERS, frozenset(), cluster_state()
+            )
+        )
+        == 2
+    )
+    assert (
+        len(
+            LeastShardAllocationStrategy(absolute_limit=0, relative_limit=0.5).rebalance(
+                allocations, MEMBERS, frozenset(), cluster_state()
+            )
+        )
+        == 5
+    )
+    # down to optimal 4 = 10 // 3 + 1
+    assert (
+        len(
+            LeastShardAllocationStrategy(absolute_limit=0, relative_limit=1.0).rebalance(
+                allocations, MEMBERS, frozenset(), cluster_state()
+            )
+        )
+        == 6
+    )
 
 
 def test_rebalance_is_skipped_while_in_progress_or_not_a_good_time():
     strategy = LeastShardAllocationStrategy(absolute_limit=0, relative_limit=1.0)
     allocations = {RA: shards(1, 2, 3, 4), RB: (), RC: ()}
-    assert strategy.rebalance(allocations, MEMBERS, frozenset({"1"}), cluster_state()) == frozenset()
-    assert strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state(unreachable=frozenset({member(C, 3)}))) == frozenset()
+    assert (
+        strategy.rebalance(allocations, MEMBERS, frozenset({"1"}), cluster_state()) == frozenset()
+    )
+    assert (
+        strategy.rebalance(
+            allocations, MEMBERS, frozenset(), cluster_state(unreachable=frozenset({member(C, 3)}))
+        )
+        == frozenset()
+    )
     joining = (member(A, 1), member(B, 2), Member(C, 2**31 - 1, "joining"))
-    assert strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state(members=joining)) == frozenset()
+    assert (
+        strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state(members=joining))
+        == frozenset()
+    )
     assert strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state()) != frozenset()
 
 

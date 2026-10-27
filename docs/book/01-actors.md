@@ -47,7 +47,9 @@ class Fetched:
 
 def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
     @Behaviors.receive
-    def on_message(ctx: ActorContext[Fetched | str], msg: Fetched | str) -> Behavior[Fetched | str]:
+    def on_message(
+        ctx: ActorContext[Fetched | str], msg: Fetched | str
+    ) -> Behavior[Fetched | str]:
         match msg:
             case str(url):
                 ctx.ask(fetcher, lambda r: Fetch(url, r), Fetched, timeout=2)

@@ -1,8 +1,23 @@
 """Checked by pyright, never run. Each `type: ignore` must be needed,
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
+
 from dataclasses import dataclass
 
-from pekko_py import ActorContext, ActorRef, RemoteRef, ShardingEnvelope, ActorSystem, Behavior, Behaviors, MailboxSelector, Routers, SpawnProtocol, StashBuffer, TimerScheduler, batching
+from pekko_py import (
+    ActorContext,
+    ActorRef,
+    RemoteRef,
+    ShardingEnvelope,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    MailboxSelector,
+    Routers,
+    SpawnProtocol,
+    StashBuffer,
+    TimerScheduler,
+    batching,
+)
 
 
 @dataclass(frozen=True)
@@ -60,13 +75,19 @@ _batched: Behavior[Ping] = batching(10, 0.1, handle_pings)
 _wrong: Behavior[str] = batching(10, 0.1, handle_pings)  # type: ignore[assignment]
 _mailbox = MailboxSelector.bounded(10, overflow="drop_everything")  # type: ignore[arg-type]
 
-_pool: Behavior[Ping] = Routers.pool(4, _b).with_consistent_hashing_routing(lambda p: p.reply_to.path)
+_pool: Behavior[Ping] = Routers.pool(4, _b).with_consistent_hashing_routing(
+    lambda p: p.reply_to.path
+)
 _pool_wrong: Behavior[str] = Routers.pool(4, _b)  # type: ignore[assignment]
 
 
 async def spawn_from_outside(system: ActorSystem[SpawnProtocol.Command]) -> None:
-    ref: ActorRef[Ping] = await system.ask(lambda r: SpawnProtocol.Spawn(_b, "pinger", r), timeout=1)
-    wrong: ActorRef[str] = await system.ask(lambda r: SpawnProtocol.Spawn(_b, "pinger", r), timeout=1)  # type: ignore[assignment]
+    ref: ActorRef[Ping] = await system.ask(
+        lambda r: SpawnProtocol.Spawn(_b, "pinger", r), timeout=1
+    )
+    wrong: ActorRef[str] = await system.ask(
+        lambda r: SpawnProtocol.Spawn(_b, "pinger", r), timeout=1
+    )  # type: ignore[assignment]
     del ref, wrong
 
 

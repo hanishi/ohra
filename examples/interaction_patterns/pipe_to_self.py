@@ -1,5 +1,6 @@
 """Send future result to self: pipe_to_self turns an awaitable's outcome into a message, so
 the actor's state is only ever touched from its own handler (Pekko interaction patterns)."""
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -9,7 +10,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from collections.abc import Awaitable, Callable
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Failure, Success, Try
+from pekko_py import (
+    ActorContext,
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    Failure,
+    Success,
+    Try,
+)
 
 
 @dataclass(frozen=True)
@@ -58,7 +68,13 @@ def customer_repository(data_access: Callable[[Customer], Awaitable[None]]) -> B
             match msg:
                 case Update(value, reply_to):
                     if in_progress == MAX_OPERATIONS_IN_PROGRESS:
-                        reply_to.tell(UpdateFailure(value.id, f"Max {MAX_OPERATIONS_IN_PROGRESS} concurrent operations supported"))
+                        reply_to.tell(
+                            UpdateFailure(
+                                value.id,
+                                f"Max {MAX_OPERATIONS_IN_PROGRESS} concurrent operations "
+                                "supported",
+                            )
+                        )
                         return Behaviors.same
 
                     def adapt(r: Try[None]) -> _WrappedUpdateResult:
@@ -66,7 +82,9 @@ def customer_repository(data_access: Callable[[Customer], Awaitable[None]]) -> B
                             case Success(_):
                                 return _WrappedUpdateResult(UpdateSuccess(value.id), reply_to)
                             case Failure(e):
-                                return _WrappedUpdateResult(UpdateFailure(value.id, str(e)), reply_to)
+                                return _WrappedUpdateResult(
+                                    UpdateFailure(value.id, str(e)), reply_to
+                                )
 
                     ctx.pipe_to_self(data_access(value), adapt)
                     return next_behavior(in_progress + 1)
@@ -86,7 +104,11 @@ async def main() -> None:
             raise ValueError("stale version")
 
     async with ActorSystem(customer_repository(save), "repo") as system:
-        print(await system.ask(lambda r: Update(Customer("123", 1, "Alice", "Fairy tail road 7"), r), timeout=1))
+        print(
+            await system.ask(
+                lambda r: Update(Customer("123", 1, "Alice", "Fairy tail road 7"), r), timeout=1
+            )
+        )
         print(await system.ask(lambda r: Update(Customer("124", -1, "Bob", ""), r), timeout=1))
 
 

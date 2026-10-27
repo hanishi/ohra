@@ -1,11 +1,17 @@
 """The pure parts of the cluster singleton: settings arithmetic and the oldest-changed tracker, as
 ClusterSingletonManager.scala's retry setup and OldestChangedBuffer."""
+
 from __future__ import annotations
 
 import pytest
 
 from pekko_py.cluster.gossip import UP_NUMBER_UNSET, Member, MemberStatus
-from pekko_py.cluster.singleton import ClusterSingletonSettings, InitialOldestState, OldestChanged, OldestChangedTracker
+from pekko_py.cluster.singleton import (
+    ClusterSingletonSettings,
+    InitialOldestState,
+    OldestChanged,
+    OldestChangedTracker,
+)
 from pekko_py.remote import UniqueAddress
 
 A = UniqueAddress("127.0.0.1", 1, 11, "c")
@@ -25,12 +31,20 @@ def test_retry_arithmetic_follows_pekko():
     assert (s.max_hand_over_retries, s.max_take_over_retries) == (33, 30)
     s = ClusterSingletonSettings(min_number_of_hand_over_retries=1)
     assert (s.max_hand_over_retries, s.max_take_over_retries) == (3, 1)
-    s = ClusterSingletonSettings(min_number_of_hand_over_retries=1, removal_margin=0.3, hand_over_retry_interval=0.1)
-    assert (s.max_hand_over_retries, s.max_take_over_retries) == (6, 3)  # whole milliseconds, as Pekko: 300 // 100 is 3
+    s = ClusterSingletonSettings(
+        min_number_of_hand_over_retries=1, removal_margin=0.3, hand_over_retry_interval=0.1
+    )
+    # whole milliseconds, as Pekko: 300 // 100 is 3
+    assert (s.max_hand_over_retries, s.max_take_over_retries) == (6, 3)
 
 
 def test_settings_are_validated():
-    for bad in (dict(buffer_size=10001), dict(min_number_of_hand_over_retries=0), dict(hand_over_retry_interval=0.0), dict(removal_margin=-1.0)):
+    for bad in (
+        dict(buffer_size=10001),
+        dict(min_number_of_hand_over_retries=0),
+        dict(hand_over_retry_interval=0.0),
+        dict(removal_margin=-1.0),
+    ):
         with pytest.raises(ValueError):
             ClusterSingletonSettings(**bad)  # pyright: ignore[reportArgumentType]
     assert ClusterSingletonSettings(buffer_size=0).buffer_size == 0
@@ -38,10 +52,13 @@ def test_settings_are_validated():
 
 def test_initial_state_lists_the_oldest_up_to_self():
     t = OldestChangedTracker(B)
-    t.handle_initial([member(A, 1), member(B, 2), member(C, 3), member(D, UP_NUMBER_UNSET, "joining")])
+    t.handle_initial(
+        [member(A, 1), member(B, 2), member(C, 3), member(D, UP_NUMBER_UNSET, "joining")]
+    )
     assert t.next_change() == InitialOldestState((A, B), True)
     assert t.next_change() is None
-    assert [m.unique_address for m in t.members_by_age] == [A, B, C]  # the joining member has no age yet
+    # the joining member has no age yet
+    assert [m.unique_address for m in t.members_by_age] == [A, B, C]
     unsafe = OldestChangedTracker(B)
     unsafe.handle_initial([member(A, 1, "leaving"), member(B, 2), member(C, 3)])
     assert unsafe.next_change() == InitialOldestState((A, B), False)

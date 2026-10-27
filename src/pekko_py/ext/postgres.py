@@ -1,13 +1,15 @@
-"""PostgresStore: durable states in a Postgres table every node can reach, for persisted actors on a cluster.
+"""PostgresStore: durable states in a Postgres table every node can reach, for persisted actors on
+a cluster.
 
     async with PostgresStore[Cart]("postgresql://user:pw@db/app") as store:
         cart = Behaviors.persisted(store)(cart_factory)
 
-The contract is SqliteStore's: ``save`` commits only revision 1 for a new id, or exactly the stored revision
-plus one, so two incarnations of one entity on two nodes cannot both write. The table follows Pekko's JDBC
-durable state names (``durable_state``: ``persistence_id``, ``revision``, ``state_payload``), without the JVM
-serializer columns. Requires the ``postgres`` extra.
+The contract is SqliteStore's: ``save`` commits only revision 1 for a new id, or exactly the stored
+revision plus one, so two incarnations of one entity on two nodes cannot both write. The table
+follows Pekko's JDBC durable state names (``durable_state``: ``persistence_id``, ``revision``,
+``state_payload``), without the JVM serializer columns. Requires the ``postgres`` extra.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -26,8 +28,9 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?")
 
 
 class PostgresStore[S]:
-    """A connection pool owned by ``async with``. The default codec is pickle: trusted storage only; pass
-    (dumps, loads) for anything else. ``table`` may be schema-qualified, as in ``"app.durable_state"``."""
+    """A connection pool owned by ``async with``. The default codec is pickle: trusted storage
+    only; pass (dumps, loads) for anything else. ``table`` may be schema-qualified, as in
+    ``"app.durable_state"``."""
 
     def __init__(
         self,
@@ -43,13 +46,18 @@ class PostgresStore[S]:
         self._pool: AsyncConnectionPool[AsyncConnection[TupleRow]] | None = None
 
     async def __aenter__(self) -> Self:
-        pool = AsyncConnectionPool[AsyncConnection[TupleRow]](self._dsn, open=False, kwargs={"autocommit": True})
+        pool = AsyncConnectionPool[AsyncConnection[TupleRow]](
+            self._dsn, open=False, kwargs={"autocommit": True}
+        )
         await pool.open(wait=True)
         try:
             async with pool.connection() as conn, conn.transaction():
-                # Concurrent CREATE TABLE IF NOT EXISTS can fail on the catalog's unique index when pods start
-                # together; a transaction-scoped advisory lock lets one create while the others wait.
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtext('pekko_py.durable_state'))")
+                # Concurrent CREATE TABLE IF NOT EXISTS can fail on the catalog's unique index when
+                # pods start together; a transaction-scoped advisory lock lets one create while the
+                # others wait.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('pekko_py.durable_state'))"
+                )
                 await conn.execute(
                     sql.SQL(
                         "CREATE TABLE IF NOT EXISTS {} (persistence_id TEXT PRIMARY KEY, "
@@ -62,21 +70,28 @@ class PostgresStore[S]:
         self._pool = pool
         return self
 
-    async def __aexit__(self, *_: type[BaseException] | BaseException | TracebackType | None) -> None:
+    async def __aexit__(
+        self, *_: type[BaseException] | BaseException | TracebackType | None
+    ) -> None:
         pool, self._pool = self._pool, None
         if pool is not None:
             await pool.close()
 
     def _opened(self) -> AsyncConnectionPool[AsyncConnection[TupleRow]]:
         if self._pool is None:
-            raise RuntimeError("PostgresStore is not open: use it inside `async with PostgresStore(...) as store`")
+            raise RuntimeError(
+                "PostgresStore is not open: use it inside `async with PostgresStore(...) as store`"
+            )
         return self._pool
 
-    async def _execute(self, query: sql.Composed, params: tuple[object, ...]) -> tuple[int, TupleRow | None]:
-        """Run one statement; return its row count and first row. A restarted server leaves the pool holding closed
-        connections: on a connection error, drop every broken idle one at once and retry the statement once. The
-        pool's own check would test each before lending it, but backs off 1, 2, 4... seconds per broken connection.
-        A retried save that had in fact committed fails the revision check, as any lost write would."""
+    async def _execute(
+        self, query: sql.Composed, params: tuple[object, ...]
+    ) -> tuple[int, TupleRow | None]:
+        """Run one statement; return its row count and first row. A restarted server leaves the
+        pool holding closed connections: on a connection error, drop every broken idle one at once
+        and retry the statement once. The pool's own check would test each before lending it, but
+        backs off 1, 2, 4... seconds per broken connection. A retried save that had in fact
+        committed fails the revision check, as any lost write would."""
         pool = self._opened()
 
         async def run() -> tuple[int, TupleRow | None]:
@@ -92,7 +107,10 @@ class PostgresStore[S]:
 
     async def load(self, persistence_id: str) -> tuple[S, int] | None:
         _, row = await self._execute(
-            sql.SQL("SELECT state_payload, revision FROM {} WHERE persistence_id = %s").format(self._table), (persistence_id,)
+            sql.SQL("SELECT state_payload, revision FROM {} WHERE persistence_id = %s").format(
+                self._table
+            ),
+            (persistence_id,),
         )
         return None if row is None else (self._loads(row[0]), row[1])
 
@@ -106,11 +124,19 @@ class PostgresStore[S]:
             rowcount, _ = await self._execute(query, (persistence_id, data))
         else:
             query = sql.SQL(
-                "UPDATE {} SET revision = %s, state_payload = %s WHERE persistence_id = %s AND revision = %s"
+                "UPDATE {} SET revision = %s, state_payload = %s WHERE persistence_id = %s AND "
+                "revision = %s"
             ).format(self._table)
-            rowcount, _ = await self._execute(query, (revision, data, persistence_id, revision - 1))
+            rowcount, _ = await self._execute(
+                query, (revision, data, persistence_id, revision - 1)
+            )
         if rowcount != 1:
-            raise RevisionConflictError(f"{persistence_id}: revision {revision} is not the next revision")
+            raise RevisionConflictError(
+                f"{persistence_id}: revision {revision} is not the next revision"
+            )
 
     async def delete(self, persistence_id: str) -> None:
-        await self._execute(sql.SQL("DELETE FROM {} WHERE persistence_id = %s").format(self._table), (persistence_id,))
+        await self._execute(
+            sql.SQL("DELETE FROM {} WHERE persistence_id = %s").format(self._table),
+            (persistence_id,),
+        )

@@ -1,4 +1,5 @@
 """ctx.stop(child, after_pending=True): the stop queues behind the child's pending messages."""
+
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +54,12 @@ def child(log: list[str], gate: asyncio.Event) -> Behavior[ChildCmd]:
     return Behaviors.receive_message(on_message)
 
 
-def parent(log: list[str], gate: asyncio.Event, holder: list[ActorRef[ChildCmd]], mailbox: MailboxSelector | None) -> Behavior[StopChild]:
+def parent(
+    log: list[str],
+    gate: asyncio.Event,
+    holder: list[ActorRef[ChildCmd]],
+    mailbox: MailboxSelector | None,
+) -> Behavior[StopChild]:
     def setup(ctx: ActorContext[StopChild]) -> Behavior[StopChild]:
         ref = ctx.spawn(child(log, gate), "child", mailbox)
         ctx.watch(ref)
@@ -94,7 +100,9 @@ async def test_stop_after_pending_survives_drop_old_overflow():
     log: list[str] = []
     gate = asyncio.Event()
     holder: list[ActorRef[ChildCmd]] = []
-    async with ActorSystem(parent(log, gate, holder, MailboxSelector.bounded(2, overflow="drop_old")), "s") as system:
+    async with ActorSystem(
+        parent(log, gate, holder, MailboxSelector.bounded(2, overflow="drop_old")), "s"
+    ) as system:
         await eventually(lambda: bool(holder))
         c = holder[0]
         c.tell(Work("busy"))  # taken by the handler, which then blocks on the gate
@@ -114,7 +122,9 @@ async def test_pending_stop_does_not_take_a_mailbox_slot():
     log: list[str] = []
     gate = asyncio.Event()
     holder: list[ActorRef[ChildCmd]] = []
-    async with ActorSystem(parent(log, gate, holder, MailboxSelector.bounded(1, overflow="fail")), "s") as system:
+    async with ActorSystem(
+        parent(log, gate, holder, MailboxSelector.bounded(1, overflow="fail")), "s"
+    ) as system:
         await eventually(lambda: bool(holder))
         c = holder[0]
         c.tell(Work("busy"))
@@ -128,10 +138,13 @@ async def test_pending_stop_does_not_take_a_mailbox_slot():
         finally:
             gate.set()
         await eventually(lambda: "terminated" in log)
-    assert log == ["busy", "terminated"]  # "fits" was accepted but queued behind the stop, so it went with it
+    # "fits" was accepted but queued behind the stop, so it went with it
+    assert log == ["busy", "terminated"]
 
 
-async def test_child_stopping_on_its_own_does_not_dead_letter_the_pending_stop(caplog: pytest.LogCaptureFixture):
+async def test_child_stopping_on_its_own_does_not_dead_letter_the_pending_stop(
+    caplog: pytest.LogCaptureFixture,
+):
     caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()

@@ -1,8 +1,9 @@
 """Node "greeter": listens on 127.0.0.1:2552 and answers Greet from any node.
 
-    uv run python examples/remoting/greeter_node.py          # terminal 1
-    uv run python examples/remoting/client_node.py           # terminal 2
+uv run python examples/remoting/greeter_node.py          # terminal 1
+uv run python examples/remoting/client_node.py           # terminal 2
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -18,7 +19,8 @@ from pekko_py import ActorContext, ActorSystem, Behavior, Behaviors  # noqa: E40
 @Behaviors.receive
 def greeter(ctx: ActorContext[Greet], msg: Greet) -> Behavior[Greet]:
     ctx.log.info("greeting %s for %s", msg.name, msg.reply_to.path)
-    msg.reply_to.tell(Greeted(f"hello {msg.name}", served_by=ctx.self.path))  # reply_to is a RemoteRef
+    # reply_to is a RemoteRef
+    msg.reply_to.tell(Greeted(f"hello {msg.name}", served_by=ctx.self.path))
     return Behaviors.same
 
 

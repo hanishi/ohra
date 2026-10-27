@@ -1,6 +1,8 @@
-"""Apache Pekko's ClusterSharding across nodes: a ShardCoordinator singleton allocating shards to regions with the
-LeastShardAllocationStrategy, a ShardRegion on every node, hand-off for rebalancing and for a leaving node. The
-coordinator rebuilds its state from the regions' registrations instead of distributed data."""
+"""Apache Pekko's ClusterSharding across nodes: a ShardCoordinator singleton allocating shards to
+regions with the LeastShardAllocationStrategy, a ShardRegion on every node, hand-off for
+rebalancing and for a leaving node. The coordinator rebuilds its state from the regions'
+registrations instead of distributed data."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -67,12 +69,12 @@ __all__ = [
 ]
 
 
-# --- the extension -------------------------------------------------------------------------------------------------
+# --- the extension -------------------------------------------------------------------------------
 
 
 class ClusterSharding:
-    """``ClusterSharding(system).init(Entity(key, create))`` returns the region ref; ``entity_ref_for(key, id)``
-    addresses an entity wherever it lives, as Pekko Typed."""
+    """``ClusterSharding(system).init(Entity(key, create))`` returns the region ref;
+    ``entity_ref_for(key, id)`` addresses an entity wherever it lives, as Pekko Typed."""
 
     system: ActorSystem[Any]
     _regions: dict[str, ActorRef[Any]]
@@ -81,7 +83,10 @@ class ClusterSharding:
 
     def __new__(cls, system: ActorSystem[Any]) -> ClusterSharding:
         if system.cluster is None:
-            raise RuntimeError(f"system {system.name!r} has no cluster: pass cluster=ClusterSettings(...) to ActorSystem")
+            raise RuntimeError(
+                f"system {system.name!r} has no cluster: pass cluster=ClusterSettings(...) to "
+                "ActorSystem"
+            )
         if system.cluster_sharding is None:
             self = object.__new__(cls)
             self.system = system
@@ -102,9 +107,13 @@ class ClusterSharding:
         progress = _ExitingProgress()
         region = self._parent.spawn_child(region_behavior(entity, settings, progress), name, None)
         CoordinatedShutdown(self.system).add_task(
-            "cluster-sharding-shutdown-region", f"region-shutdown-{name}", progress.task(Cluster(self.system), region.ref)
+            "cluster-sharding-shutdown-region",
+            f"region-shutdown-{name}",
+            progress.task(Cluster(self.system), region.ref),
         )
-        coordinator = SingletonActor(coordinator_behavior(name, settings), f"{name}Coordinator").with_stop_message(_Terminate())
+        coordinator = SingletonActor(
+            coordinator_behavior(name, settings), f"{name}Coordinator"
+        ).with_stop_message(_Terminate())
         if settings.coordinator_singleton_settings is not None:
             coordinator = coordinator.with_settings(settings.coordinator_singleton_settings)
         ClusterSingleton(self.system).init(coordinator)

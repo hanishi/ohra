@@ -1,5 +1,6 @@
 """Scheduling messages to self: a timer sends a message later, or periodically. The Buncher
 collects messages until a size or a deadline is reached (Pekko interaction patterns)."""
+
 import asyncio
 import sys
 from dataclasses import dataclass
@@ -92,7 +93,10 @@ async def main() -> None:
         return Behaviors.same
 
     sink = collect
-    async with ActorSystem(sink, "sink") as sink_system, ActorSystem(buncher(sink_system, 0.1, 10), "buncher") as b:
+    async with (
+        ActorSystem(sink, "sink") as sink_system,
+        ActorSystem(buncher(sink_system, 0.1, 10), "buncher") as b,
+    ):
         b.tell(ExcitingMessage("one"))
         b.tell(ExcitingMessage("two"))
         await asyncio.sleep(0.05)

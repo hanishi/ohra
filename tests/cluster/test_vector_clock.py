@@ -1,4 +1,5 @@
 """VectorClock: Pekko's causal ordering of gossip versions."""
+
 from __future__ import annotations
 
 from pekko_py.cluster.vector_clock import VectorClock

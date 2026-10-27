@@ -1,6 +1,8 @@
-"""Apache Pekko Discovery: look a service name up and get its addresses. The cluster bootstrap finds its peers
-through it; `ConfigServiceDiscovery` is Pekko's config method, `KubernetesApiServiceDiscovery` lives in
-`pekko_py.management.kubernetes`, and anything else is a subclass with one method."""
+"""Apache Pekko Discovery: look a service name up and get its addresses. The cluster bootstrap
+finds its peers through it; `ConfigServiceDiscovery` is Pekko's config method,
+`KubernetesApiServiceDiscovery` lives in `pekko_py.management.kubernetes`, and anything else is a
+subclass with one method."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -18,7 +20,8 @@ class Lookup:
 
 @dataclass(frozen=True, order=False)
 class ResolvedTarget:
-    """One address of a service: a host (name or IP), an optional port, and the IP when it is known."""
+    """One address of a service: a host (name or IP), an optional port, and the IP when it is
+    known."""
 
     host: str
     port: int | None
@@ -39,7 +42,8 @@ class DiscoveryTimeoutError(Exception):
 
 
 class ServiceDiscovery:
-    """Subclass and implement ``lookup``; any exception other than a timeout means the lookup failed."""
+    """Subclass and implement ``lookup``; any exception other than a timeout means the lookup
+    failed."""
 
     async def lookup(self, lookup: Lookup, resolve_timeout: float) -> Resolved:
         raise NotImplementedError

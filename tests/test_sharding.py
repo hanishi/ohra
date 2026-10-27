@@ -1,4 +1,6 @@
-"""Sharding: entity-per-id actors created on demand, passivated, and buffered across their lifecycle."""
+"""Sharding: entity-per-id actors created on demand, passivated, and buffered across their
+lifecycle."""
+
 from __future__ import annotations
 
 import asyncio
@@ -54,7 +56,8 @@ class Stop:
 
 @dataclass(frozen=True)
 class Halt:
-    """The stop message a region configured with with_stop_message delivers; the entity stops itself."""
+    """The stop message a region configured with with_stop_message delivers; the entity stops
+    itself."""
 
 
 @dataclass(frozen=True)
@@ -78,8 +81,9 @@ def counter(
     refs: list[tuple[ActorRef[ShardCommand], ActorRef[CounterCmd]]] | None = None,
     fail_ids: frozenset[str] = frozenset(),
 ) -> Callable[[EntityContext[CounterCmd]], Behavior[CounterCmd]]:
-    """An entity that logs its lifecycle. Stop asks the shard to passivate it; PostStop waits for gate if given.
-    refs collects (shard, self) on each Add; ids in fail_ids make the factory raise."""
+    """An entity that logs its lifecycle. Stop asks the shard to passivate it; PostStop waits for
+    gate if given. refs collects (shard, self) on each Add; ids in fail_ids make the factory
+    raise."""
 
     def create(entity: EntityContext[CounterCmd]) -> Behavior[CounterCmd]:
         if entity.entity_id in fail_ids:
@@ -88,7 +92,9 @@ def counter(
         log.append(f"key {entity.entity_type_key.name}")
 
         def active(total: int) -> Behavior[CounterCmd]:
-            async def on_message(ctx: ActorContext[CounterCmd], msg: CounterCmd) -> Behavior[CounterCmd]:
+            async def on_message(
+                ctx: ActorContext[CounterCmd], msg: CounterCmd
+            ) -> Behavior[CounterCmd]:
                 match msg:
                     case Add(n):
                         if refs is not None:
@@ -110,7 +116,9 @@ def counter(
                         return Behaviors.stopped()
                 return Behaviors.same
 
-            async def on_signal(_ctx: ActorContext[CounterCmd], sig: Signal) -> Behavior[CounterCmd]:
+            async def on_signal(
+                _ctx: ActorContext[CounterCmd], sig: Signal
+            ) -> Behavior[CounterCmd]:
                 if sig is PostStop:
                     if gate is not None:
                         await gate.wait()
@@ -220,7 +228,8 @@ async def test_stop_message_is_delivered_on_passivation():
     async with ActorSystem(region(log, stop_message=Halt()), "s") as system:
         a = Sharding.entity_ref_for(system, "a")
         a.tell(Add(1))
-        a.tell(Stop())  # entity asks to passivate; region answers with Halt and the entity stops itself
+        # entity asks to passivate; region answers with Halt and the entity stops itself
+        a.tell(Stop())
         await eventually(lambda: "stop a" in log)
         assert log.index("got halt a") < log.index("stop a")
 
@@ -255,7 +264,8 @@ async def test_duplicate_passivate_is_ignored():
         gate.set()
         assert await ask(a, Get, timeout=1) == 1
         await asyncio.sleep(0.02)
-        assert await ask(a, Get, timeout=1) == 1  # the second Passivate did not stop the new incarnation
+        # the second Passivate did not stop the new incarnation
+        assert await ask(a, Get, timeout=1) == 1
     assert log.count("start a") == 2
 
 
@@ -335,8 +345,10 @@ async def test_factory_failure_affects_only_that_entity():
         a = Sharding.entity_ref_for(system, "a")
         a.tell(Add(1))
         assert await ask(a, Get, timeout=1) == 1
+
         async def only_a() -> bool:
             return await live(system) == frozenset({"a"})
+
         for _ in range(50):
             if await only_a():
                 break
@@ -350,27 +362,34 @@ async def test_empty_entity_id_is_rejected():
     async with ActorSystem(region(log), "s") as system:
         with pytest.raises(ValueError):
             Sharding.entity_ref_for(system, "")
-        system.tell(ShardingEnvelope("", Add(1)))  # a hand-built envelope: dropped, the region survives
+        # a hand-built envelope: dropped, the region survives
+        system.tell(ShardingEnvelope("", Add(1)))
         a = Sharding.entity_ref_for(system, "a")
         a.tell(Add(1))
         assert await ask(a, Get, timeout=1) == 1
 
 
-async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_entity(caplog: pytest.LogCaptureFixture):
+async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_entity(
+    caplog: pytest.LogCaptureFixture,
+):
     caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()
-    direct = CoordinatedShutdownSettings(run_by_actor_system_terminate=False)  # the stop must reach the region before the gate opens
+    # the stop must reach the region before the gate opens
+    direct = CoordinatedShutdownSettings(run_by_actor_system_terminate=False)
     async with ActorSystem(region(log, gate), "s", shutdown=direct) as system:
         a = Sharding.entity_ref_for(system, "a")
         a.tell(Stop())
         await eventually(lambda: "got stop a" in log)
         a.tell(Add(1))  # buffered: the entity is stopping behind the gate
-        assert await live(system) == frozenset({"a"})  # the region has processed the envelope above
+        # the region has processed the envelope above
+        assert await live(system) == frozenset({"a"})
         system.terminate()
         gate.set()
         await system.when_terminated()
-    assert any(r.getMessage() == "dead letter to pekko://s/user/a: Add(n=1)" for r in caplog.records)
+    assert any(
+        r.getMessage() == "dead letter to pekko://s/user/a: Add(n=1)" for r in caplog.records
+    )
 
 
 async def test_dot_ids_get_safe_names():
@@ -408,14 +427,18 @@ async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
         a.tell(Add(1))
         a.tell(Add(2))
         a.tell(Add(3))  # beyond the buffer: a dead letter
-        await eventually(lambda: any("Add(n=3)" in r.getMessage() for r in caplog.records))  # the shard has seen all three
+        # the shard has seen all three
+        await eventually(lambda: any("Add(n=3)" in r.getMessage() for r in caplog.records))
         gate.set()
-        await eventually(lambda: log.count("start a") == 2)  # until then the full buffer rejects even a Get
+        # until then the full buffer rejects even a Get
+        await eventually(lambda: log.count("start a") == 2)
         assert await ask(a, Get, timeout=1) == 3
-    assert any(r.getMessage() == "dead letter to pekko://s/user/a: Add(n=3)" for r in caplog.records)
+    assert any(
+        r.getMessage() == "dead letter to pekko://s/user/a: Add(n=3)" for r in caplog.records
+    )
 
 
-# --- the Shard actor between region and entities (cluster sharding plan, Task 1) ---------------------------
+# --- the Shard actor between region and entities (cluster sharding plan, Task 1) -----------------
 
 import zlib  # noqa: E402
 
@@ -441,7 +464,9 @@ async def test_entities_live_under_shard_actors():
 
 
 def _id_in_another_shard_than(entity_id: str, n: int) -> str:
-    return next(f"x{i}" for i in range(10_000) if shard_id_of(f"x{i}", n) != shard_id_of(entity_id, n))
+    return next(
+        f"x{i}" for i in range(10_000) if shard_id_of(f"x{i}", n) != shard_id_of(entity_id, n)
+    )
 
 
 async def test_region_state_aggregates_over_shards():
@@ -471,28 +496,45 @@ async def test_hand_off_stops_a_shard_and_its_entities():
 
 async def test_hand_off_times_out_on_an_entity_that_ignores_its_stop_message():
     log: list[str] = []
-    entity = Entity(Counter, counter(log)).with_stop_message(Note("ignored")).with_settings(ClusterShardingSettings(handoff_timeout=6.0))
+    entity = (
+        Entity(Counter, counter(log))
+        .with_stop_message(Note("ignored"))
+        .with_settings(ClusterShardingSettings(handoff_timeout=6.0))
+    )
     async with ActorSystem(Sharding.init(entity), "s") as system:
         Sharding.entity_ref_for(system, "a").tell(Add(1))
         await eventually(lambda: "start a" in log)
         shard = shard_id_of("a", ClusterShardingSettings().number_of_shards)
         replies: list[ShardStopped] = []
         began = asyncio.get_running_loop().time()
-        system.resolve(f"{system.path}/{shard}").tell(HandOff(shard, FunctionRef("probe", replies.append)))
+        system.resolve(f"{system.path}/{shard}").tell(
+            HandOff(shard, FunctionRef("probe", replies.append))
+        )
         await eventually(lambda: replies == [ShardStopped(shard)], timeout=3)
-        assert asyncio.get_running_loop().time() - began >= 0.9  # max(handoff_timeout - 5, 1) seconds
+        # max(handoff_timeout - 5, 1) seconds
+        assert asyncio.get_running_loop().time() - began >= 0.9
         assert "note ignored a" in log and "stop a" in log
 
 
 def test_cluster_sharding_settings_are_validated():
-    for bad in (dict(number_of_shards=0), dict(buffer_size=0), dict(rebalance_relative_limit=0.0), dict(handoff_timeout=0.0)):
+    for bad in (
+        dict(number_of_shards=0),
+        dict(buffer_size=0),
+        dict(rebalance_relative_limit=0.0),
+        dict(handoff_timeout=0.0),
+    ):
         with pytest.raises(ValueError):
             ClusterShardingSettings(**bad)  # pyright: ignore[reportArgumentType]
     assert ClusterShardingSettings().number_of_shards == 1000
 
 
 def test_fluent_setters_apply_on_top_of_settings():
-    entity = Entity(Counter, counter([])).with_settings(ClusterShardingSettings(number_of_shards=5)).with_passivate_after(2.0).with_buffer_size(7)
+    entity = (
+        Entity(Counter, counter([]))
+        .with_settings(ClusterShardingSettings(number_of_shards=5))
+        .with_passivate_after(2.0)
+        .with_buffer_size(7)
+    )
     assert entity.effective_settings.number_of_shards == 5
     assert entity.effective_settings.passivate_after == 2.0
     assert entity.effective_settings.buffer_size == 7

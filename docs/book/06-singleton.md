@@ -16,7 +16,8 @@ There is never more than one instance as long as membership is agreed. That is w
 from pekko_py import ClusterSingleton, SingletonActor
 
 proxy = ClusterSingleton(system).init(SingletonActor(counter, "counter"))  # call it on every node
-print(await ask(proxy, Hit, timeout=3))                                    # answered by the one instance
+# answered by the one instance
+print(await ask(proxy, Hit, timeout=3))
 ```
 
 Give the instance a stop message with `with_stop_message` if it needs to finish work before it goes; otherwise it is stopped after its pending messages, as Pekko's PoisonPill. `ClusterSingletonSettings` carries Pekko's `removal_margin`, `hand_over_retry_interval`, `min_number_of_hand_over_retries`, `singleton_identification_interval` and `buffer_size`. An instance that fails is not restarted by the manager; wrap it in `Behaviors.supervise` as in Pekko.

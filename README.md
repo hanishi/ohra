@@ -1,8 +1,8 @@
 # ohra
 
-**ohra is an independent project. It is not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project.**
-
 Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies. *Ohra* is Finnish for barley.
+
+ohra is an independent project, built on the design of Apache Pekko and, before it, Akka, with thanks to both communities. It follows their semantics and names closely, but it is not part of the Apache Software Foundation.
 
 An actor is a function from a message to the next behavior. Typed refs make wrong messages a type error under pyright strict. Everything runs on one event loop, so a handler can `await` without losing the guarantee that an actor handles one message at a time. numpy work goes to threads and comes back as a message.
 

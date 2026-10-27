@@ -1,5 +1,93 @@
 # 7. Sharding
 
+## The problem
+
+A shop with a million customers cannot keep a million carts on one machine, and it should not have to look up where a cart is before talking to it. Chapter 2's shop handed out one cart per customer, but every cart lived in its one process, and the shop itself was one more thing that could fail.
+
+## The idea
+
+**Sharding** spreads the carts, the **entities**, over the nodes, and gives you a ref by id: `entity_ref_for(CART, "alice")`, on any node, reaches alice's cart wherever it is, and starts it on its first message. Ids are grouped into **shards** by a hash, and each shard lives on one node. A **coordinator**, which is a cluster singleton, decides which node hosts each shard, and moves shards when nodes join or leave. Ordinary messages do not go through it: each node remembers where the shards are and sends straight there.
+
+```mermaid
+flowchart LR
+  ref["<b>entity_ref_for</b><br/>CART, alice"] --> shard["<b>shard 735</b><br/>crc32 of alice, mod 1000"]
+  shard --> node["<b>the node hosting 735</b><br/>chosen by the coordinator"]
+  node --> alice["alice's cart"]
+```
+
+## A first example
+
+Chapter 1's cart, one per customer, over two nodes:
+
+```python
+import asyncio
+
+from cart import AddItem, CartCmd, GetCart, cart
+from ohra import (
+    ActorSystem,
+    Address,
+    Behaviors,
+    ClusterSettings,
+    ClusterSharding,
+    Entity,
+    EntityTypeKey,
+    ask,
+    remotable,
+)
+
+remotable(AddItem)
+remotable(GetCart)
+CART = EntityTypeKey[CartCmd]("Cart")
+SEEDS = (Address("shop", "127.0.0.1", 2551),)
+
+
+def node(port: int) -> ActorSystem[None]:
+    settings = ClusterSettings(seed_nodes=SEEDS)
+    system = ActorSystem(Behaviors.empty, "shop", address=("127.0.0.1", port), cluster=settings)
+    ClusterSharding(system).init(Entity(CART, lambda entity: cart({})))  # on every node
+    return system
+
+
+async def main() -> None:
+    async with node(2551) as first, node(2552) as second:
+        alice_on_1 = ClusterSharding(first).entity_ref_for(CART, "alice")
+        alice_on_2 = ClusterSharding(second).entity_ref_for(CART, "alice")
+        bob_on_2 = ClusterSharding(second).entity_ref_for(CART, "bob")
+        await ask(alice_on_1, lambda r: AddItem("book", 1, r), timeout=10)
+        await ask(alice_on_2, lambda r: AddItem("pen", 2, r), timeout=10)
+        await ask(bob_on_2, lambda r: AddItem("mug", 1, r), timeout=10)
+        print("alice:", await ask(alice_on_1, GetCart, timeout=10))
+        print("bob:", await ask(bob_on_2, GetCart, timeout=10))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+It prints:
+
+```
+alice: {'book': 1, 'pen': 2}
+bob: {'mug': 1}
+```
+
+- **`ClusterSharding(system).init(Entity(CART, ...))`** makes the cart an entity type on every node. The function starts a new entity. It receives an `EntityContext` with the entity's id, which an empty cart does not need.
+- **`entity_ref_for(CART, "alice")`** is a ref by id, and works on either node. Both of alice's refs reach the same cart, which is why it holds the book added through 2551 and the pen added through 2552.
+- **Entities start on demand.** No cart existed before its first message. The node hosting its shard started it.
+- **`remotable(AddItem)` and `remotable(GetCart)`**, as in [chapter 4](04-remoting.md): a node often sends to an entity hosted on the other.
+- **The first ask waits a moment** while the cluster forms and the coordinator starts. Messages are buffered meanwhile, hence `timeout=10`.
+
+When a node leaves, its shards move to the others, and their entities start again there, empty. With `Behaviors.persisted`, as in [chapter 3](03-persistence.md), they start from their saved state instead, which is what the carts in [chapter 10](10-putting-it-together.md) do.
+
+> **Coming from Apache Pekko**
+>
+> - `ClusterSharding(system).init(Entity(key, create))`, `entity_ref_for`, `EntityTypeKey`, `EntityContext`, `ShardingEnvelope` and `Passivate` are Pekko's. `Entity` takes `create` as its second argument instead of a second argument list.
+> - The shard id is `crc32(id) % number_of_shards`, as `HashCodeMessageExtractor`, with Pekko's default of 1000 shards.
+> - `Sharding.init` is the region on one node with no coordinator, for apps that run in one process.
+> - The coordinator keeps its state in memory and rebuilds it from the regions' registrations, where Pekko uses distributed data. There are no remembered entities and no custom allocation strategies. [Appendix B](appendix-deviations.md) has the full list.
+
+## How it works
+
 Sharding runs many small stateful actors, entities, each addressed by an id, without the caller knowing where they live. Three kinds of actor do the work, all under `/system/sharding`:
 
 - **A region per entity type on every node.** It routes messages, hosts the shards assigned to this node and registers with the coordinator.
@@ -33,7 +121,7 @@ sequenceDiagram
 
 **After a crash.** The coordinator does not persist its state. A new coordinator rebuilds the allocation from the regions' registrations, and a crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md).
 
-## Sharding in one process
+### Sharding in one process
 
 `Sharding.init(Entity(key, create))` is a shard region: one entity actor per id, created by its first message, passivated when idle or when it asks, with messages that arrive while it is passivating buffered for the next incarnation. This is the region layer of Apache Pekko's `ClusterSharding` inside one process, which is what most single-node apps use it for: address by id, create on demand, and keep only hot entities in memory.
 
@@ -53,7 +141,7 @@ region = Sharding.init(Entity(Cart, cart).with_passivate_after(30.0))
 
 Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "cart-42")` gives an `EntityRef`, an `ActorRef` that `tell`s and `ask`s the entity whether or not it exists yet. `GetShardRegionState` asks the region which entities are live. Under the region, as in Pekko, a Shard actor per shard id hosts its entities; the same Shards serve the cluster-wide regions of the "Sharding across nodes" section. `GetShardRegionState` is answered through a child that asks every Shard, so the reply arrives once all have answered or after `shard_region_query_timeout`.
 
-## Sharding across nodes
+### Sharding across nodes
 
 `ClusterSharding(system).init(Entity(key, create))` is `Sharding.init` for the whole cluster: the same entity type on every node, each entity living on exactly one of them. A ShardCoordinator, run as a cluster singleton, decides which node hosts each shard with Pekko's least-shard allocation; every node's region routes a message to the shard's home, local or remote, and buffers while the home is unknown. `entity_ref_for(key, id)` works on any node. When a node joins, the coordinator moves shards to it over the following rebalance intervals; when a node leaves, its region hands every shard off during the exiting phase before the node confirms its exit; when a node crashes, its shards are served again once it has been downed and removed, and not before, so no entity ever runs twice.
 

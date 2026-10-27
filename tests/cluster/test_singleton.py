@@ -107,6 +107,16 @@ def start(
     )
 
 
+def ports_by_age(system: ActorSystem[Any]) -> list[int]:
+    """The members' ports, oldest first: lowest up number, then lowest address, as Pekko's
+    Member.ageOrdering. Members moved to Up together tie on the up number, so the test cannot
+    assume the port it allocated second is the second oldest."""
+    members = sorted(
+        Cluster(system).state.members, key=lambda m: (m.up_number, m.unique_address.address)
+    )
+    return [m.unique_address.port for m in members]
+
+
 def starts(log: Log) -> list[int]:
     return [port for kind, port, _ in log if kind == "start"]
 
@@ -168,9 +178,10 @@ async def test_hand_over_when_the_oldest_leaves():
         log: Log = []
         proxies = [start(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
         assert await ask(proxies[2], Hit, timeout=3) == 1
+        successor = ports_by_age(b)[1]
         Cluster(b).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         await asyncio.wait_for(a.when_terminated(), timeout=5)
-        await eventually(lambda: starts(log) == [p1, p2], timeout=5)
+        await eventually(lambda: starts(log) == [p1, successor], timeout=5)
         assert stops(log) == [p1] and never_two_at_once(log)
         assert await ask(proxies[2], Hit, timeout=3) == 1  # a fresh instance
 
@@ -184,11 +195,14 @@ async def test_proxies_on_the_host_and_elsewhere_follow_the_hand_over():
         proxies = [start(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
         assert await ask(proxies[0], Hit, timeout=3) == 1  # the proxy on the host itself
         assert await ask(proxies[1], Hit, timeout=3) == 2  # the same instance from elsewhere
+        successor = ports_by_age(c)[1]
+        host = (p1, p2, p3).index(successor)
         Cluster(c).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         await asyncio.wait_for(a.when_terminated(), timeout=5)
-        await eventually(lambda: starts(log) == [p1, p2], timeout=5)
-        assert await ask(proxies[1], Hit, timeout=3) == 1  # the new host's own proxy
-        assert await ask(proxies[2], Hit, timeout=3) == 2  # and a proxy elsewhere, same instance
+        await eventually(lambda: starts(log) == [p1, successor], timeout=5)
+        assert await ask(proxies[host], Hit, timeout=3) == 1  # the new host's own proxy
+        # and a proxy elsewhere, same instance
+        assert await ask(proxies[3 - host], Hit, timeout=3) == 2
 
 
 async def test_crashed_oldest_is_replaced_only_after_removal():
@@ -199,8 +213,11 @@ async def test_crashed_oldest_is_replaced_only_after_removal():
         log: Log = []
         proxies = [start(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
         assert await ask(proxies[2], Hit, timeout=3) == 1
+        successor = ports_by_age(b)[1]
+        host = (p1, p2, p3).index(successor)
+        new_host, other = (a, b, c)[host], (a, b, c)[3 - host]
         removed_at: list[float] = []
-        Cluster(b).subscriptions.tell(
+        Cluster(new_host).subscriptions.tell(
             Subscribe(
                 FunctionRef(
                     "removed", lambda _e: removed_at.append(asyncio.get_running_loop().time())
@@ -213,14 +230,14 @@ async def test_crashed_oldest_is_replaced_only_after_removal():
         await asyncio.sleep(0.3)
         assert starts(log) == [p1]  # unreachable but not removed: nobody takes over
         Cluster(b).manager.tell(Down(Address("c", "127.0.0.1", p1)))
-        await eventually(lambda: starts(log) == [p1, p2], timeout=5)
-        start_at = next(t for kind, port, t in log if kind == "start" and port == p2)
+        await eventually(lambda: starts(log) == [p1, successor], timeout=5)
+        start_at = next(t for kind, port, t in log if kind == "start" and port == successor)
         assert removed_at and removed_at[0] <= start_at
-        # until c has seen the removal its proxy still points at the dead instance, as Pekko's does
-        # until its remote DeathWatch fires on removal; a message sent in that window is lost on
-        # both
-        await eventually(lambda: all_up(c, 2), timeout=5)
-        assert await ask(proxies[2], Hit, timeout=3) == 1
+        # until the other node has seen the removal its proxy still points at the dead instance,
+        # as Pekko's does until its remote DeathWatch fires on removal; a message sent in that
+        # window is lost on both
+        await eventually(lambda: all_up(other, 2), timeout=5)
+        assert await ask(proxies[3 - host], Hit, timeout=3) == 1
 
 
 async def test_younger_node_leaving_does_not_move_it():
@@ -246,13 +263,15 @@ async def test_two_leaves_in_a_row_keep_one_instance():
         log: Log = []
         proxies = [start(n, log, p) for n, p in zip(nodes, (p1, p2, p3, p4), strict=True)]
         assert await ask(proxies[3], Hit, timeout=3) == 1
+        successor = next(p for p in ports_by_age(nodes[3]) if p not in (p1, p2))
         Cluster(nodes[3]).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         Cluster(nodes[3]).manager.tell(Leave(Address("c", "127.0.0.1", p2)))
         await asyncio.wait_for(
             asyncio.gather(nodes[0].when_terminated(), nodes[1].when_terminated()), timeout=8
         )
         await eventually(
-            lambda: starts(log)[-1:] == [p3] and len(starts(log)) - len(stops(log)) == 1, timeout=5
+            lambda: starts(log)[-1:] == [successor] and len(starts(log)) - len(stops(log)) == 1,
+            timeout=5,
         )
         assert never_two_at_once(log)
         assert await ask(proxies[3], Hit, timeout=3) == 1
@@ -350,7 +369,7 @@ async def test_a_stuck_manager_restarts_and_takes_over():
         remoting = a.remoting
         assert remoting is not None
         deliver = remoting._handle  # pyright: ignore[reportPrivateUsage]
-        remoting._handle = lambda frame: (
+        remoting._handle = lambda frame: (  # pyright: ignore[reportPrivateUsage]
             None
             if (
                 isinstance(frame, dict)
@@ -358,7 +377,7 @@ async def test_a_stuck_manager_restarts_and_takes_over():
                 and frame["message"].get("$type") == "HandOverToMe"
             )
             else deliver(frame)
-        )  # pyright: ignore[reportPrivateUsage]
+        )
         Cluster(b).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         await asyncio.wait_for(a.when_terminated(), timeout=5)
         await eventually(lambda: starts(log) == [p1, p2], timeout=5)

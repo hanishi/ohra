@@ -74,7 +74,7 @@ pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 9. [FastAPI, numpy and shared memory](docs/book/09-integrations.md)
 10. [Putting it together](docs/book/10-putting-it-together.md): one cart request through every layer
 
-Appendices: [Apache Pekko names](docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](docs/book/appendix-deviations.md), [performance](docs/book/appendix-performance.md).
+Appendices: [Apache Pekko names](docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](docs/book/appendix-deviations.md), [performance](docs/book/appendix-performance.md), and a [glossary](docs/book/glossary.md).
 
 ## Examples
 

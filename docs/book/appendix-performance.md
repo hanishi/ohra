@@ -15,4 +15,4 @@ The two regimes matter more than the figures. A busy actor drains its mailbox wi
 
 ---
 
-[← Appendix B: Known deviations from Apache Pekko](appendix-deviations.md) · [Contents](README.md)
+[← Appendix B: Known deviations from Apache Pekko](appendix-deviations.md) · [Contents](README.md) · [Glossary →](glossary.md)

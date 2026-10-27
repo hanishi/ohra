@@ -16,7 +16,7 @@ from urllib.parse import quote
 from ..discovery import DiscoveryTimeoutError, Lookup, Resolved, ResolvedTarget, ServiceDiscovery
 from .http import get
 
-_log = logging.getLogger("pekko_py.management.kubernetes")
+_log = logging.getLogger("ohra.management.kubernetes")
 
 _SERVICE_ACCOUNT = "/var/run/secrets/kubernetes.io/serviceaccount"
 

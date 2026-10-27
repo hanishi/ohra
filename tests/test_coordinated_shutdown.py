@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -25,7 +25,7 @@ from pekko_py import (
     Reason,
     Signal,
 )
-from pekko_py.coordinated_shutdown import PHASES
+from ohra.coordinated_shutdown import PHASES
 
 FAST = CoordinatedShutdownSettings(
     default_phase_timeout=0.2, phase_timeouts={"actor-system-terminate": 0.5}
@@ -69,7 +69,7 @@ async def test_phases_run_in_order_and_tasks_in_a_phase_concurrently():
 async def test_a_failing_task_and_a_hanging_task_do_not_stop_the_run(
     caplog: pytest.LogCaptureFixture,
 ):
-    caplog.set_level(logging.WARNING, logger="pekko_py.coordinated_shutdown")
+    caplog.set_level(logging.WARNING, logger="ohra.coordinated_shutdown")
     system = ActorSystem(Behaviors.ignore, "cs", shutdown=FAST)
     cs = CoordinatedShutdown(system)
 

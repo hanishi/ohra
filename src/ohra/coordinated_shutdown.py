@@ -18,7 +18,7 @@ from .ref import ActorRef
 if TYPE_CHECKING:
     from .system import ActorSystem
 
-_log = logging.getLogger("pekko_py.coordinated_shutdown")
+_log = logging.getLogger("ohra.coordinated_shutdown")
 
 DEFAULT_PHASE_TIMEOUT = 5.0
 

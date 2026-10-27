@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from pekko_py.management.http import Response, get, json_response, serve
+from ohra.management.http import Response, get, json_response, serve
 
 
 async def handler(method: str, path: str) -> Response:

@@ -34,7 +34,7 @@ Applications watch all of this through `Cluster(system).subscriptions`, which pu
 Give a system `cluster=ClusterSettings(seed_nodes=...)` and it runs Apache Pekko's membership protocol under `/system/cluster`: it joins through the seed nodes, gossips the member list with a vector clock, elects the lowest address among reachable Up members as leader, and lets only that leader, on convergence, move members `joining → up` and `leaving → exiting → removed`. Phi-accrual failure detection over heartbeats marks a silent node `unreachable`; `Down` it and the leader removes it. A node that is downed, or that leaves, terminates its own system. `Cluster(system)` is the extension: `manager` takes the commands, `subscriptions` the subscriptions, and `state` / `self_member` are the current view.
 
 ```python
-from pekko_py import Address, Cluster, ClusterSettings, Leave, MemberEvent, Subscribe
+from ohra import Address, Cluster, ClusterSettings, Leave, MemberEvent, Subscribe
 
 
 def cluster_node(port: int, seed_port: int) -> ActorSystem[MemberEvent]:
@@ -69,7 +69,7 @@ async def main() -> None:
 Without a downing provider an unreachable member stays unreachable until someone sends `Down`, and until then the leader cannot move any member, so a crashed oldest node blocks singleton hand-over and shard reallocation. Apache Pekko's split-brain resolver is the provider: a child of the core daemon, active on the leader, that waits until membership and reachability have been stable for `stable_after` and then downs one side by a strategy, so the leader can remove it. Turn it on with `downing=`:
 
 ```python
-from pekko_py import ClusterSettings, KeepMajority, SplitBrainResolverSettings
+from ohra import ClusterSettings, KeepMajority, SplitBrainResolverSettings
 
 settings = ClusterSettings(
     seed_nodes=seeds,

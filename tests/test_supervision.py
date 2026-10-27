@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -15,7 +15,7 @@ from pekko_py import (
     Signal,
     SupervisorStrategy,
 )
-from pekko_py.supervision import SupervisorStrategy as S
+from ohra.supervision import SupervisorStrategy as S
 
 from .util import eventually
 

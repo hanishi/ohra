@@ -10,7 +10,7 @@ read.
 
 No events and no replay: a persisting command writes the whole state. Pekko's DurableStateBehavior
 shapes its API around a command handler and Effect so it can share them with event sourcing;
-pekko-py has no event sourcing, so state stays where every other behavior keeps it, as the
+ohra has no event sourcing, so state stays where every other behavior keeps it, as the
 factory's parameter.
 """
 
@@ -180,7 +180,7 @@ class _Incarnation:
         return self.owner.store
 
 
-_current: ContextVar[_Incarnation | None] = ContextVar("pekko_py.persistence", default=None)
+_current: ContextVar[_Incarnation | None] = ContextVar("ohra.persistence", default=None)
 
 
 def _incarnation(owner: Persisted[Any, Any]) -> _Incarnation:

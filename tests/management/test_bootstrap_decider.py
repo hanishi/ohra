@@ -6,8 +6,8 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from pekko_py import Address, ClusterBootstrapSettings, Lookup, ResolvedTarget
-from pekko_py.management.bootstrap import (
+from ohra import Address, ClusterBootstrapSettings, Lookup, ResolvedTarget
+from ohra.management.bootstrap import (
     JoinOtherSeedNodes,
     JoinSelf,
     KeepProbing,

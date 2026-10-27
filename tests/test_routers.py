@@ -6,7 +6,7 @@ import asyncio
 from collections import Counter
 from dataclasses import dataclass
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Routers
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Routers
 
 from .util import eventually
 
@@ -45,7 +45,7 @@ async def test_round_robin_spreads_messages_evenly():
         for i in range(12):
             system.tell(Work(i))
         await eventually(lambda: len(seen) == 12)
-    assert Counter(path for path, _ in seen) == {f"pekko://t/user/${i}": 3 for i in range(4)}
+    assert Counter(path for path, _ in seen) == {f"ohra://t/user/${i}": 3 for i in range(4)}
 
 
 async def test_consistent_hashing_sends_a_key_to_one_routee():
@@ -100,4 +100,4 @@ async def test_routees_are_children_of_the_router():
     async with ActorSystem(Behaviors.setup(guardian), "t") as system:
         system.tell(Work(7))
         await eventually(lambda: len(seen) == 1)
-    assert seen[0][0].startswith("pekko://t/user/pool/$")
+    assert seen[0][0].startswith("ohra://t/user/pool/$")

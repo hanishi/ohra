@@ -55,9 +55,7 @@ class PostgresStore[S]:
                 # Concurrent CREATE TABLE IF NOT EXISTS can fail on the catalog's unique index when
                 # pods start together; a transaction-scoped advisory lock lets one create while the
                 # others wait.
-                await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext('pekko_py.durable_state'))"
-                )
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext('ohra.durable_state'))")
                 await conn.execute(
                     sql.SQL(
                         "CREATE TABLE IF NOT EXISTS {} (persistence_id TEXT PRIMARY KEY, "

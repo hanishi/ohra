@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from pekko_py.cluster.gossip import (
+from ohra.cluster.gossip import (
     Gossip,
     GossipTargetSelector,
     Member,
@@ -13,7 +13,7 @@ from pekko_py.cluster.gossip import (
     highest_priority_of,
     vclock_name,
 )
-from pekko_py.remote import Address, UniqueAddress
+from ohra.remote import Address, UniqueAddress
 
 A = UniqueAddress("127.0.0.1", 1, 11, "s")
 B = UniqueAddress("127.0.0.1", 2, 22, "s")
@@ -25,8 +25,8 @@ def up(node: UniqueAddress, n: int) -> Member:
 
 
 def test_address_ordering_and_parsing():
-    assert Address.parse("pekko://s@10.0.0.1:2552") == Address("s", "10.0.0.1", 2552)
-    assert Address("s", "10.0.0.1", 2552).root == "pekko://s@10.0.0.1:2552"
+    assert Address.parse("ohra://s@10.0.0.1:2552") == Address("s", "10.0.0.1", 2552)
+    assert Address("s", "10.0.0.1", 2552).root == "ohra://s@10.0.0.1:2552"
     assert A.address == Address("s", "127.0.0.1", 1)
     assert sorted([up(C, 1), up(A, 2), up(B, 3)]) == [up(A, 2), up(B, 3), up(C, 1)]
 

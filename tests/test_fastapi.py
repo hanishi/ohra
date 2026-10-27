@@ -1,4 +1,4 @@
-"""pekko_py.ext.fastapi: an ActorSystem owned by the app's lifespan, reached through a typed
+"""ohra.ext.fastapi: an ActorSystem owned by the app's lifespan, reached through a typed
 dependency."""
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ httpx = pytest.importorskip("httpx")
 from fastapi import FastAPI  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
-from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors  # noqa: E402
-from pekko_py.ext.fastapi import Actors  # noqa: E402
+from ohra import ActorRef, ActorSystem, Behavior, Behaviors  # noqa: E402
+from ohra.ext.fastapi import Actors  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,7 @@ def test_system_before_startup_is_an_error():
 
 
 async def test_system_settings_reach_the_actor_system():
-    from pekko_py import CoordinatedShutdownSettings
+    from ohra import CoordinatedShutdownSettings
 
     settings = CoordinatedShutdownSettings(default_phase_timeout=1.5)
     # address=, cluster=, management= pass the same way

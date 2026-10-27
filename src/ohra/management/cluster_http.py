@@ -20,7 +20,7 @@ from .http import Response, json_response
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
-    from . import PekkoManagement
+    from . import Management
 
 _STATUS_NAMES = {
     "joining": "Joining",
@@ -65,7 +65,7 @@ def members_json(cluster: Cluster) -> dict[str, object]:
     }
 
 
-def register_cluster_routes(management: PekkoManagement, system: ActorSystem[Any]) -> None:
+def register_cluster_routes(management: Management, system: ActorSystem[Any]) -> None:
     cluster = Cluster(system)
 
     async def members(_path: str) -> Response:

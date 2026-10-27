@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from ..cluster.gossip import MemberStatus
 
-_log = logging.getLogger("pekko_py.management")
+_log = logging.getLogger("ohra.management")
 
 type HealthCheck = Callable[[], Awaitable[bool]]
 

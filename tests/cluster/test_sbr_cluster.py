@@ -11,12 +11,12 @@ from typing import Any, cast
 
 import pytest
 
-from pekko_py import ActorSystem, AskTimeoutError
-from pekko_py.cluster.core import Cluster, MemberRemoved, Subscribe
-from pekko_py.patterns import ask
-from pekko_py.ref import FunctionRef
-from pekko_py.cluster.sbr import SplitBrainResolverSettings, _Resolver  # pyright: ignore[reportPrivateUsage]
-from pekko_py.remote.remoting import read_frame
+from ohra import ActorSystem, AskTimeoutError
+from ohra.cluster.core import Cluster, MemberRemoved, Subscribe
+from ohra.patterns import ask
+from ohra.ref import FunctionRef
+from ohra.cluster.sbr import SplitBrainResolverSettings, _Resolver  # pyright: ignore[reportPrivateUsage]
+from ohra.remote.remoting import read_frame
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node

@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -18,8 +18,8 @@ from pekko_py import (
     ask,
     remotable,
 )
-from pekko_py.cluster.core import Cluster, ClusterSettings, Down, Join, Leave
-from pekko_py.receptionist import (
+from ohra.cluster.core import Cluster, ClusterSettings, Down, Join, Leave
+from ohra.receptionist import (
     Find,
     Listing,
     Receptionist,
@@ -28,8 +28,8 @@ from pekko_py.receptionist import (
     ServiceKey,
     Subscribe,
 )
-from pekko_py.remote.serialization import Json
-from pekko_py.remote import Address
+from ohra.remote.serialization import Json
+from ohra.remote import Address
 
 from ..util import eventually, free_port
 from .test_cluster import FAST, FAST_SHUTDOWN, all_up, unreachable_ports

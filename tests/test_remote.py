@@ -1,4 +1,4 @@
-"""Remoting: actors on other pekko-py nodes, by path, over TCP."""
+"""Remoting: actors on other ohra nodes, by path, over TCP."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, RemoteRef
-from pekko_py.ref import PromiseRef
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, RemoteRef
+from ohra.ref import PromiseRef
 
 from .util import eventually, free_port
 
@@ -30,9 +30,9 @@ def parent(ctx: ActorContext[SpawnChild], msg: SpawnChild) -> Behavior[SpawnChil
 async def test_system_address_shapes_paths():
     port = free_port()
     async with ActorSystem(Behaviors.receive(parent), "a", address=("127.0.0.1", port)) as system:
-        assert system.path == f"pekko://a@127.0.0.1:{port}/user"
+        assert system.path == f"ohra://a@127.0.0.1:{port}/user"
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
-        assert child.path == f"pekko://a@127.0.0.1:{port}/user/child"
+        assert child.path == f"ohra://a@127.0.0.1:{port}/user/child"
         assert (
             system.address is not None
             and system.address.name == "a"
@@ -51,11 +51,11 @@ async def test_resolve_local_path_returns_the_local_ref():
 
 async def test_resolve_foreign_path_is_a_remote_ref():
     async with ActorSystem(Behaviors.ignore, "a", address=("127.0.0.1", free_port())) as system:
-        ref = system.resolve("pekko://b@127.0.0.1:1/user/greeter")
+        ref = system.resolve("ohra://b@127.0.0.1:1/user/greeter")
         assert isinstance(ref, RemoteRef)
-        assert ref.path == "pekko://b@127.0.0.1:1/user/greeter"
-        assert ref == system.resolve("pekko://b@127.0.0.1:1/user/greeter")
-        assert len({ref, system.resolve("pekko://b@127.0.0.1:1/user/greeter")}) == 1
+        assert ref.path == "ohra://b@127.0.0.1:1/user/greeter"
+        assert ref == system.resolve("ohra://b@127.0.0.1:1/user/greeter")
+        assert len({ref, system.resolve("ohra://b@127.0.0.1:1/user/greeter")}) == 1
 
 
 async def test_temp_refs_are_weak():
@@ -83,7 +83,7 @@ async def test_system_without_address_cannot_resolve_remote_paths():
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
         assert system.resolve(child.path) is child  # local resolution works without remoting
         with pytest.raises(LookupError):
-            system.resolve("pekko://b@127.0.0.1:1/user/greeter")
+            system.resolve("ohra://b@127.0.0.1:1/user/greeter")
 
 
 # --- Task 3: transport ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ async def test_system_without_address_cannot_resolve_remote_paths():
 import logging  # noqa: E402
 import socket  # noqa: E402
 
-from pekko_py import (  # noqa: E402
+from ohra import (  # noqa: E402
     Entity,
     EntityContext,
     EntityTypeKey,
@@ -237,7 +237,7 @@ async def test_entity_ref_crosses_nodes():
 
 
 async def test_unknown_recipient_is_a_dead_letter(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     log: list[str] = []
     async with (
         node(greeter(log), "a", free_port()) as a,
@@ -254,17 +254,17 @@ async def test_unregistered_message_raises_at_tell():
         node(Behaviors.ignore, "a", free_port()) as a,
         node(Behaviors.ignore, "b", free_port()) as b,
     ):
-        from pekko_py import SerializationError
+        from ohra import SerializationError
 
         with pytest.raises(SerializationError):
             b.resolve(a.path).tell(NotRemotable(1))
 
 
 async def test_unreachable_node_dead_letters_without_blocking(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     closed = free_port()
     async with node(Behaviors.ignore, "b", free_port()) as b:
-        ref = b.resolve(f"pekko://a@127.0.0.1:{closed}/user")
+        ref = b.resolve(f"ohra://a@127.0.0.1:{closed}/user")
         ref.tell(Greet("nobody home", b.ignore_ref))  # returns at once
         await eventually(
             lambda: any("nobody home" in r.getMessage() for r in caplog.records), timeout=3
@@ -272,7 +272,7 @@ async def test_unreachable_node_dead_letters_without_blocking(caplog: pytest.Log
 
 
 async def test_peer_restart_is_detected(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.INFO, logger="pekko_py.remote")
+    caplog.set_level(logging.INFO, logger="ohra.remote")
     log1: list[str] = []
     log2: list[str] = []
     port_a = free_port()
@@ -309,7 +309,7 @@ async def test_shutdown_closes_everything():
 
 import gc as _gc  # noqa: E402
 
-from pekko_py import SerializationError  # noqa: E402
+from ohra import SerializationError  # noqa: E402
 
 
 async def test_adapter_reply_refs_survive_garbage_collection():
@@ -390,7 +390,7 @@ class Positive:
 
 
 async def test_bad_inbound_message_does_not_close_the_connection(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     log: list[str] = []
     async with (
         node(greeter(log), "a", free_port()) as a,
@@ -438,14 +438,14 @@ async def test_port_in_use_raises_and_leaks_nothing():
 async def test_path_without_port_is_a_lookup_error():
     async with node(Behaviors.ignore, "a", free_port()) as a:
         with pytest.raises(LookupError):
-            a.resolve("pekko://b@127.0.0.1/user")
+            a.resolve("ohra://b@127.0.0.1/user")
         with pytest.raises(LookupError):
-            a.resolve("pekko://b@127.0.0.1:notaport/user")
+            a.resolve("ohra://b@127.0.0.1:notaport/user")
 
 
 async def test_tell_after_close_is_a_dead_letter(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     async with node(Behaviors.ignore, "a", free_port()) as a:
-        remote = a.resolve("pekko://b@127.0.0.1:1/user")
+        remote = a.resolve("ohra://b@127.0.0.1:1/user")
     remote.tell(Greet("late", a.ignore_ref))  # the system is gone: nothing may start
     assert any("late" in r.getMessage() for r in caplog.records)

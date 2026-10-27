@@ -188,9 +188,7 @@ class ActorCell[T]:
         self.mailbox = mailbox
         self.ref: LocalRef[T] = LocalRef(self)
         self.ctx: ActorContext[T] = ActorContext(self)
-        self.log = logging.getLogger(
-            "pekko_py.actor." + path.split("://", 1)[-1].replace("/", ".")
-        )
+        self.log = logging.getLogger("ohra.actor." + path.split("://", 1)[-1].replace("/", "."))
         loop = asyncio.get_running_loop()
         self.done: asyncio.Future[None] = loop.create_future()
         self.children: dict[str, ActorCell[Any]] = {}

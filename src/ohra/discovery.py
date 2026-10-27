@@ -1,6 +1,6 @@
 """Apache Pekko Discovery: look a service name up and get its addresses. The cluster bootstrap
 finds its peers through it; `ConfigServiceDiscovery` is Pekko's config method,
-`KubernetesApiServiceDiscovery` lives in `pekko_py.management.kubernetes`, and anything else is a
+`KubernetesApiServiceDiscovery` lives in `ohra.management.kubernetes`, and anything else is a
 subclass with one method."""
 
 from __future__ import annotations

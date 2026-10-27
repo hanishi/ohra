@@ -1,5 +1,5 @@
-# The Kubernetes examples image: pekko-py from this checkout; runs examples/k8s/node.py, and carts.yaml runs carts.py.
-# Build from the repository root:  docker build -t YOU/pekko-py-cluster:dev -f examples/k8s/Dockerfile .
+# The Kubernetes examples image: ohra from this checkout; runs examples/k8s/node.py, and carts.yaml runs carts.py.
+# Build from the repository root:  docker build -t YOU/ohra-cluster:dev -f examples/k8s/Dockerfile .
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app

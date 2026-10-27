@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     CoordinatedShutdownSettings,
     ActorContext,
     ActorRef,
@@ -26,10 +26,10 @@ from pekko_py import (
     ask,
     remotable,
 )
-from pekko_py.cluster.core import Cluster, Down, Leave, MemberRemoved, Subscribe
-from pekko_py.ref import FunctionRef
-from pekko_py.remote import Address
-from pekko_py.remote.serialization import Json
+from ohra.cluster.core import Cluster, Down, Leave, MemberRemoved, Subscribe
+from ohra.ref import FunctionRef
+from ohra.remote import Address
+from ohra.remote.serialization import Json
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node, unreachable_ports

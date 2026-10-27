@@ -3,7 +3,7 @@ because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyr
 
 from dataclasses import dataclass
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     RemoteRef,
@@ -92,7 +92,7 @@ async def spawn_from_outside(system: ActorSystem[SpawnProtocol.Command]) -> None
 
 
 async def ask_infers_the_reply_type(pinger: ActorRef[Ping]) -> None:
-    from pekko_py import ask
+    from ohra import ask
 
     pong: str = await ask(pinger, lambda r: Ping(r), timeout=1)  # a lambda, no partial needed
     also: str = await ask(pinger, Ping, timeout=1)  # or the class itself
@@ -101,7 +101,7 @@ async def ask_infers_the_reply_type(pinger: ActorRef[Ping]) -> None:
 
 
 def fastapi_dependency_is_typed() -> None:
-    from pekko_py.ext.fastapi import Actors
+    from ohra.ext.fastapi import Actors
 
     actors = Actors(_b, "web")
     system: ActorSystem[Ping] = actors.depends()
@@ -110,7 +110,7 @@ def fastapi_dependency_is_typed() -> None:
 
 
 def sharding_is_typed(region: ActorRef[ShardingEnvelope[Ping]]) -> None:
-    from pekko_py import EntityRef, Sharding
+    from ohra import EntityRef, Sharding
 
     ref: EntityRef[Ping] = Sharding.entity_ref_for(region, "a")
     ref.tell("not a ping")  # type: ignore[arg-type]
@@ -119,7 +119,7 @@ def sharding_is_typed(region: ActorRef[ShardingEnvelope[Ping]]) -> None:
 
 
 def persistence_is_typed() -> None:
-    from pekko_py.persistence import InMemoryStore
+    from ohra.persistence import InMemoryStore
 
     store = InMemoryStore[int]()
 

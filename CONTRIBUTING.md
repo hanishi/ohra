@@ -1,6 +1,6 @@
-# Contributing to pekko-py
+# Contributing to ohra
 
-pekko-py brings Apache Pekko Typed semantics to asyncio. Start with [the book](docs/book/README.md), especially [the runtime model](docs/book/01-actors.md) in chapter 1 and [the known deviations](docs/book/appendix-deviations.md) in appendix B.
+ohra brings Apache Pekko Typed semantics to asyncio. Start with [the book](docs/book/README.md), especially [the runtime model](docs/book/01-actors.md) in chapter 1 and [the known deviations](docs/book/appendix-deviations.md) in appendix B.
 
 Bug reports, fixes, docs and new ports of Apache Pekko features are all welcome. Before you start anything large, open an issue so we can agree on the scope.
 
@@ -26,10 +26,10 @@ uv run pyright       # strict mode, 0 errors
 - `# noqa` is for names that come from Apache Pekko (such as `ClusterSingletonManagerIsStuck`) and for the minified pages the examples serve.
 
 - `tests/typing_check.py` has `# type: ignore` lines that assert wrong message types are rejected. They must stay necessary, and pyright reports an unnecessary one as an error.
-- `tests/test_postgres_store.py` is skipped unless `PEKKO_PY_POSTGRES_DSN` is set:
+- `tests/test_postgres_store.py` is skipped unless `OHRA_POSTGRES_DSN` is set:
   ```
   docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=pg postgres:17
-  PEKKO_PY_POSTGRES_DSN=postgresql://postgres:pg@localhost:55432/postgres uv run pytest tests/test_postgres_store.py
+  OHRA_POSTGRES_DSN=postgresql://postgres:pg@localhost:55432/postgres uv run pytest tests/test_postgres_store.py
   ```
 
 ## Invariants (do not break)
@@ -45,22 +45,22 @@ uv run pyright       # strict mode, 0 errors
 - Public API names follow Pekko's Scala DSL in snake_case.
 - When you port a feature, follow the control flow of the Apache Pekko source function for function. Don't invent a simpler protocol. If you have to narrow something (for example by dropping multi-DC or roles), document the narrowing.
 - Document every intentional deviation in [appendix B](docs/book/appendix-deviations.md), and new features in the book chapter for their layer.
-- The core has no dependencies. Integrations that need a third-party package go in `pekko_py.ext` behind an optional extra.
+- The core has no dependencies. Integrations that need a third-party package go in `ohra.ext` behind an optional extra.
 - Distributed Data is out of scope. Use a single-writer actor (a singleton or a sharded entity) instead.
 
 ## Layout
 
-`src/pekko_py/` is the core, Pekko's actor-typed module; subpackages follow Pekko's module split.
+`src/ohra/` is the core, Pekko's actor-typed module; subpackages follow Pekko's module split.
 - `behavior.py`: behavior values and the `Behaviors` factory.
 - `cell.py`: the runtime, including the message loop, interpretation, supervision, and lifecycle. Most work happens here.
 - `context.py`: `ActorContext`, a thin facade over the cell.
 - `ref.py`, `patterns.py`, `routers.py`, `system.py`, `signals.py`, `supervision.py`, `mailbox.py`, `result.py`, `receptionist.py`, `persistence.py`, `coordinated_shutdown.py` (Pekko's phases, run by `terminate()`), `discovery.py` (Pekko's ServiceDiscovery API).
 - `remote/`: `remoting.py` (transport, addresses, `RemoteRef`) and `serialization.py` (`@remotable`).
 - `cluster/`: `core.py` (the membership daemon and the `Cluster` extension), its internals `gossip.py`, `reachability.py`, `vector_clock.py`, `failure_detector.py`, the split-brain resolver `sbr.py`, then `singleton.py` and `sharding/` (`shard.py`: the Shard actor and the single-node `Sharding`; `coordinator.py`; `region.py`; the `ClusterSharding` extension in `__init__.py`).
-- `management/`: Pekko Management for Kubernetes: `http.py` (stdlib HTTP/1.1 server and client), `health.py`, the `PekkoManagement` extension in `__init__.py`, `cluster_http.py` (read-only routes), `bootstrap.py` (cluster bootstrap), `kubernetes.py` (API discovery).
+- `management/`: Pekko Management for Kubernetes: `http.py` (stdlib HTTP/1.1 server and client), `health.py`, the `Management` extension in `__init__.py`, `cluster_http.py` (read-only routes), `bootstrap.py` (cluster bootstrap), `kubernetes.py` (API discovery).
 - `ext/`: `fastapi.py`, `postgres.py` (`PostgresStore`, durable state for clusters) and `shm.py`, integrations outside the core.
 - `docs/book/`: the documentation, one chapter per layer with Mermaid diagrams; README.md is only the front page.
-- Public names are importable from `pekko_py`, and also from the subpackage they belong to (`pekko_py.cluster`, `pekko_py.cluster.sharding`, `pekko_py.remote`).
+- Public names are importable from `ohra`, and also from the subpackage they belong to (`ohra.cluster`, `ohra.cluster.sharding`, `ohra.remote`).
 
 ## Style
 

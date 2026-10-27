@@ -10,8 +10,8 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Success, Try  # noqa: E402
-from pekko_py.ext.shm import SharedArray  # noqa: E402
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Success, Try  # noqa: E402
+from ohra.ext.shm import SharedArray  # noqa: E402
 
 
 def total_in_worker(handle: SharedArray) -> float:

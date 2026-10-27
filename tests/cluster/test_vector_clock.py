@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pekko_py.cluster.vector_clock import VectorClock
+from ohra.cluster.vector_clock import VectorClock
 
 
 def test_increment_and_compare_orderings():

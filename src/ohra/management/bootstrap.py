@@ -27,7 +27,7 @@ from .http import get
 if TYPE_CHECKING:
     from ..system import ActorSystem
 
-_log = logging.getLogger("pekko_py.management.bootstrap")
+_log = logging.getLogger("ohra.management.bootstrap")
 
 
 @dataclass(frozen=True)
@@ -321,10 +321,10 @@ class _ProbeResult:
 
 
 def _parse_address(s: str) -> Address:
-    """``pekko://name@host:port`` back to an Address."""
+    """``ohra://name@host:port`` back to an Address."""
     scheme, _, rest = s.partition("://")
-    if scheme != "pekko" or "@" not in rest:
-        raise ValueError(f"not a pekko address: {s!r}")
+    if scheme != "ohra" or "@" not in rest:
+        raise ValueError(f"not an ohra address: {s!r}")
     name, _, authority = rest.partition("@")
     host, _, port = authority.rpartition(":")
     return Address(name, host.strip("[]"), int(port))
@@ -633,7 +633,7 @@ def _coordinator_behavior(
 
 
 class ClusterBootstrap:
-    """``ClusterBootstrap(system)``: started by ``PekkoManagement.start()`` when the management
+    """``ClusterBootstrap(system)``: started by ``Management.start()`` when the management
     settings carry ``bootstrap``."""
 
     system: ActorSystem[Any]
@@ -645,7 +645,7 @@ class ClusterBootstrap:
         bootstrap = system.management.bootstrap
         if bootstrap is None:
             raise RuntimeError(
-                "no bootstrap configured: pass management=PekkoManagementSettings(bootstrap=..., "
+                "no bootstrap configured: pass management=ManagementSettings(bootstrap=..., "
                 "discovery=...) to ActorSystem"
             )
         return bootstrap

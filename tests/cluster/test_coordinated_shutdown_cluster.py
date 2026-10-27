@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack
 
-from pekko_py import (
+from ohra import (
     ActorSystem,
     ActorSystemTerminateReason,
     Behavior,
@@ -22,9 +22,9 @@ from pekko_py import (
     Subscribe,
     UnreachableMember,
 )
-from pekko_py.cluster.core import Cluster
-from pekko_py.patterns import ask
-from pekko_py.remote import Address
+from ohra.cluster.core import Cluster
+from ohra.patterns import ask
+from ohra.remote import Address
 
 from ..util import eventually, free_port
 from .test_cluster import FAST, FAST_SHUTDOWN, all_up, cluster_node, probe

@@ -1,6 +1,6 @@
 # 4. Remoting
 
-Give a system `address=(host, port)` and its actor paths become `pekko://name@host:port/user/...`. `system.resolve(path)` returns a `LocalRef` when the path is on this node and a `RemoteRef` otherwise. Code that tells a ref cannot see the difference, which is the whole point.
+Give a system `address=(host, port)` and its actor paths become `ohra://name@host:port/user/...`. `system.resolve(path)` returns a `LocalRef` when the path is on this node and a `RemoteRef` otherwise. Code that tells a ref cannot see the difference, which is the whole point.
 
 - **Identity.** A node is a `UniqueAddress`: host, port and a random uid minted per incarnation. A restarted node on the same port has a new uid, which is how the cluster tells a new process from the old one.
 - **Messages.** A type crosses the wire once it carries `@remotable`, on a frozen dataclass. It is encoded as JSON with a `$type` manifest. A ref inside a message is encoded as its path and resolved on arrival. A function ref, such as an `ask` reply address, is registered under `/temp/` so the other side can answer it.
@@ -11,10 +11,10 @@ Remoting alone has no membership, no remote death watch and no quarantine. Those
 
 ## Using it
 
-Give a system an address and its actors are reachable from other pekko-py processes by path. `system.resolve(path)` returns a `RemoteRef`, an `ActorRef` whose `tell` serializes the message and sends it over a TCP connection opened on first use. `ask` works unchanged, because the reply ref crosses the wire as a path too. A message type is sendable once it is marked `@remotable`, which derives a JSON codec from the frozen dataclass; an `ActorRef` field becomes a path, and nested or union-typed fields work because the encoding is self-describing.
+Give a system an address and its actors are reachable from other ohra processes by path. `system.resolve(path)` returns a `RemoteRef`, an `ActorRef` whose `tell` serializes the message and sends it over a TCP connection opened on first use. `ask` works unchanged, because the reply ref crosses the wire as a path too. A message type is sendable once it is marked `@remotable`, which derives a JSON codec from the frozen dataclass; an `ActorRef` field becomes a path, and nested or union-typed fields work because the encoding is self-describing.
 
 ```python
-from pekko_py import remotable
+from ohra import remotable
 
 
 @remotable
@@ -32,7 +32,7 @@ class Greet:
 
 async def client() -> None:
     async with ActorSystem(Behaviors.ignore, "client", address=("127.0.0.1", 2553)) as system:
-        greeter: ActorRef[Greet] = system.resolve("pekko://greeter@127.0.0.1:2552/user")
+        greeter: ActorRef[Greet] = system.resolve("ohra://greeter@127.0.0.1:2552/user")
         print(await ask(greeter, lambda r: Greet("pekko", r), timeout=3))
 ```
 

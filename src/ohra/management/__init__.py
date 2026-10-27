@@ -1,7 +1,7 @@
 """Apache Pekko Management narrowed to the Kubernetes path: the management HTTP endpoint with
 health checks, read-only cluster routes, cluster bootstrap over service discovery, and Kubernetes
-API discovery. Reached as ``PekkoManagement(system)``; nothing binds until ``await
-PekkoManagement(system).start()``."""
+API discovery. Reached as ``Management(system)``; nothing binds until ``await
+Management(system).start()``."""
 
 from __future__ import annotations
 
@@ -20,14 +20,14 @@ from .http import HttpServer, Response, json_response, serve
 if TYPE_CHECKING:
     from ..system import ActorSystem
 
-_log = logging.getLogger("pekko_py.management")
+_log = logging.getLogger("ohra.management")
 
 type RouteHandler = Callable[[str], Awaitable[Response]]
 """Receives the remainder of the path for a prefix route, or the full path for an exact one."""
 
 
 @dataclass(frozen=True)
-class PekkoManagementSettings:
+class ManagementSettings:
     """Pekko's ``pekko.management.http`` settings. ``hostname=None`` is this host's address;
     ``bind_*`` default to the hostname and port; ``port=0`` binds an ephemeral port. ``bootstrap``
     needs ``discovery``."""
@@ -67,12 +67,12 @@ class PekkoManagementSettings:
         return self.bind_port if self.bind_port is not None else self.port
 
 
-class PekkoManagement:
-    """``PekkoManagement(system)``: ``health`` for the checks, ``start()`` to bind the endpoint,
+class Management:
+    """``Management(system)``: ``health`` for the checks, ``start()`` to bind the endpoint,
     ``uri`` once bound."""
 
     system: ActorSystem[Any]
-    settings: PekkoManagementSettings
+    settings: ManagementSettings
     health: HealthChecks
     bootstrap: ClusterBootstrap | None
     uri: str | None
@@ -81,13 +81,11 @@ class PekkoManagement:
     _prefixes: list[tuple[str, RouteHandler]]
     _starting: asyncio.Lock
 
-    def __new__(cls, system: ActorSystem[Any]) -> PekkoManagement:
+    def __new__(cls, system: ActorSystem[Any]) -> Management:
         return system.management
 
     @classmethod
-    def _start(
-        cls, system: ActorSystem[Any], settings: PekkoManagementSettings
-    ) -> PekkoManagement:
+    def _start(cls, system: ActorSystem[Any], settings: ManagementSettings) -> Management:
         self = object.__new__(cls)
         self.system = system
         self.settings = settings
@@ -181,7 +179,7 @@ class PekkoManagement:
                 self._server = server
                 self.uri = f"http://{s.effective_hostname}:{port}{s.base_path}"
                 _log.info(
-                    "Bound Pekko Management (HTTP) endpoint to: %s:%s",
+                    "Bound management (HTTP) endpoint to: %s:%s",
                     s.effective_bind_hostname,
                     port,
                 )

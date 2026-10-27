@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -145,7 +145,7 @@ async def test_pending_stop_does_not_take_a_mailbox_slot():
 async def test_child_stopping_on_its_own_does_not_dead_letter_the_pending_stop(
     caplog: pytest.LogCaptureFixture,
 ):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()
     holder: list[ActorRef[ChildCmd]] = []

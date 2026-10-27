@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,

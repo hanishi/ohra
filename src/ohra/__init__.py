@@ -1,4 +1,4 @@
-"""Pekko Typed style actors on asyncio."""
+"""Apache Pekko Typed semantics on asyncio."""
 
 from .behavior import Behavior, Behaviors, Receive, StashBuffer, StashOverflowError
 from .cell import TimerScheduler
@@ -64,7 +64,7 @@ from .coordinated_shutdown import (
     Reason,
 )
 from .mailbox import MailboxOverflowError, MailboxSelector
-from .management import PekkoManagement, PekkoManagementSettings
+from .management import Management, ManagementSettings
 from .management.bootstrap import ClusterBootstrap, ClusterBootstrapSettings
 from .management.kubernetes import KubernetesApiServiceDiscovery, KubernetesApiSettings
 from .management.health import HealthCheckSettings
@@ -161,8 +161,8 @@ __all__ = [
     "MemberUp",
     "MemberWeaklyUp",
     "Passivate",
-    "PekkoManagement",
-    "PekkoManagementSettings",
+    "Management",
+    "ManagementSettings",
     "Persist",
     "Persisted",
     "PersistenceError",

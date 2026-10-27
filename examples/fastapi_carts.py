@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -40,7 +40,7 @@ from pekko_py import (
     SqliteStore,
     ask,
 )
-from pekko_py.ext.fastapi import Actors
+from ohra.ext.fastapi import Actors
 
 IDLE_TIMEOUT = 30.0  # seconds without a request before a cart entity is passivated
 store = SqliteStore[dict[str, int]](

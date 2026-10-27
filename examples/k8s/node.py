@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from pekko_py import (  # noqa: E402
+from ohra import (  # noqa: E402
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -44,8 +44,8 @@ from pekko_py import (  # noqa: E402
     KubernetesApiSettings,
     LeaderChanged,
     MemberEvent,
-    PekkoManagement,
-    PekkoManagementSettings,
+    Management,
+    ManagementSettings,
     ReachabilityEvent,
     SplitBrainResolverSettings,
     Subscribe,
@@ -151,7 +151,7 @@ async def main(pod: str, ip: str) -> None:
     settings = ClusterSettings(downing=SplitBrainResolverSettings(stable_after=5.0))
     # a deleted pod leaves gracefully
     shutdown = CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM))
-    management = PekkoManagementSettings(
+    management = ManagementSettings(
         hostname=ip,
         port=MANAGEMENT_PORT,
         # the probes and the peers come in on the pod IP, kubectl port-forward on localhost
@@ -170,7 +170,7 @@ async def main(pod: str, ip: str) -> None:
         management=management,
     ) as system:
         Cluster(system).subscriptions.tell(Subscribe(system, ClusterDomainEvent))
-        uri = await PekkoManagement(system).start()
+        uri = await Management(system).start()
         print(
             f"{pod}: {Cluster(system).self_address.root} bootstrapping; management at {uri}",
             flush=True,

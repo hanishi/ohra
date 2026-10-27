@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors, SqliteStore, SupervisorStrategy
+from ohra import ActorRef, ActorSystem, Behavior, Behaviors, SqliteStore, SupervisorStrategy
 
 DB = Path(os.environ.get("COUNTER_DB", Path(__file__).with_name("counter.db")))
 

@@ -1,8 +1,8 @@
 r"""PostgresStore: the SqliteStore contract on a database every node can reach.
 
-Runs against the server in PEKKO_PY_POSTGRES_DSN, for example
+Runs against the server in OHRA_POSTGRES_DSN, for example
     docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=pg postgres:17
-    PEKKO_PY_POSTGRES_DSN=postgresql://postgres:pg@localhost:55432/postgres \
+    OHRA_POSTGRES_DSN=postgresql://postgres:pg@localhost:55432/postgres \
         pytest tests/test_postgres_store.py
 and is skipped without it.
 """
@@ -18,18 +18,18 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from pekko_py import ActorSystem
-from pekko_py.persistence import RevisionConflictError
+from ohra import ActorSystem
+from ohra.persistence import RevisionConflictError
 
 from .test_persistence import Add, Cmd, Get, counter_on
 
-DSN = os.environ.get("PEKKO_PY_POSTGRES_DSN", "")
-pytestmark = pytest.mark.skipif(not DSN, reason="PEKKO_PY_POSTGRES_DSN is not set")
+DSN = os.environ.get("OHRA_POSTGRES_DSN", "")
+pytestmark = pytest.mark.skipif(not DSN, reason="OHRA_POSTGRES_DSN is not set")
 
 if DSN:
     import psycopg
 
-    from pekko_py.ext.postgres import PostgresStore
+    from ohra.ext.postgres import PostgresStore
 
 
 @pytest.fixture

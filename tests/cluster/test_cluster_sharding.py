@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     CoordinatedShutdownSettings,
     ActorContext,
     ActorRef,
@@ -32,9 +32,9 @@ from pekko_py import (
     ask,
     remotable,
 )
-from pekko_py.cluster.core import Cluster, Down, Leave
-from pekko_py.remote import Address
-from pekko_py.remote.serialization import Json
+from ohra.cluster.core import Cluster, Down, Leave
+from ohra.remote import Address
+from ohra.remote.serialization import Json
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node, unreachable_ports
@@ -193,7 +193,7 @@ async def test_region_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
         # the coordinator on a never hears b's questions
         deliver = _drop(a, ("Sharding.GetShardHome",))
         replies: list[int] = []
-        with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
             for i in range(3):
                 ref(b, f"q{i}").tell(Count(1, FunctionRefHolder.keep(replies)))
             await eventually(
@@ -213,7 +213,7 @@ class FunctionRefHolder:
 
     @classmethod
     def keep(cls, into: list[int]) -> ActorRef[int]:
-        from pekko_py.ref import FunctionRef
+        from ohra.ref import FunctionRef
 
         r: FunctionRef[int] = FunctionRef("probe", into.append)
         cls.refs.append(r)
@@ -297,7 +297,7 @@ async def test_shards_of_an_unreachable_node_wait_for_its_removal():
 
 # --- rebalance, hand-off and graceful leave (Task 4) ---------------------------------------------
 
-from pekko_py.cluster.sharding import shard_id_of  # noqa: E402
+from ohra.cluster.sharding import shard_id_of  # noqa: E402
 
 
 async def shards_on(region: ActorRef[Any]) -> frozenset[str]:
@@ -377,7 +377,7 @@ class Replies:
     """Collects replies through refs it keeps alive."""
 
     def __init__(self) -> None:
-        from pekko_py.ref import FunctionRef
+        from ohra.ref import FunctionRef
 
         self.received: list[int] = []
         self.ref: FunctionRef[int] = FunctionRef("replies", self.received.append)
@@ -388,14 +388,12 @@ def dropped_during(caplog: pytest.LogCaptureFixture) -> int:
     and HandOff, and a Shard already handing off dead-letters what reaches it late, as Pekko's do.
     Never silent."""
     return sum(
-        1
-        for r in caplog.records
-        if r.name == "pekko_py.dead_letters" and ("Count(" in r.getMessage())
+        1 for r in caplog.records if r.name == "ohra.dead_letters" and ("Count(" in r.getMessage())
     )
 
 
 async def test_messages_sent_during_a_rebalance_all_arrive(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     p1, p2, p3 = free_port(), free_port(), free_port()
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
@@ -419,7 +417,7 @@ async def test_messages_sent_during_a_rebalance_all_arrive(caplog: pytest.LogCap
 
 
 async def test_graceful_leave_hands_shards_off_and_loses_nothing(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     p1, p2, p3 = free_port(), free_port(), free_port()
     async with AsyncExitStack() as stack:
         a, b, c = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2, p3)]
@@ -557,7 +555,7 @@ async def test_late_registration_after_a_coordinator_move_is_resolved():
 async def test_a_failed_region_restarts_and_recovers():
     from typing import cast
 
-    from pekko_py.cluster.sharding.coordinator import HostShard
+    from ohra.cluster.sharding.coordinator import HostShard
 
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:

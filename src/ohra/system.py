@@ -18,7 +18,7 @@ from .remote.remoting import Remoting, UniqueAddress, resolve_local, unique_addr
 if TYPE_CHECKING:
     from .cluster.core import Cluster, ClusterSettings
     from .coordinated_shutdown import CoordinatedShutdownSettings
-    from .management import PekkoManagement, PekkoManagementSettings
+    from .management import Management, ManagementSettings
     from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
@@ -38,11 +38,11 @@ class ActorSystem[T](ActorRef[T]):
         address: tuple[str, int] | None = None,
         cluster: ClusterSettings | None = None,
         shutdown: CoordinatedShutdownSettings | None = None,
-        management: PekkoManagementSettings | None = None,
+        management: ManagementSettings | None = None,
     ) -> None:
         self.name = name
-        self.log = logging.getLogger(f"pekko_py.system.{name}")
-        self._dead_letters = logging.getLogger("pekko_py.dead_letters")
+        self.log = logging.getLogger(f"ohra.system.{name}")
+        self._dead_letters = logging.getLogger("ohra.dead_letters")
         if cluster is not None and address is None:
             raise ValueError("a cluster node needs an address=(host, port)")
         if management is not None and management.bootstrap is not None and cluster is None:
@@ -51,12 +51,12 @@ class ActorSystem[T](ActorRef[T]):
             )
         self.address: UniqueAddress | None = unique_address(*address, name) if address else None
         """Set when the system is reachable from other nodes; paths then read
-        pekko://name@host:port/..."""
+        ohra://name@host:port/..."""
         self.remoting: Remoting | None = Remoting(self, self.address) if self.address else None
         self._shutdown: asyncio.Task[None] | None = None
         # set by _final_terminate; a guardian stopping on its own leaves it False
         self._stop_requested = False
-        root = self.address.root if self.address else f"pekko://{name}"
+        root = self.address.root if self.address else f"ohra://{name}"
         self._root: ActorCell[T] = ActorCell(
             self, None, "user", f"{root}/user", guardian, mailbox or MailboxSelector()
         )
@@ -89,14 +89,14 @@ class ActorSystem[T](ActorRef[T]):
 
         # after the cluster, so a cluster node's receptionist replicates from the start
         _Receptionist(self)
-        from .management import PekkoManagement as _PekkoManagement
-        from .management import PekkoManagementSettings as _PMSettings
+        from .management import Management as _Management
+        from .management import ManagementSettings as _PMSettings
 
-        self.management: PekkoManagement = _PekkoManagement._start(  # pyright: ignore[reportPrivateUsage]
+        self.management: Management = _Management._start(  # pyright: ignore[reportPrivateUsage]
             self, management or _PMSettings()
         )
-        """Pekko Management, reached as ``PekkoManagement(system)``; binds nothing until
-        ``start()``."""
+        """The management extension (Pekko Management), reached as ``Management(system)``;
+        binds nothing until ``start()``."""
         self._management_stop: asyncio.Task[None] | None = None
         # Shutdown order: user root, then system root, then remoting, however the user root went.
         self._root.done.add_done_callback(lambda _: self._user_root_stopped())

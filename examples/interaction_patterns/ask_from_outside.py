@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from pekko_py import ActorRef, ActorSystem, AskTimeoutError, Behavior, Behaviors
+from ohra import ActorRef, ActorSystem, AskTimeoutError, Behavior, Behaviors
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorSystem,
     Behavior,

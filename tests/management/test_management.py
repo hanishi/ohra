@@ -1,4 +1,4 @@
-"""PekkoManagement: the endpoint binds once, serves Pekko's health checks, and a cluster node is
+"""Management: the endpoint binds once, serves Pekko's health checks, and a cluster node is
 ready when Up."""
 
 from __future__ import annotations
@@ -8,30 +8,30 @@ from typing import Any, cast
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorSystem,
     Address,
     Behaviors,
     HealthCheckSettings,
     Join,
-    PekkoManagement,
-    PekkoManagementSettings,
+    Management,
+    ManagementSettings,
 )
-from pekko_py.cluster.core import Cluster
-from pekko_py.management.http import get
+from ohra.cluster.core import Cluster
+from ohra.management.http import get
 
 from ..cluster.test_cluster import all_up, cluster_node
 from ..util import eventually, free_port
 
 
-def mgmt(**kw: Any) -> PekkoManagementSettings:
-    return PekkoManagementSettings(hostname="127.0.0.1", port=0, **kw)
+def mgmt(**kw: Any) -> ManagementSettings:
+    return ManagementSettings(hostname="127.0.0.1", port=0, **kw)
 
 
 async def test_start_binds_and_serves_health_routes():
     async with ActorSystem(Behaviors.ignore, "m", management=mgmt()) as system:
-        uri = await PekkoManagement(system).start()
-        assert uri.startswith("http://127.0.0.1:") and await PekkoManagement(system).start() == uri
+        uri = await Management(system).start()
+        assert uri.startswith("http://127.0.0.1:") and await Management(system).start() == uri
         for path in ("/ready", "/alive", "/startup"):
             assert (await get(uri + path, timeout=2))[0] == 200
     with pytest.raises(OSError):
@@ -44,7 +44,7 @@ async def test_failing_check_names_itself_and_times_out():
         "m",
         management=mgmt(health_checks=HealthCheckSettings(check_timeout=0.1)),
     ) as system:
-        m = PekkoManagement(system)
+        m = Management(system)
 
         async def ok() -> bool:
             return True
@@ -78,7 +78,7 @@ async def test_base_path_and_custom_check_paths():
         base_path="/management", health_checks=HealthCheckSettings(readiness_path="health/ready")
     )
     async with ActorSystem(Behaviors.ignore, "m", management=settings) as system:
-        uri = await PekkoManagement(system).start()
+        uri = await Management(system).start()
         assert (
             uri.endswith("/management") and (await get(uri + "/health/ready", timeout=2))[0] == 200
         )
@@ -92,11 +92,11 @@ async def test_start_on_a_taken_port_raises():
         async with ActorSystem(
             Behaviors.ignore,
             "m",
-            management=PekkoManagementSettings(hostname="127.0.0.1", port=port),
+            management=ManagementSettings(hostname="127.0.0.1", port=port),
         ) as system:
             with pytest.raises(OSError):
-                await PekkoManagement(system).start()
-            assert PekkoManagement(system).uri is None
+                await Management(system).start()
+            assert Management(system).uri is None
     finally:
         blocker.close()
         await blocker.wait_closed()
@@ -104,15 +104,15 @@ async def test_start_on_a_taken_port_raises():
 
 def test_settings_validation():
     with pytest.raises(ValueError):
-        PekkoManagementSettings(bootstrap=cast(Any, object()))  # bootstrap without discovery
+        ManagementSettings(bootstrap=cast(Any, object()))  # bootstrap without discovery
     with pytest.raises(ValueError):
-        PekkoManagementSettings(base_path="management")
+        ManagementSettings(base_path="management")
     with pytest.raises(ValueError):
-        PekkoManagementSettings(port=70000)
+        ManagementSettings(port=70000)
 
 
 async def test_bootstrap_on_a_non_cluster_system_is_refused():
-    from pekko_py import ClusterBootstrapSettings, ConfigServiceDiscovery
+    from ohra import ClusterBootstrapSettings, ConfigServiceDiscovery
 
     settings = mgmt(
         bootstrap=ClusterBootstrapSettings(service_name="x"), discovery=ConfigServiceDiscovery({})
@@ -125,7 +125,7 @@ async def test_bootstrap_on_a_non_cluster_system_is_refused():
 async def test_cluster_membership_readiness():
     p = free_port()
     async with cluster_node("c", p, []) as node:  # no seed nodes: never joins by itself
-        uri = await PekkoManagement(node).start()
+        uri = await Management(node).start()
         assert (await get(uri + "/ready", timeout=2))[0] == 500
         Cluster(node).manager.tell(Join(Address("c", "127.0.0.1", p)))
         await eventually(lambda: all_up(node, 1), timeout=5)
@@ -137,7 +137,7 @@ async def test_idle_and_half_open_connections_do_not_block_shutdown():
     must not hold the system's termination; the server cancels its connection tasks when it
     closes."""
     system = ActorSystem(Behaviors.ignore, "m", management=mgmt())
-    uri = await PekkoManagement(system).start()
+    uri = await Management(system).start()
     host, port = uri.removeprefix("http://").split(":")
     idle_reader, idle_writer = await asyncio.open_connection(host, int(port))
     began = asyncio.get_running_loop().time()
@@ -151,7 +151,7 @@ async def test_idle_and_half_open_connections_do_not_block_shutdown():
 
 async def test_start_after_termination_raises_and_stop_allows_a_rebind():
     system = ActorSystem(Behaviors.ignore, "m", management=mgmt())
-    m = PekkoManagement(system)
+    m = Management(system)
     first = await m.start()
     await m.stop()
     assert m.uri is None

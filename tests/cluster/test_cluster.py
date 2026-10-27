@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -21,9 +21,9 @@ from pekko_py import (
     ClusterLeavingReason,
     CoordinatedShutdown,
     CoordinatedShutdownSettings,
-    PekkoManagementSettings,
+    ManagementSettings,
 )
-from pekko_py.cluster.core import (
+from ohra.cluster.core import (
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
@@ -43,11 +43,11 @@ from pekko_py.cluster.core import (
     Subscribe,
     UnreachableMember,
 )
-from pekko_py.patterns import ask
-from pekko_py.ref import FunctionRef
-from pekko_py.cluster.gossip import Gossip, Member
-from pekko_py.remote import Address, UniqueAddress
-from pekko_py.remote.serialization import Json
+from ohra.patterns import ask
+from ohra.ref import FunctionRef
+from ohra.cluster.gossip import Gossip, Member
+from ohra.remote import Address, UniqueAddress
+from ohra.remote.serialization import Json
 
 from ..util import eventually, free_port
 
@@ -81,7 +81,7 @@ def cluster_node(
     port: int,
     seeds: list[int],
     shutdown: CoordinatedShutdownSettings = FAST_SHUTDOWN,
-    management: PekkoManagementSettings | None = None,
+    management: ManagementSettings | None = None,
     **settings: Any,
 ) -> ActorSystem[Any]:
     """A node whose guardian ignores messages; the cluster lives under /system. Management binds an
@@ -93,7 +93,7 @@ def cluster_node(
         address=("127.0.0.1", port),
         cluster=ClusterSettings(seed_nodes=seed_nodes, **{**FAST, **settings}),
         shutdown=shutdown,
-        management=management or PekkoManagementSettings(hostname="127.0.0.1", port=0),
+        management=management or ManagementSettings(hostname="127.0.0.1", port=0),
     )
 
 
@@ -500,7 +500,7 @@ async def test_a_stopped_local_subscriber_is_forgotten(caplog: pytest.LogCapture
             lambda: a.resolve(subscriber.path) is None if False else _gone(a, subscriber.path),
             timeout=2,
         )
-        with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
             async with cluster_node("c", p2, [p1]) as b:
                 await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
         assert not [r for r in caplog.records if subscriber.path in r.getMessage()]
@@ -616,15 +616,15 @@ async def test_a_failing_exiting_task_does_not_block_the_exit():
 
 
 def test_publish_diff_emits_seen_and_reachability_changes_last():
-    from pekko_py.cluster.core import (
+    from ohra.cluster.core import (
         ReachabilityChanged,
         SeenChanged,
         diff_reachability,
         diff_seen,
         publish_diff,
     )
-    from pekko_py.cluster.gossip import MembershipState
-    from pekko_py.cluster.reachability import Reachability
+    from ohra.cluster.gossip import MembershipState
+    from ohra.cluster.reachability import Reachability
 
     a, b = UniqueAddress("127.0.0.1", 1, 1, "c"), UniqueAddress("127.0.0.1", 2, 2, "c")
     g = Gossip.empty().with_member(Member(a, 1, "up")).with_member(Member(b, 2, "up"))

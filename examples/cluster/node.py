@@ -42,7 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from pekko_py import (  # noqa: E402
+from ohra import (  # noqa: E402
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -63,8 +63,8 @@ from pekko_py import (  # noqa: E402
     LeaderChanged,
     Listing,
     MemberEvent,
-    PekkoManagement,
-    PekkoManagementSettings,
+    Management,
+    ManagementSettings,
     ReachabilityEvent,
     Receptionist,
     Register,
@@ -75,7 +75,7 @@ from pekko_py import (  # noqa: E402
     Subscribe,
     remotable,
 )
-from pekko_py.receptionist import Subscribe as SubscribeToKey  # noqa: E402  # the cluster's Subscribe is the top-level one
+from ohra.receptionist import Subscribe as SubscribeToKey  # noqa: E402  # the cluster's Subscribe is the top-level one
 
 HOST = "127.0.0.1"
 
@@ -222,7 +222,7 @@ def node(
     # Pekko's JVM shutdown hook
     shutdown = CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM))
     # health checks and /cluster/members on port + 1000
-    management = PekkoManagementSettings(hostname=HOST, port=port + 1000)
+    management = ManagementSettings(hostname=HOST, port=port + 1000)
     # --bootstrap: no seed nodes; the nodes find each other through discovery and probing, as on
     # Kubernetes
     if bootstrap_ports:
@@ -253,7 +253,7 @@ def node(
 async def main(name: str, port: int, seed_ports: list[int], bootstrap_ports: list[int]) -> None:
     async with node(name, port, seed_ports, bootstrap_ports) as system:
         cluster = Cluster(system)
-        uri = await PekkoManagement(system).start()
+        uri = await Management(system).start()
         how = (
             f"bootstrapping with {bootstrap_ports}"
             if bootstrap_ports

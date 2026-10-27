@@ -23,8 +23,8 @@ from fastapi.responses import HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Signal, Terminated
-from pekko_py.ext.fastapi import Actors
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Signal, Terminated
+from ohra.ext.fastapi import Actors
 
 # --- room protocol (as in examples/chatroom.py, plus join/leave notices) ----------------------
 

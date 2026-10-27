@@ -2,15 +2,15 @@
 
 `ActorSystem(guardian, name)` creates two root cells. `/user` runs your guardian behavior, and the system itself is a ref to it. `/system` hosts the infrastructure: the receptionist, the cluster daemon, the split-brain resolver, singleton managers and sharding regions. Your actors and the machinery never share a parent, so stopping one tree does not tear the other mid-step.
 
-**Extensions.** `Cluster(system)`, `ClusterSharding(system)`, `ClusterSingleton(system)`, `Receptionist(system)` and `PekkoManagement(system)` each return the one instance for that system, as Pekko's extensions do. The constructor's arguments decide which exist: `address=` turns on remoting, `cluster=` the cluster, `management=` the management endpoint.
+**Extensions.** `Cluster(system)`, `ClusterSharding(system)`, `ClusterSingleton(system)`, `Receptionist(system)` and `Management(system)` each return the one instance for that system, as Pekko's extensions do. The constructor's arguments decide which exist: `address=` turns on remoting, `cluster=` the cluster, `management=` the management endpoint.
 
 ## Receptionist
 
 Actors find each other through the Receptionist, Apache Pekko's service registry: a service registers under a `ServiceKey`, and anyone asks `Find` for the current refs under that key or `Subscribe`s to be sent a `Listing` now and after every change. Every system starts one; on a cluster node the registry is replicated, so a service registered on one node is found on the others as a `RemoteRef`. Entries follow their node: they vanish when the service stops or the member is removed, and while a node is unreachable its services drop from `service_instances` but stay in `all_service_instances`.
 
 ```python
-from pekko_py import Find, Listing, Receptionist, Register, ServiceKey
-from pekko_py.receptionist import Subscribe  # the cluster's Subscribe is the top-level one
+from ohra import Find, Listing, Receptionist, Register, ServiceKey
+from ohra.receptionist import Subscribe  # the cluster's Subscribe is the top-level one
 
 GREETER = ServiceKey[Greet]("greeter")
 
@@ -67,7 +67,7 @@ The same sequence runs when a node is downed, when the guardian stops on its own
 ```python
 import signal
 
-from pekko_py import CoordinatedShutdown, CoordinatedShutdownSettings
+from ohra import CoordinatedShutdown, CoordinatedShutdownSettings
 
 system = ActorSystem(
     guardian,

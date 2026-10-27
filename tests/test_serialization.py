@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from pekko_py import ActorRef
-from pekko_py.ref import FunctionRef
-from pekko_py.remote.serialization import Serialization, SerializationError, remotable
+from ohra import ActorRef
+from ohra.ref import FunctionRef
+from ohra.remote.serialization import Serialization, SerializationError, remotable
 
 
 @remotable
@@ -66,10 +66,10 @@ def _never() -> ActorRef[Any]:
 
 
 def test_refs_encode_as_paths_and_decode_through_resolve():
-    ref: ActorRef[str] = FunctionRef("pekko://a/user/x", lambda _m: None)
+    ref: ActorRef[str] = FunctionRef("ohra://a/user/x", lambda _m: None)
     data = Serialization.encode(WithRef(ref, "hi"), lambda r: r.path)
-    assert data == {"$type": "WithRef", "reply_to": {"$ref": "pekko://a/user/x"}, "label": "hi"}
-    resolved: dict[str, ActorRef[Any]] = {"pekko://a/user/x": ref}
+    assert data == {"$type": "WithRef", "reply_to": {"$ref": "ohra://a/user/x"}, "label": "hi"}
+    resolved: dict[str, ActorRef[Any]] = {"ohra://a/user/x": ref}
     back = Serialization.decode(data, lambda p: resolved[p])
     assert back == WithRef(ref, "hi")
     assert isinstance(back, WithRef) and back.reply_to is ref

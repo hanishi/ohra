@@ -11,4 +11,4 @@ labels: bug
 ```python
 ```
 
-**Versions**: pekko-py commit or version, Python version, OS
+**Versions**: ohra commit or version, Python version, OS

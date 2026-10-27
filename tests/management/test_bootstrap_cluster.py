@@ -10,19 +10,19 @@ from typing import Any
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorSystem,
     Address,
     ClusterBootstrapSettings,
     ConfigServiceDiscovery,
     Lookup,
-    PekkoManagement,
-    PekkoManagementSettings,
+    Management,
+    ManagementSettings,
     Resolved,
     ResolvedTarget,
     ServiceDiscovery,
 )
-from pekko_py.cluster.core import Cluster
+from ohra.cluster.core import Cluster
 
 from ..cluster.test_cluster import all_up, cluster_node
 from ..util import eventually, free_port
@@ -64,7 +64,7 @@ def bootstrap_node(
     discovery = discovery or ConfigServiceDiscovery(
         {"svc": [ResolvedTarget("127.0.0.1", p, "127.0.0.1") for p in mgmt_ports]}
     )
-    management = PekkoManagementSettings(
+    management = ManagementSettings(
         hostname="127.0.0.1",
         port=my_mgmt,
         discovery=discovery,
@@ -85,7 +85,7 @@ async def test_three_nodes_form_one_cluster_and_the_lowest_joins_itself():
             for p, m in zip(ports, mgmt, strict=True)
         ]
         for n in nodes:
-            await PekkoManagement(n).start()
+            await Management(n).start()
         await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=10)
         assert len({Cluster(n).state.leader for n in nodes}) == 1
         oldest = min(Cluster(nodes[0]).state.members, key=lambda m: m.up_number)
@@ -102,11 +102,11 @@ async def test_a_late_node_joins_through_probing():
             for p, m in zip(ports, mgmt, strict=True)
         ]
         for n in nodes:
-            await PekkoManagement(n).start()
+            await Management(n).start()
         await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=10)
         live.mgmt_ports.append(m4)  # the fourth pod is now listed
         late = await stack.enter_async_context(bootstrap_node(p4, mgmt, m4, discovery=live))
-        await PekkoManagement(late).start()
+        await Management(late).start()
         await eventually(lambda: all(all_up(n, 4) for n in [*nodes, late]), timeout=10)
 
 
@@ -118,7 +118,7 @@ async def test_a_node_missing_itself_in_discovery_joins_once_seed_nodes_appear()
         # c does not see itself
         c = await stack.enter_async_context(bootstrap_node(ports[2], mgmt[:2], mgmt[2]))
         for n in (a, b, c):
-            await PekkoManagement(n).start()
+            await Management(n).start()
         await eventually(lambda: all(all_up(n, 3) for n in (a, b, c)), timeout=10)
 
 
@@ -132,17 +132,17 @@ async def test_new_cluster_disabled_forms_nothing():
             for p, m in zip(ports[:2], mgmt[:2], strict=True)
         ]
         for n in nodes:
-            await PekkoManagement(n).start()
+            await Management(n).start()
         await asyncio.sleep(1.5 * BOOT["stable_margin"] + 0.5)
         assert all(not Cluster(n).state.members for n in nodes)
 
 
 async def test_probe_refuses_own_remoting_address(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.WARNING, logger="pekko_py.management.bootstrap")
+    caplog.set_level(logging.WARNING, logger="ohra.management.bootstrap")
     p, m = free_port(), free_port()
     # the remoting port, not management
     discovery = ConfigServiceDiscovery({"svc": [ResolvedTarget("127.0.0.1", p, "127.0.0.1")]})
-    management = PekkoManagementSettings(
+    management = ManagementSettings(
         hostname="127.0.0.1",
         port=m,
         discovery=discovery,
@@ -151,7 +151,7 @@ async def test_probe_refuses_own_remoting_address(caplog: pytest.LogCaptureFixtu
         ),
     )
     async with cluster_node("c", p, [], management=management) as node:
-        await PekkoManagement(node).start()
+        await Management(node).start()
         await eventually(
             lambda: any("Misconfiguration detected" in r.message for r in caplog.records),
             timeout=5,
@@ -161,10 +161,10 @@ async def test_probe_refuses_own_remoting_address(caplog: pytest.LogCaptureFixtu
 
 
 async def test_bootstrap_with_seed_nodes_configured_bails_out(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.WARNING, logger="pekko_py.management.bootstrap")
+    caplog.set_level(logging.WARNING, logger="ohra.management.bootstrap")
     p, m = free_port(), free_port()
     async with bootstrap_node(p, [m], m, seeds=[p]) as node:
-        await PekkoManagement(node).start()
+        await Management(node).start()
         assert any("bailing out of the bootstrap process" in r.message for r in caplog.records)
         await eventually(lambda: all_up(node, 1), timeout=5)
 
@@ -173,8 +173,8 @@ async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
     """After a probe is dropped (ProbingFailed or a vanished contact point) its child may still
     exist while the next discovery lists the same point; spawning a duplicate by name would fail
     the coordinator. Pekko uses context.child."""
-    from pekko_py import ActorContext, Behavior, Behaviors
-    from pekko_py.management.bootstrap import _Coordinator  # pyright: ignore[reportPrivateUsage]
+    from ohra import ActorContext, Behavior, Behaviors
+    from ohra.management.bootstrap import _Coordinator  # pyright: ignore[reportPrivateUsage]
 
     p, m = free_port(), free_port()
     outcome: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -195,7 +195,7 @@ async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
         return Behaviors.ignore
 
     async with cluster_node(
-        "c", p, [], management=PekkoManagementSettings(hostname="127.0.0.1", port=m)
+        "c", p, [], management=ManagementSettings(hostname="127.0.0.1", port=m)
     ) as node:
         node._system_root.spawn_child(Behaviors.setup(probe_twice), "probeTwice", None)  # pyright: ignore[reportPrivateUsage]
         assert await asyncio.wait_for(outcome, 5) == "reused"
@@ -206,7 +206,7 @@ def test_decider_resolves_its_own_hostname_once(monkeypatch: pytest.MonkeyPatch)
     construction."""
     import socket
 
-    from pekko_py.management.bootstrap import (
+    from ohra.management.bootstrap import (
         JoinSelf,
         LowestAddressJoinDecider,
         SeedNodesInformation,

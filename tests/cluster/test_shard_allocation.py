@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import pytest
 
-from pekko_py.cluster.core import CurrentClusterState
-from pekko_py.cluster.gossip import Member, MemberStatus
-from pekko_py.cluster.sharding import (
+from ohra.cluster.core import CurrentClusterState
+from ohra.cluster.gossip import Member, MemberStatus
+from ohra.cluster.sharding import (
     CoordinatorState,
     LeastShardAllocationStrategy,
     ShardHomeAllocated,
@@ -15,12 +15,12 @@ from pekko_py.cluster.sharding import (
     ShardRegionRegistered,
     ShardRegionTerminated,
 )
-from pekko_py.remote import Address, UniqueAddress
+from ohra.remote import Address, UniqueAddress
 
 A = UniqueAddress("127.0.0.1", 1, 11, "c")
 B = UniqueAddress("127.0.0.1", 2, 22, "c")
 C = UniqueAddress("127.0.0.1", 3, 33, "c")
-RA, RB, RC = (f"pekko://c@127.0.0.1:{p}/system/sharding/T" for p in (1, 2, 3))
+RA, RB, RC = (f"ohra://c@127.0.0.1:{p}/system/sharding/T" for p in (1, 2, 3))
 
 
 def member(node: UniqueAddress, up_number: int, status: MemberStatus = "up") -> Member:

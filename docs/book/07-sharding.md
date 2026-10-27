@@ -38,7 +38,7 @@ sequenceDiagram
 `Sharding.init(Entity(key, create))` is a shard region: one entity actor per id, created by its first message, passivated when idle or when it asks, with messages that arrive while it is passivating buffered for the next incarnation. This is the region layer of Apache Pekko's `ClusterSharding` inside one process, which is what most single-node apps use it for: address by id, create on demand, and keep only hot entities in memory.
 
 ```python
-from pekko_py import Entity, EntityContext, EntityTypeKey, Sharding
+from ohra import Entity, EntityContext, EntityTypeKey, Sharding
 
 Cart = EntityTypeKey[Command]("Cart")
 
@@ -58,7 +58,7 @@ Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "car
 `ClusterSharding(system).init(Entity(key, create))` is `Sharding.init` for the whole cluster: the same entity type on every node, each entity living on exactly one of them. A ShardCoordinator, run as a cluster singleton, decides which node hosts each shard with Pekko's least-shard allocation; every node's region routes a message to the shard's home, local or remote, and buffers while the home is unknown. `entity_ref_for(key, id)` works on any node. When a node joins, the coordinator moves shards to it over the following rebalance intervals; when a node leaves, its region hands every shard off during the exiting phase before the node confirms its exit; when a node crashes, its shards are served again once it has been downed and removed, and not before, so no entity ever runs twice.
 
 ```python
-from pekko_py import ClusterSharding, Entity, EntityTypeKey
+from ohra import ClusterSharding, Entity, EntityTypeKey
 
 COUNTER = EntityTypeKey[CountUp]("Counter")
 region = ClusterSharding(system).init(Entity(COUNTER, counter))  # call it on every node

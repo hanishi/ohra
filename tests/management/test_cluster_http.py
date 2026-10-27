@@ -7,11 +7,11 @@ import asyncio
 import json
 from contextlib import AsyncExitStack
 
-from pekko_py import PekkoManagement
-from pekko_py.cluster.core import Cluster
-from pekko_py.cluster.sharding import shard_id_of
-from pekko_py.management.http import get
-from pekko_py.patterns import ask
+from ohra import Management
+from ohra.cluster.core import Cluster
+from ohra.cluster.sharding import shard_id_of
+from ohra.management.http import get
+from ohra.patterns import ask
 
 from ..cluster.test_cluster import all_up, cluster_node, crash, unreachable_ports
 from ..cluster.test_cluster_sharding import Count, ref
@@ -25,29 +25,29 @@ async def test_cluster_members_json():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(cluster_node("c", p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        uri = await PekkoManagement(a).start()
+        uri = await Management(a).start()
         status, body = await get(uri + "/cluster/members", timeout=2)
         doc = json.loads(body)
         assert (
             status == 200
-            and doc["selfNode"] == f"pekko://c@127.0.0.1:{p1}"
-            and doc["leader"] == f"pekko://c@127.0.0.1:{p1}"
+            and doc["selfNode"] == f"ohra://c@127.0.0.1:{p1}"
+            and doc["leader"] == f"ohra://c@127.0.0.1:{p1}"
         )
         assert sorted(m["node"] for m in doc["members"]) == [
-            f"pekko://c@127.0.0.1:{p1}",
-            f"pekko://c@127.0.0.1:{p2}",
+            f"ohra://c@127.0.0.1:{p1}",
+            f"ohra://c@127.0.0.1:{p2}",
         ]
         assert all(m["status"] == "Up" and m["roles"] == [] for m in doc["members"])
         assert (
             doc["unreachable"] == []
             and doc["oldestPerRole"] == {}
-            and doc["oldest"] == f"pekko://c@127.0.0.1:{p1}"
+            and doc["oldest"] == f"ohra://c@127.0.0.1:{p1}"
         )
         one = json.loads(
-            (await get(uri + f"/cluster/members/pekko://c@127.0.0.1:{p2}", timeout=2))[1]
+            (await get(uri + f"/cluster/members/ohra://c@127.0.0.1:{p2}", timeout=2))[1]
         )
-        assert one["node"] == f"pekko://c@127.0.0.1:{p2}" and isinstance(one["nodeUid"], int)
-        assert (await get(uri + "/cluster/members/pekko://c@127.0.0.1:1", timeout=2))[0] == 404
+        assert one["node"] == f"ohra://c@127.0.0.1:{p2}" and isinstance(one["nodeUid"], int)
+        assert (await get(uri + "/cluster/members/ohra://c@127.0.0.1:1", timeout=2))[0] == 404
 
 
 async def test_unreachable_members_list_their_observers():
@@ -55,12 +55,12 @@ async def test_unreachable_members_list_their_observers():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(cluster_node("c", p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        uri = await PekkoManagement(a).start()
+        uri = await Management(a).start()
         await crash(b)
         await eventually(lambda: unreachable_ports(a) == {p2}, timeout=5)
         doc = json.loads((await get(uri + "/cluster/members", timeout=2))[1])
         assert doc["unreachable"] == [
-            {"node": f"pekko://c@127.0.0.1:{p2}", "observedBy": [f"pekko://c@127.0.0.1:{p1}"]}
+            {"node": f"ohra://c@127.0.0.1:{p2}", "observedBy": [f"ohra://c@127.0.0.1:{p1}"]}
         ]
 
 
@@ -72,7 +72,7 @@ async def test_cluster_shards_route():
         ids = ["a", "b", "c", "d", "e", "f"]
         for i in ids:
             assert await ask(ref(a, i), lambda r: Count(1, r), timeout=5) == 1
-        uri = await PekkoManagement(a).start()
+        uri = await Management(a).start()
         status, body = await get(uri + "/cluster/shards/Counter", timeout=3)
         doc = json.loads(body)
         assert status == 200 and sum(r["numEntities"] for r in doc["regions"]) == 6
@@ -83,7 +83,7 @@ async def test_cluster_shards_route():
 async def test_mutating_routes_are_405():
     p = free_port()
     async with cluster_node("c", p, [p]) as a:
-        uri = await PekkoManagement(a).start()
+        uri = await Management(a).start()
         host, port = uri.removeprefix("http://").split("/")[0].split(":")
         for request in (
             b"PUT /cluster/members/x HTTP/1.1\r\nHost: x\r\n\r\n",

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .cell import ActorCell
 
-_dead_letters = logging.getLogger("pekko_py.dead_letters")
+_dead_letters = logging.getLogger("ohra.dead_letters")
 
 
 class ActorRef[T](ABC):

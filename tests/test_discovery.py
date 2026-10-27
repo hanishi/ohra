@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pekko_py import ConfigServiceDiscovery, Lookup, Resolved, ResolvedTarget
+from ohra import ConfigServiceDiscovery, Lookup, Resolved, ResolvedTarget
 
 
 async def test_config_discovery_resolves_known_and_unknown_names():

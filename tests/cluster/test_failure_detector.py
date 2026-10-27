@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 
-from pekko_py.cluster.failure_detector import (
+from ohra.cluster.failure_detector import (
     FailureDetectorRegistry,
     HeartbeatHistory,
     HeartbeatNodeRing,
@@ -13,7 +13,7 @@ from pekko_py.cluster.failure_detector import (
     PhiAccrualFailureDetector,
     phi,
 )
-from pekko_py.remote import Address, UniqueAddress
+from ohra.remote import Address, UniqueAddress
 
 AA = UniqueAddress("aa", 7355, 1, "sys")
 BB = UniqueAddress("bb", 7355, 2, "sys")

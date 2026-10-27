@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from pekko_py import ActorRef, remotable
+from ohra import ActorRef, remotable
 
 
 @remotable

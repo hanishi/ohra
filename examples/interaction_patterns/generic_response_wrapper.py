@@ -1,6 +1,6 @@
 """Generic response wrapper: instead of a Reply union per protocol, reply with Try[Cookies],
 so the asking side handles success and failure uniformly. Pekko uses StatusReply for this;
-pekko-py's Success / Failure already have that shape (Pekko interaction patterns)."""
+ohra's Success / Failure already have that shape (Pekko interaction patterns)."""
 
 import asyncio
 import sys
@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors, Failure, Success, Try
+from ohra import ActorRef, ActorSystem, Behavior, Behaviors, Failure, Success, Try
 
 
 @dataclass(frozen=True)

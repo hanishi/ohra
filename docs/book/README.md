@@ -1,6 +1,6 @@
-# How pekko-py works
+# How ohra works
 
-pekko-py runs Apache Pekko Typed on one asyncio event loop per process, in pure Python with no dependencies. Every feature is built from one primitive: an actor that handles one message at a time and returns its next behavior. Remoting, the cluster, sharding and persistence are all actors on top of it.
+ohra runs Apache Pekko Typed on one asyncio event loop per process, in pure Python with no dependencies. Every feature is built from one primitive: an actor that handles one message at a time and returns its next behavior. Remoting, the cluster, sharding and persistence are all actors on top of it.
 
 ## At a glance
 

@@ -1,6 +1,6 @@
 # Appendix A: Apache Pekko names
 
-| Apache Pekko | pekko-py |
+| Apache Pekko | ohra |
 |---|---|
 | `Behaviors.receive / receiveMessage / receiveSignal / setup / same / stopped / unhandled / empty / ignore` | same names, snake_case; handlers may be `async def` |
 | `ActorRef[-T]` | `ActorRef[T]`, contravariant, enforced by pyright strict |
@@ -23,8 +23,8 @@
 | `EntityTypeKey`, `EntityContext`, `EntityRef`, `ShardingEnvelope`, `ClusterSharding.Passivate`, `GetShardRegionState` | same; `Passivate` |
 | `DurableStateBehavior(persistenceId, emptyState, commandHandler)` | `@Behaviors.persisted(store)` on a state-to-behavior factory, started with `factory.recover(id, empty)` |
 | `Effect.persist(state).thenReply(replyTo)(f)`, `Effect.none` | `factory(state).then_reply(ref, msg)` / `.then_run(callback)`; any plain behavior, including `same`, writes nothing |
-| durable state stores (JDBC, R2DBC) | `InMemoryStore`, `SqliteStore(path, codec=...)`, `pekko_py.ext.postgres.PostgresStore(dsn, table=..., codec=...)` |
-| `pekko.remote.artery.canonical.hostname / port` | `ActorSystem(..., address=(host, port))`; paths read `pekko://name@host:port/user/...` |
+| durable state stores (JDBC, R2DBC) | `InMemoryStore`, `SqliteStore(path, codec=...)`, `ohra.ext.postgres.PostgresStore(dsn, table=..., codec=...)` |
+| `pekko.remote.artery.canonical.hostname / port` | `ActorSystem(..., address=(host, port))`; paths read `ohra://name@host:port/user/...` |
 | `ActorRefResolver.resolveActorRef(path)` | `system.resolve(path)`: a local ref, or a `RemoteRef` for another node |
 | serialization bindings and manifests | `@remotable` on a frozen dataclass; self-describing JSON with `$type` and `$ref` |
 | `pekko.cluster.seed-nodes` and the other `pekko.cluster.*` settings | `ActorSystem(..., cluster=ClusterSettings(seed_nodes=(Address(name, host, port), ...), ...))`; the failure detector settings are `ClusterSettings` fields in seconds |
@@ -35,7 +35,7 @@
 | `MemberStatus.Joining / WeaklyUp / Up / Leaving / Exiting / Down / Removed` | `member.status` is the string `"joining"`, `"weakly_up"`, ... |
 | `Receptionist(system).ref ! Register(key, ref)`, `Deregister`, `Find(key, replyTo)` | `Receptionist(system).ref.tell(Register(key, ref))`, same names; `Registered` / `Deregistered` replies when `reply_to` is given |
 | `ServiceKey[T]("id")` | `ServiceKey[T]("id")` |
-| `Receptionist.Subscribe(key, subscriber)` | `pekko_py.receptionist.Subscribe(key, subscriber)`; the top-level `Subscribe` is the cluster's |
+| `Receptionist.Subscribe(key, subscriber)` | `ohra.receptionist.Subscribe(key, subscriber)`; the top-level `Subscribe` is the cluster's |
 | `Listing.serviceInstances(key)` / `allServiceInstances(key)` / `servicesWereAddedOrRemoved` | `listing.service_instances` / `all_service_instances` / `services_were_added_or_removed`, fields of `Listing[T]` |
 | `ClusterSingleton(system).init(SingletonActor(behavior, "name"))`, `withStopMessage`, `withSettings` | same, `with_stop_message`, `with_settings`; returns the proxy ref |
 | `ClusterSingletonSettings` / `ClusterSingletonManagerSettings` (`removal-margin`, `hand-over-retry-interval`, `min-number-of-hand-over-retries`, `singleton-identification-interval`, `buffer-size`) | `ClusterSingletonSettings` with the same fields in snake_case, seconds |
@@ -43,10 +43,10 @@
 | `pekko.coordinated-shutdown.phases.<p>.timeout`, `default-phase-timeout` | `ActorSystem(..., shutdown=CoordinatedShutdownSettings(phase_timeouts={...}, default_phase_timeout=5.0))` |
 | `run-by-actor-system-terminate`, `run-by-jvm-shutdown-hook` | `CoordinatedShutdownSettings(run_by_actor_system_terminate=True, run_on_signals=(signal.SIGTERM, ...))` |
 | `ActorSystemTerminateReason`, `JvmExitReason`, `ClusterLeavingReason`, `ClusterDowningReason` | the same, as frozen dataclasses; subclass `Reason` for your own |
-| `PekkoManagement(system).start()` / `routes` | `await PekkoManagement(system).start() -> uri`; routes are built in: health checks, `/cluster/*`, `/bootstrap/seed-nodes` |
-| `pekko.management.http.hostname / port / bind-hostname / bind-port / base-path` | `ActorSystem(..., management=PekkoManagementSettings(hostname, port, bind_hostname, bind_port, base_path))` |
-| `pekko.management.health-checks.{startup,readiness,liveness}-checks` | `PekkoManagement(system).health.add_{startup,readiness,liveness}_check(name, check)`; `HealthCheckSettings` for the paths, timeout and `ready_states` |
-| `ClusterBootstrap(system).start()` and `pekko.management.cluster.bootstrap.*` | started by `PekkoManagement.start()` when `PekkoManagementSettings.bootstrap` is set; `ClusterBootstrapSettings` fields in snake_case, seconds |
+| `PekkoManagement(system).start()` / `routes` | `await Management(system).start() -> uri`; routes are built in: health checks, `/cluster/*`, `/bootstrap/seed-nodes` |
+| `pekko.management.http.hostname / port / bind-hostname / bind-port / base-path` | `ActorSystem(..., management=ManagementSettings(hostname, port, bind_hostname, bind_port, base_path))` |
+| `pekko.management.health-checks.{startup,readiness,liveness}-checks` | `Management(system).health.add_{startup,readiness,liveness}_check(name, check)`; `HealthCheckSettings` for the paths, timeout and `ready_states` |
+| `ClusterBootstrap(system).start()` and `pekko.management.cluster.bootstrap.*` | started by `Management.start()` when `ManagementSettings.bootstrap` is set; `ClusterBootstrapSettings` fields in snake_case, seconds |
 | `pekko.discovery.kubernetes-api.*` | `KubernetesApiServiceDiscovery(KubernetesApiSettings(...))` |
 | `ServiceDiscovery.lookup(Lookup(name), timeout)` | `await discovery.lookup(Lookup(name, port_name), resolve_timeout) -> Resolved(service_name, addresses)` |
 | `pekko.cluster.downing-provider-class = "...SplitBrainResolverProvider"` | `ClusterSettings(downing=SplitBrainResolverSettings(...))` |
@@ -61,7 +61,7 @@
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
 | `system.ignoreRef` | `system.ignore_ref` |
 | (none) | `batching(max_n, max_wait, handle)` |
-| (none) | `pekko_py.ext.shm.SharedArray`, a picklable handle to an array in shared memory |
+| (none) | `ohra.ext.shm.SharedArray`, a picklable handle to an array in shared memory |
 
 ---
 

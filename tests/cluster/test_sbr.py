@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from pekko_py.cluster.core import (
+from ohra.cluster.core import (
     ClusterSettings,
     LeaderChanged,
     MemberDowned,
@@ -19,9 +19,9 @@ from pekko_py.cluster.core import (
     SeenChanged,
     UnreachableMember,
 )
-from pekko_py.cluster.gossip import UP_NUMBER_UNSET, Member
-from pekko_py.cluster.reachability import Reachability, Record
-from pekko_py.cluster.sbr import (
+from ohra.cluster.gossip import UP_NUMBER_UNSET, Member
+from ohra.cluster.reachability import Reachability, Record
+from ohra.cluster.sbr import (
     DownAll,
     DownAllDecision,
     DownIndirectlyConnected,
@@ -36,7 +36,7 @@ from pekko_py.cluster.sbr import (
     _DowningStrategy,  # pyright: ignore[reportPrivateUsage]
     _Resolver,  # pyright: ignore[reportPrivateUsage]
 )
-from pekko_py.remote import Address, UniqueAddress
+from ohra.remote import Address, UniqueAddress
 
 # --- fixtures (TestAddresses.scala and StrategySetup) --------------------------------------------
 

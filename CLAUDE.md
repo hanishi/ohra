@@ -1,3 +1,3 @@
-# pekko-py: notes for Claude Code
+# ohra: notes for Claude Code
 
 @CONTRIBUTING.md

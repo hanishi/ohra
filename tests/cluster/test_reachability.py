@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pekko_py.cluster.reachability import Reachability
-from pekko_py.remote import UniqueAddress
+from ohra.cluster.reachability import Reachability
+from ohra.remote import UniqueAddress
 
 A = UniqueAddress("127.0.0.1", 1, 11, "s")
 B = UniqueAddress("127.0.0.1", 2, 22, "s")

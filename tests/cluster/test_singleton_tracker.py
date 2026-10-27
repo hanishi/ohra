@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import pytest
 
-from pekko_py.cluster.gossip import UP_NUMBER_UNSET, Member, MemberStatus
-from pekko_py.cluster.singleton import (
+from ohra.cluster.gossip import UP_NUMBER_UNSET, Member, MemberStatus
+from ohra.cluster.singleton import (
     ClusterSingletonSettings,
     InitialOldestState,
     OldestChanged,
     OldestChangedTracker,
 )
-from pekko_py.remote import UniqueAddress
+from ohra.remote import UniqueAddress
 
 A = UniqueAddress("127.0.0.1", 1, 11, "c")
 B = UniqueAddress("127.0.0.1", 2, 22, "c")

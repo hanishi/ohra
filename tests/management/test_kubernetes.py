@@ -13,8 +13,8 @@ import subprocess
 
 import pytest
 
-from pekko_py import Lookup, ResolvedTarget
-from pekko_py.management.kubernetes import (
+from ohra import Lookup, ResolvedTarget
+from ohra.management.kubernetes import (
     KubernetesApiError,
     KubernetesApiServiceDiscovery,
     KubernetesApiSettings,
@@ -158,7 +158,7 @@ async def test_lookup_fails_on_403_and_on_missing_env(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ):
-    caplog.set_level(logging.WARNING, logger="pekko_py.management.kubernetes")
+    caplog.set_level(logging.WARNING, logger="ohra.management.kubernetes")
     seen: list[tuple[str, str]] = []
     server = await fake_api(tls, 403, b'{"message": "forbidden"}', seen)
     port = server.sockets[0].getsockname()[1]

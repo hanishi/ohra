@@ -3,7 +3,7 @@ request.
 
 Apache Pekko's layering: a region routes each message by shard id to a Shard actor, which hosts the
 entities of that shard and passivates them. ``Sharding.init`` is the region inside one process;
-``ClusterSharding`` in ``pekko_py.cluster.sharding`` runs the same Shards under regions that span
+``ClusterSharding`` in ``ohra.cluster.sharding`` runs the same Shards under regions that span
 the cluster. Messages for a passivating entity are buffered and delivered to its next incarnation;
 an entity that stops on its own, by returning ``Behaviors.stopped()``, loses what is queued behind
 it, as in Pekko, so entities should passivate rather than stop themselves.

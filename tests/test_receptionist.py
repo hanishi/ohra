@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from pekko_py import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, ask
-from pekko_py.receptionist import (
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, ask
+from ohra.receptionist import (
     Deregister,
     Deregistered,
     Find,
@@ -22,7 +22,7 @@ from pekko_py.receptionist import (
     ServiceKey,
     Subscribe,
 )
-from pekko_py.ref import FunctionRef
+from ohra.ref import FunctionRef
 
 from .util import eventually, free_port
 
@@ -147,7 +147,7 @@ async def test_a_stopped_subscriber_is_dropped_from_every_key(caplog: pytest.Log
         rec.tell(Subscribe(OTHER, sub))
         sub.tell("stop")
         await eventually(lambda: gone(system, sub.path))
-        with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
             rec.tell(Register(GREETER, svc))
             rec.tell(Register(OTHER, svc))
             assert (
@@ -160,7 +160,7 @@ async def test_only_local_refs_can_register():
     async with ActorSystem(Behaviors.ignore, "r", address=("127.0.0.1", free_port())) as system:
         rec = Receptionist(system).ref
         rec.tell(Register(GREETER, FunctionRef("fn", lambda _: None)))
-        rec.tell(Register(GREETER, system.resolve("pekko://x@127.0.0.1:1/user/greeter")))
+        rec.tell(Register(GREETER, system.resolve("ohra://x@127.0.0.1:1/user/greeter")))
         assert (
             await ask(rec, lambda r: Find(GREETER, r), timeout=1)
         ).service_instances == frozenset()
@@ -170,7 +170,7 @@ async def test_receptionist_is_one_per_system_and_lives_under_system():
     async with ActorSystem(Behaviors.ignore, "r") as system:
         receptionist = Receptionist(system)
         assert Receptionist(system) is receptionist
-        assert receptionist.ref.path == "pekko://r/system/receptionist"
+        assert receptionist.ref.path == "ohra://r/system/receptionist"
         assert system.resolve(receptionist.ref.path) is receptionist.ref
 
 
@@ -186,7 +186,7 @@ async def test_receptionist_exists_from_the_start():
     async with ActorSystem(Behaviors.ignore, "r") as system:
         # created with the system, as Pekko's library extension
         assert system.receptionist is not None
-        assert system.resolve("pekko://r/system/receptionist") is Receptionist(system).ref
+        assert system.resolve("ohra://r/system/receptionist") is Receptionist(system).ref
 
 
 async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
@@ -209,7 +209,7 @@ async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
         await asyncio.sleep(0.05)
         actor.tell("stop")
         await eventually(lambda: gone(system, actor.path))
-        with caplog.at_level(logging.DEBUG, logger="pekko_py.dead_letters"):
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
             rec.tell(Register(GREETER, svc))
             assert (
                 await ask(rec, lambda r: Find(GREETER, r), timeout=1)

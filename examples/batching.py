@@ -14,7 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py import ActorSystem, batching
+from ohra import ActorSystem, batching
 
 N_MESSAGES = 5_000
 N_ARMS = 1_000

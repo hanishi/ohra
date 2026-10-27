@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from pekko_py import (  # noqa: E402
+from ohra import (  # noqa: E402
     ActorContext,
     ActorRef,
     Behavior,
@@ -45,14 +45,14 @@ from pekko_py import (  # noqa: E402
     KubernetesApiServiceDiscovery,
     KubernetesApiSettings,
     Passivate,
-    PekkoManagement,
-    PekkoManagementSettings,
+    Management,
+    ManagementSettings,
     SplitBrainResolverSettings,
     ask,
     remotable,
 )
-from pekko_py.ext.fastapi import Actors  # noqa: E402
-from pekko_py.ext.postgres import PostgresStore  # noqa: E402
+from ohra.ext.fastapi import Actors  # noqa: E402
+from ohra.ext.postgres import PostgresStore  # noqa: E402
 
 POD, IP = os.environ.get("POD_NAME", "local"), os.environ.get("POD_IP", "127.0.0.1")
 IDLE_TIMEOUT = 30.0  # seconds without a request before a cart entity is passivated
@@ -136,7 +136,7 @@ actors = Actors(
     "carts",
     address=(IP, 2551),
     cluster=ClusterSettings(downing=SplitBrainResolverSettings(stable_after=5.0)),
-    management=PekkoManagementSettings(
+    management=ManagementSettings(
         hostname=IP,
         port=7626,
         bind_hostname="0.0.0.0",
@@ -153,7 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # the pool opens before the cluster node starts and closes after it stops
     async with store, actors.lifespan(app):
         # health checks for the probes, then the bootstrap
-        await PekkoManagement(actors.system).start()
+        await Management(actors.system).start()
         yield
 
 

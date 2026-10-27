@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -74,7 +74,7 @@ async def test_setup_runs_once_per_incarnation():
     async with ActorSystem(Behaviors.setup(guardian), "t") as system:
         system.tell(Increment(1))
         assert await system.ask(GetTotal, timeout=1) == 1
-    assert calls == ["pekko://t/user"]
+    assert calls == ["ohra://t/user"]
 
 
 async def test_async_handler_keeps_messages_serialized():

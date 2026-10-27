@@ -13,7 +13,7 @@ There is never more than one instance as long as membership is agreed. That is w
 `ClusterSingleton(system).init(SingletonActor(behavior, "name"))` runs exactly one instance of `behavior` in the cluster, on the oldest member, and returns a proxy ref that works on every node: messages sent through it reach the instance wherever it is, buffered while its location is unknown. When the host leaves, the instance is handed over to the next oldest member during the exiting phase, so it is stopped on the old node before it starts on the new one; when the host crashes, the next oldest starts it once the crashed member has been downed and removed. Apache Pekko's ClusterSingletonManager and ClusterSingletonProxy, state for state.
 
 ```python
-from pekko_py import ClusterSingleton, SingletonActor
+from ohra import ClusterSingleton, SingletonActor
 
 proxy = ClusterSingleton(system).init(SingletonActor(counter, "counter"))  # call it on every node
 # answered by the one instance

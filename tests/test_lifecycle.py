@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -169,8 +169,8 @@ async def test_spawn_protocol_spawns_on_request_with_unique_names():
             lambda r: SpawnProtocol.Spawn(recorder("c", events), "", r), timeout=1
         )
         assert [r.path for r in (a, b, c)] == [
-            "pekko://t/user/worker",
-            "pekko://t/user/worker-1",
-            "pekko://t/user/$0",
+            "ohra://t/user/worker",
+            "ohra://t/user/worker-1",
+            "ohra://t/user/$0",
         ]
     assert sorted(events) == ["stopped a", "stopped b", "stopped c"]

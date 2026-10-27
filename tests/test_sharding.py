@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -29,7 +29,7 @@ from pekko_py import (
     Signal,
     ask,
 )
-from pekko_py.signals import PostStop
+from ohra.signals import PostStop
 
 from .util import eventually
 
@@ -372,7 +372,7 @@ async def test_empty_entity_id_is_rejected():
 async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_entity(
     caplog: pytest.LogCaptureFixture,
 ):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()
     # the stop must reach the region before the gate opens
@@ -388,7 +388,7 @@ async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_enti
         gate.set()
         await system.when_terminated()
     assert any(
-        r.getMessage() == "dead letter to pekko://s/user/a: Add(n=1)" for r in caplog.records
+        r.getMessage() == "dead letter to ohra://s/user/a: Add(n=1)" for r in caplog.records
     )
 
 
@@ -416,7 +416,7 @@ async def test_entity_refs_for_the_same_id_are_equal():
 
 
 async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG, logger="pekko_py.dead_letters")
+    caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()
     entity = Entity(Counter, counter(log, gate)).with_buffer_size(2)
@@ -434,7 +434,7 @@ async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
         await eventually(lambda: log.count("start a") == 2)
         assert await ask(a, Get, timeout=1) == 3
     assert any(
-        r.getMessage() == "dead letter to pekko://s/user/a: Add(n=3)" for r in caplog.records
+        r.getMessage() == "dead letter to ohra://s/user/a: Add(n=3)" for r in caplog.records
     )
 
 
@@ -442,8 +442,8 @@ async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
 
 import zlib  # noqa: E402
 
-from pekko_py.ref import FunctionRef  # noqa: E402
-from pekko_py.cluster.sharding import ClusterShardingSettings, HandOff, ShardStopped, shard_id_of  # noqa: E402
+from ohra.ref import FunctionRef  # noqa: E402
+from ohra.cluster.sharding import ClusterShardingSettings, HandOff, ShardStopped, shard_id_of  # noqa: E402
 
 
 def test_shard_id_is_stable_and_bounded():

@@ -1,15 +1,15 @@
-# pekko-py
+# ohra
 
-**pekko-py is an independent project. It is not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project.**
+**ohra is an independent project. It is not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project.**
 
-Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies.
+Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies. *Ohra* is Finnish for barley.
 
 An actor is a function from a message to the next behavior. Typed refs make wrong messages a type error under pyright strict. Everything runs on one event loop, so a handler can `await` without losing the guarantee that an actor handles one message at a time. numpy work goes to threads and comes back as a message.
 
 ```python
 import asyncio
 from dataclasses import dataclass
-from pekko_py import ActorRef, ActorSystem, Behavior, Behaviors
+from ohra import ActorRef, ActorSystem, Behavior, Behaviors
 
 
 @dataclass(frozen=True)
@@ -54,14 +54,14 @@ If you know Apache Pekko or Akka Typed, the names are the same in snake_case, an
 ```
 pip install -e .            # the library
 pip install -e '.[numpy]'   # plus numpy, for the examples that use it
-pip install -e '.[web]'     # plus FastAPI and uvicorn, for pekko_py.ext.fastapi and the fastapi_* examples
-pip install -e '.[postgres]' # plus psycopg, for pekko_py.ext.postgres, the durable state store for clusters
+pip install -e '.[web]'     # plus FastAPI and uvicorn, for ohra.ext.fastapi and the fastapi_* examples
+pip install -e '.[postgres]' # plus psycopg, for ohra.ext.postgres, the durable state store for clusters
 pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 ```
 
 ## The book
 
-[How pekko-py works](docs/book/README.md) is the guide and the reference, one chapter per layer, with diagrams:
+[How ohra works](docs/book/README.md) is the guide and the reference, one chapter per layer, with diagrams:
 
 1. [Actors](docs/book/01-actors.md): behaviors, ask, children and DeathWatch, supervision, timers and stash, routers, the runtime model
 2. [The actor system](docs/book/02-actor-system.md): guardians, extensions, the receptionist, coordinated shutdown
@@ -103,7 +103,7 @@ The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The 
 
 ## Development
 
-Layout follows Apache Pekko's modules: `pekko_py` is the actor core, `pekko_py.remote` the transport and serialization, `pekko_py.cluster` membership and the singleton, `pekko_py.cluster.sharding` the Shard, region and coordinator, `pekko_py.ext` the FastAPI, Postgres and shared-memory integrations. Every public name is importable from `pekko_py` and from its own subpackage.
+Layout follows Apache Pekko's modules: `ohra` is the actor core, `ohra.remote` the transport and serialization, `ohra.cluster` membership and the singleton, `ohra.cluster.sharding` the Shard, region and coordinator, `ohra.ext` the FastAPI, Postgres and shared-memory integrations. Every public name is importable from `ohra` and from its own subpackage.
 
 ```
 pytest      # every test fails if any asyncio task outlives it
@@ -116,4 +116,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the runtime invariants and how
 
 Apache-2.0, the same as Apache Pekko. The chat room and interaction-pattern examples are derived from the Apache Pekko documentation; see [NOTICE](NOTICE).
 
-pekko-py is an independent project, not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project. Apache Pekko is a trademark of the Apache Software Foundation.
+ohra is an independent project, not affiliated with or endorsed by the Apache Software Foundation or the Apache Pekko project. Apache Pekko is a trademark of the Apache Software Foundation.

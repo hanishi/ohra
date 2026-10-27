@@ -1,7 +1,7 @@
-"""Remoting: actors on other pekko-py nodes, addressed by path, over TCP.
+"""Remoting: actors on other ohra nodes, addressed by path, over TCP.
 
     async with ActorSystem(guardian, "a", address=("10.0.0.1", 2552)) as system:
-        greeter = system.resolve("pekko://b@10.0.0.2:2552/user/greeter")
+        greeter = system.resolve("ohra://b@10.0.0.2:2552/user/greeter")
         greeter.tell(Greet("pekko", reply_to))        # Greet is @remotable
 
 Modelled on Apache Pekko's Artery and narrowed: no membership, no remote watch, no quarantine. A
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from ..ref import ActorRef, LocalRef
 from .serialization import Json, Serialization, SerializationError, remotable
 
-_log = logging.getLogger("pekko_py.remote")
+_log = logging.getLogger("ohra.remote")
 MAX_FRAME = 16 * 2**20
 QUEUE_BOUND = 1000  # frames held for a peer while its connection is being opened
 
@@ -46,20 +46,16 @@ class Address:
 
     @staticmethod
     def parse(text: str) -> Address:
-        """``pekko://name@host:port``."""
-        if (
-            not text.startswith("pekko://")
-            or "@" not in text
-            or ":" not in text.rpartition("@")[2]
-        ):
+        """``ohra://name@host:port``."""
+        if not text.startswith("ohra://") or "@" not in text or ":" not in text.rpartition("@")[2]:
             raise ValueError(f"not an address: {text!r}")
-        name, _, hostport = text[len("pekko://") :].rstrip("/").rpartition("@")
+        name, _, hostport = text[len("ohra://") :].rstrip("/").rpartition("@")
         host, _, port = hostport.rpartition(":")
         return Address(name, host, int(port))
 
     @property
     def root(self) -> str:
-        return f"pekko://{self.name}@{self.host}:{self.port}"
+        return f"ohra://{self.name}@{self.host}:{self.port}"
 
     def __lt__(self, other: Address) -> bool:
         return (self.host, self.port) < (other.host, other.port)
@@ -85,7 +81,7 @@ class UniqueAddress:
 
     @property
     def root(self) -> str:
-        return f"pekko://{self.authority}"
+        return f"ohra://{self.authority}"
 
     def __lt__(self, other: UniqueAddress) -> bool:
         return (self.host, self.port, self.uid) < (other.host, other.port, other.uid)
@@ -146,7 +142,7 @@ class TempRefs:
 def resolve_local(system: ActorSystem[Any], path: str) -> ActorRef[Any]:
     """The local ref at path, walking the actor tree from the root. LookupError if there is
     none."""
-    root = system.address.root if system.address is not None else f"pekko://{system.name}"
+    root = system.address.root if system.address is not None else f"ohra://{system.name}"
     if not path.startswith(root + "/"):
         raise LookupError(f"{path} is not on this system ({root})")
     segments = path[len(root) + 1 :].split("/")
@@ -184,11 +180,11 @@ async def read_frame(reader: asyncio.StreamReader) -> Json | None:
 
 
 def _authority_of(path: str) -> tuple[str, int]:
-    """(host, port) from pekko://name@host:port/...; LookupError if the path is not shaped like
+    """(host, port) from ohra://name@host:port/...; LookupError if the path is not shaped like
     that."""
     parts = path.split("/", 3)
-    if len(parts) < 4 or not path.startswith("pekko://") or "@" not in parts[2]:
-        raise LookupError(f"{path} is not a remote path (pekko://name@host:port/...)")
+    if len(parts) < 4 or not path.startswith("ohra://") or "@" not in parts[2]:
+        raise LookupError(f"{path} is not a remote path (ohra://name@host:port/...)")
     _, _, hostport = parts[2].rpartition("@")
     host, _, port = hostport.rpartition(":")
     if not host or not port.isdigit():

@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pekko_py import (
+from ohra import (
     ActorContext,
     ActorRef,
     ActorSystem,
@@ -49,7 +49,7 @@ from pekko_py import (
     Try,
     batching,
 )
-from pekko_py.ext.fastapi import Actors
+from ohra.ext.fastapi import Actors
 
 N_FEATURES = 4
 BATCH_MAX_N, BATCH_MAX_WAIT = 64, 0.005  # prediction micro-batches

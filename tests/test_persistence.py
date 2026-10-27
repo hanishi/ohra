@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from pekko_py import ActorRef
-from pekko_py.persistence import InMemoryStore, RevisionConflictError, Store
+from ohra import ActorRef
+from ohra.persistence import InMemoryStore, RevisionConflictError, Store
 
 # --- Task 1: stores ----------------------------------------------------------------------
 
@@ -38,7 +38,7 @@ async def test_in_memory_store_rejects_stale_revisions():
 
 # --- Task 2: Behaviors.persisted ---------------------------------------------------------------
 
-from pekko_py import (  # noqa: E402
+from ohra import (  # noqa: E402
     ActorContext,
     ActorSystem,
     Behavior,
@@ -52,8 +52,8 @@ from pekko_py import (  # noqa: E402
     Terminated,
     ask,
 )
-from pekko_py.patterns import AskTimeoutError  # noqa: E402
-from pekko_py.persistence import PersistenceError, Persisted  # noqa: E402
+from ohra.patterns import AskTimeoutError  # noqa: E402
+from ohra.persistence import PersistenceError, Persisted  # noqa: E402
 
 from .util import eventually  # noqa: E402
 
@@ -299,7 +299,7 @@ import json  # noqa: E402
 import sqlite3  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from pekko_py.persistence import SqliteStore  # noqa: E402
+from ohra.persistence import SqliteStore  # noqa: E402
 
 
 async def test_sqlite_store_round_trip_and_conflicts(tmp_path: Path):
@@ -356,7 +356,7 @@ async def test_state_survives_a_process_restart(tmp_path: Path):
 
 import logging  # noqa: E402
 
-from pekko_py import ChildFailed as _ChildFailed  # noqa: E402,F401
+from ohra import ChildFailed as _ChildFailed  # noqa: E402,F401
 
 
 async def test_persist_from_another_factory_fails_the_actor():
@@ -422,7 +422,7 @@ async def test_child_of_a_persisted_actor_cannot_use_its_incarnation():
 async def test_effect_failure_after_the_write_does_not_roll_back_memory(
     caplog: pytest.LogCaptureFixture,
 ):
-    caplog.set_level(logging.ERROR, logger="pekko_py.actor")
+    caplog.set_level(logging.ERROR, logger="ohra.actor")
     store, log = InMemoryStore[int](), []
 
     def explode() -> None:
@@ -488,7 +488,7 @@ def test_sqlite_store_rejects_in_memory_databases():
 
 
 def _open_store(path: str, barrier: object, out: object) -> None:
-    from pekko_py import SqliteStore
+    from ohra import SqliteStore
 
     barrier.wait()  # type: ignore[attr-defined]
     try:

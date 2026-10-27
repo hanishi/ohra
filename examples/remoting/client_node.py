@@ -12,9 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from messages import Greet, Greeted  # noqa: E402
 
-from pekko_py import ActorRef, ActorSystem, Behaviors, ask  # noqa: E402
+from ohra import ActorRef, ActorSystem, Behaviors, ask  # noqa: E402
 
-GREETER = "pekko://greeter@127.0.0.1:2552/user"
+GREETER = "ohra://greeter@127.0.0.1:2552/user"
 
 
 async def main(port: int) -> None:

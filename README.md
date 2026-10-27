@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/logo.png" width="160" alt="ohra logo: an ear of barley"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/hanishi/ohra/main/docs/logo.png" width="160" alt="ohra logo: an ear of barley"></p>
 
 # ohra
 

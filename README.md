@@ -118,9 +118,9 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 | `examples/batching.py` | `batching` throughput and p99 latency curves |
 | `examples/population.py` | 100k single-arm actors against 16 shards behind `Routers.pool` |
 | `examples/shared_memory.py` | `SharedArray` against pickling for a 400MB array |
-| `examples/stockouts.py` | a loop numpy can't vectorize, a stockout simulation, four ways: pure Python in a thread, in a process with shared memory, numba in a thread, and numba with `nogil=True` in a thread, one analyst and eight at once, with the event loop's lag. Needs the `numba` extra: `uv run --extra numba python examples/stockouts.py` |
+| `examples/stockouts.py` | a loop numpy cannot vectorize, a stockout simulation, four ways: pure Python in a thread, in a process with shared memory, numba in a thread, and numba with `nogil=True` in a thread, one analyst and eight at once, with the event loop's lag. Needs the `numba` extra: `uv run --extra numba python examples/stockouts.py` |
 
-The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra and run under uvicorn: `uv run --extra web uvicorn examples.fastapi_carts:app --port 8000`.
+`bandit`, `compute`, `batching`, `population` and `shared_memory` need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra and run under uvicorn: `uv run --extra web uvicorn examples.fastapi_carts:app --port 8000`.
 
 ## Development
 

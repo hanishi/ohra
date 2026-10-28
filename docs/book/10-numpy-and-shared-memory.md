@@ -236,6 +236,8 @@ async def main() -> None:
     rng = np.random.default_rng(0)
     orders = rng.integers(0, 1000, size=30_000_000)  # one product id per sale
     restock = rng.integers(1, 10, size=1000)  # how many each reorder brings
+    orders.flags.writeable = False  # a thread reads them, as in the first example
+    restock.flags.writeable = False
     async with ActorSystem(stock_analyst(orders, restock), "stock") as system:
         for _ in range(2):
             start = time.perf_counter()
@@ -254,10 +256,10 @@ worst stockouts: [737, 898, 378] in 0.75s
 worst stockouts: [737, 898, 378] in 0.23s
 ```
 
-- **`@njit` compiles `lost_sales` the first time it is called**, which is why the first answer took longer. After that, 30 million orders take a quarter of a second, against nearly four seconds for the same loop in pure Python. `@njit(nogil=True, cache=True)` keeps the compiled code on disk, so the next run skips the compiling too.
+- **`@njit` compiles `lost_sales` the first time it is called**, which is why the first answer took longer. After that, 30 million orders take a quarter of a second. The same loop in pure Python takes nearly four seconds over Python lists, as `examples/stockouts.py` writes it, and more than twenty with `@njit` simply removed, because indexing a numpy array one element at a time is slow in Python. `@njit(nogil=True, cache=True)` keeps the compiled code on disk, so the next run skips the compiling too.
 - **`nogil=True` lets go of Python's global lock while the loop runs**, as numpy does, so the thread runs alongside the event loop and alongside other threads. The actor is the same as in the first example: `asyncio.to_thread` and `pipe_to_self`.
 - **numba compiles numbers, numpy arrays, loops and branches**, not objects. Arrays go in and come out, and the actor turns the result into the reply, here a list of three product ids.
-- **Without `nogil=True`, numba in a thread stops every actor.** Python switches threads between its own instructions, and compiled code has none, so the loop holds the lock until it is done. Pure Python in a thread at least lets the event loop run every few milliseconds.
+- **Without `nogil=True`, numba in a thread stops every actor.** Python switches threads between its own instructions, and compiled code has none, so the loop holds the lock until it is done. Pure Python in a thread at least gives the lock back between its instructions, so the event loop waits tens of milliseconds at a time, not the whole run.
 
 `examples/stockouts.py` runs the same simulation four ways, one analyst and then eight at once on a machine with eight fast cores. Lag is the longest the event loop could not run:
 

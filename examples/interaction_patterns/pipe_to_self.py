@@ -77,7 +77,8 @@ def customer_repository(data_access: Callable[[Customer], Awaitable[None]]) -> B
                         )
                         return Behaviors.same
 
-                    def adapt(r: Try[None]) -> _WrappedUpdateResult:
+                    @ctx.pipe_to_self(data_access(value))
+                    def _(r: Try[None]) -> _WrappedUpdateResult:
                         match r:
                             case Success(_):
                                 return _WrappedUpdateResult(UpdateSuccess(value.id), reply_to)
@@ -86,7 +87,6 @@ def customer_repository(data_access: Callable[[Customer], Awaitable[None]]) -> B
                                     UpdateFailure(value.id, str(e)), reply_to
                                 )
 
-                    ctx.pipe_to_self(data_access(value), adapt)
                     return next_behavior(in_progress + 1)
                 case _WrappedUpdateResult(result, reply_to):
                     reply_to.tell(result)

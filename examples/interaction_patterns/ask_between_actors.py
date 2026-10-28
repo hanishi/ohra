@@ -48,6 +48,7 @@ class _AdaptedResponse:  # internal to Dave
 def dave(hal_ref: ActorRef[OpenThePodBayDoorsPlease]) -> Behavior[_AdaptedResponse]:
     @Behaviors.setup
     def setup(ctx: ActorContext[_AdaptedResponse]) -> Behavior[_AdaptedResponse]:
+        @ctx.ask(hal_ref, OpenThePodBayDoorsPlease, timeout=3)
         def adapt(r: Try[HalResponse]) -> _AdaptedResponse:
             match r:
                 case Success(HalResponse(message)):
@@ -55,15 +56,12 @@ def dave(hal_ref: ActorRef[OpenThePodBayDoorsPlease]) -> Behavior[_AdaptedRespon
                 case Failure(_):
                     return _AdaptedResponse("Request failed")
 
-        ctx.ask(hal_ref, OpenThePodBayDoorsPlease, adapt, timeout=3)
-
         # request context can be closed over; the adapt function runs inside this actor
         request_id = 1
 
-        def adapt_with_id(r: Try[HalResponse]) -> _AdaptedResponse:
+        @ctx.ask(hal_ref, OpenThePodBayDoorsPlease, timeout=3)
+        def _(r: Try[HalResponse]) -> _AdaptedResponse:
             return _AdaptedResponse(f"{request_id}: {adapt(r).message}")
-
-        ctx.ask(hal_ref, OpenThePodBayDoorsPlease, adapt_with_id, timeout=3)
 
         @Behaviors.receive_message
         def on_message(msg: _AdaptedResponse) -> Behavior[_AdaptedResponse]:

@@ -488,7 +488,7 @@ web = [
 requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "numba", marker = "extra == 'numba'", specifier = ">=0.61" },
+    { name = "numba", marker = "extra == 'numba'", specifier = ">=0.68" },
     { name = "numpy", marker = "extra == 'numba'", specifier = ">=2.0" },
     { name = "numpy", marker = "extra == 'numpy'", specifier = ">=2.0" },
     { name = "numpy", marker = "extra == 'torch'", specifier = ">=2.0" },

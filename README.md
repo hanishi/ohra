@@ -2,6 +2,7 @@
 
 # ohra
 
+[![PyPI](https://img.shields.io/pypi/v/ohra)](https://pypi.org/project/ohra/)
 [![CI](https://github.com/hanishi/ohra/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hanishi/ohra/actions/workflows/ci.yml)
 [![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://github.com/hanishi/ohra/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/hanishi/ohra/blob/main/LICENSE)
@@ -61,12 +62,18 @@ If you know Apache Pekko or Akka Typed, the names are the same in snake_case, an
 ## Install
 
 ```
-pip install -e .            # the library
-pip install -e '.[numpy]'   # plus numpy, for the examples that use it
-pip install -e '.[web]'     # plus FastAPI and uvicorn, for ohra.ext.fastapi and the fastapi_* examples
-pip install -e '.[postgres]' # plus psycopg, for ohra.ext.postgres, the durable state store for clusters
-pip install -e '.[torch]'   # plus PyTorch, for the purchase predictor example
-pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
+pip install ohra               # the library
+pip install 'ohra[numpy]'      # plus numpy, for ohra.ext.shm and the examples that use it
+pip install 'ohra[web]'        # plus FastAPI and uvicorn, for ohra.ext.fastapi and the fastapi_* examples
+pip install 'ohra[postgres]'   # plus psycopg, for ohra.ext.postgres, the durable state store for clusters
+pip install 'ohra[torch]'      # plus PyTorch, for the purchase predictor example
+```
+
+The examples and tests live in the repository, not the package. To run them, clone it and install it in editable mode, with the `dev` extra for pytest, pytest-asyncio, pyright, httpx and ruff:
+
+```
+git clone https://github.com/hanishi/ohra.git && cd ohra
+pip install -e '.[dev,numpy,web,postgres,torch]'   # or: uv sync --all-extras
 ```
 
 ## The book

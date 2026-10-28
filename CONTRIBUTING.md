@@ -7,7 +7,7 @@ Bug reports, fixes, docs and new ports of Apache Pekko features are all welcome.
 ## Setup
 
 ```
-uv sync --all-extras        # or: pip install -e '.[dev,numpy,web,postgres,torch]'
+uv sync --all-extras        # or: pip install -e '.[dev,numpy,web,postgres,torch,numba]'
 git config blame.ignoreRevsFile .git-blame-ignore-revs   # git blame skips the PEP 8 reformat
 ```
 

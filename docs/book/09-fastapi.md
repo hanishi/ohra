@@ -10,7 +10,7 @@ Most Python services are web apps, and the web framework already runs the event 
 
 ## A first example
 
-Chapter 1's cart behind two routes. It needs the `web` extra (`pip install -e '.[web]'`):
+Chapter 1's cart behind two routes. It needs the `web` extra (`pip install 'ohra[web]'`):
 
 ```python
 from fastapi import FastAPI

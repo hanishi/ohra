@@ -6,11 +6,11 @@ Some work, such as numpy over a large array, takes long enough to block the even
 
 ## The idea
 
-Work that blocks goes to a thread, and its result comes back to the actor as a message, so the loop keeps running in the meantime and the actor keeps answering. Work that a thread cannot speed up goes to another process, and a large array gets there through shared memory, as a small handle instead of a copy.
+Work that blocks goes to a thread, and its result comes back to the actor as a message, so the loop keeps running in the meantime and the actor keeps answering. A loop over numbers that numpy cannot express gets compiled with numba and goes to a thread the same way. Work that a thread cannot speed up goes to another process, and a large array gets there through shared memory, as a small handle instead of a copy.
 
 ## A first example: numpy in a thread
 
-An analyst that finds the three best-selling products in 30 million orders. It needs the `numpy` extra (`pip install -e '.[numpy]'`). Save it as `top_sellers.py`, since the second example imports from it:
+An analyst that finds the three best-selling products in 30 million orders. It needs the `numpy` extra (`pip install 'ohra[numpy]'`). Save it as `top_sellers.py`, since the second example imports from it:
 
 ```python
 import asyncio
@@ -164,6 +164,118 @@ top sellers: [947, 82, 762]
 - **`handle.open()`** maps the same memory in the worker, read-only, so nothing is copied in either direction.
 - **Whoever holds the handle owns the memory**, and the owner calls `unlink()` once, here when the program is done. [Appendix B](appendix-deviations.md) has the rule.
 
+## A third example: a loop, with numba
+
+Some work is a loop in which each step depends on the one before, and numpy cannot express it as operations on whole arrays. Which products lose the most sales because they ran out? Each order takes one from the stock, or is lost if there is none, and a product running low reorders, which arrives 5,000 orders later. In pure Python this belongs in a process, like the second example. [numba](https://numba.pydata.org) compiles the loop to machine code instead, and it can run in a thread like the first. It needs the `numba` extra (`pip install 'ohra[numba]'`):
+
+```python
+import asyncio
+import time
+from dataclasses import dataclass
+
+import numpy as np
+import numpy.typing as npt
+from numba import njit
+
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Success, Try
+
+type Ints = npt.NDArray[np.int64]
+LEAD_TIME = 5_000  # orders between placing a reorder and its arrival
+
+
+@njit(nogil=True)  # compiled to machine code, and lets go of Python's global lock
+def lost_sales(orders: Ints, restock: Ints) -> Ints:
+    stock = restock.copy()
+    arrives = np.full(len(restock), -1)  # when each product's reorder comes in
+    lost = np.zeros(len(restock), np.int64)
+    for t in range(len(orders)):
+        p = orders[t]
+        if arrives[p] >= 0 and t >= arrives[p]:  # the reorder came in
+            stock[p] += restock[p]
+            arrives[p] = -1
+        if stock[p] > 0:
+            stock[p] -= 1
+        else:
+            lost[p] += 1  # out of stock: the sale is lost
+        if stock[p] <= restock[p] // 4 and arrives[p] < 0:  # running low: reorder
+            arrives[p] = t + LEAD_TIME
+    return lost
+
+
+@dataclass(frozen=True)
+class WorstStockouts:
+    reply_to: ActorRef[list[int]]
+
+
+@dataclass(frozen=True)
+class Computed:
+    result: Try[Ints]
+    reply_to: ActorRef[list[int]]
+
+
+type StockCmd = WorstStockouts | Computed
+
+
+def stock_analyst(orders: Ints, restock: Ints) -> Behavior[StockCmd]:
+    @Behaviors.receive
+    def on_message(ctx: ActorContext[StockCmd], msg: StockCmd) -> Behavior[StockCmd]:
+        match msg:
+            case WorstStockouts(reply_to):
+                work = asyncio.to_thread(lost_sales, orders, restock)  # in a thread, as before
+                ctx.pipe_to_self(work, lambda result: Computed(result, reply_to))
+            case Computed(Success(lost), reply_to):
+                reply_to.tell([int(p) for p in np.argsort(-lost)[:3]])
+            case Computed():
+                pass  # it failed: the ask times out
+        return Behaviors.same
+
+    return on_message
+
+
+async def main() -> None:
+    rng = np.random.default_rng(0)
+    orders = rng.integers(0, 1000, size=30_000_000)  # one product id per sale
+    restock = rng.integers(1, 10, size=1000)  # how many each reorder brings
+    async with ActorSystem(stock_analyst(orders, restock), "stock") as system:
+        for _ in range(2):
+            start = time.perf_counter()
+            worst = await system.ask(WorstStockouts, timeout=30)
+            print(f"worst stockouts: {worst} in {time.perf_counter() - start:.2f}s")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+It prints:
+
+```
+worst stockouts: [737, 898, 378] in 0.75s
+worst stockouts: [737, 898, 378] in 0.23s
+```
+
+- **`@njit` compiles `lost_sales` the first time it is called**, which is why the first answer took longer. After that, 30 million orders take a quarter of a second, against nearly four seconds for the same loop in pure Python. `@njit(nogil=True, cache=True)` keeps the compiled code on disk, so the next run skips the compiling too.
+- **`nogil=True` lets go of Python's global lock while the loop runs**, as numpy does, so the thread runs alongside the event loop and alongside other threads. The actor is the same as in the first example: `asyncio.to_thread` and `pipe_to_self`.
+- **numba compiles numbers, numpy arrays, loops and branches**, not objects. Arrays go in and come out, and the actor turns the result into the reply, here a list of three product ids.
+- **Without `nogil=True`, numba in a thread stops every actor.** Python switches threads between its own instructions, and compiled code has none, so the loop holds the lock until it is done. Pure Python in a thread at least lets the event loop run every few milliseconds.
+
+`examples/stockouts.py` runs the same simulation four ways, one analyst and then eight at once on a machine with eight fast cores. Lag is the longest the event loop could not run:
+
+| 20 million orders | one analyst | lag | eight at once | lag |
+|---|---|---|---|---|
+| pure Python, in a thread | 2.49s | 36 ms | 19.10s | 491 ms |
+| pure Python, in a process with shared memory | 2.46s | 5 ms | 3.09s | 13 ms |
+| numba, in a thread | 0.21s | 212 ms | 1.09s | 408 ms |
+| numba with `nogil=True`, in a thread | 0.14s | 0 ms | 0.16s | 3 ms |
+
+The third row is the warning above: one analyst's 0.21 seconds held up the event loop for 212 milliseconds, all of it.
+
+So, for work that would block the event loop:
+
+1. **Whole arrays at a time:** numpy, in a thread.
+2. **A loop over numbers:** numba with `nogil=True`, in a thread.
+3. **Any other pure-Python work,** with objects, dicts or strings: a process, with shared memory for large arrays.
+
 > **Coming from Apache Pekko**
 >
 > - `ctx.pipe_to_self(awaitable, adapt)` is `pipeToSelf`, with a thread or a process in place of a Future on another dispatcher.
@@ -199,13 +311,13 @@ top sellers: [947, 82, 762]
 >   ```
 >
 >   The handler then answers `Computed(top, reply_to)` and logs `ReportFailed`. `ctx.ask(target, make, timeout=...)` without `adapt` is a decorator in the same way.
-> - `SharedArray` has no Pekko counterpart.
+> - `SharedArray` and numba have no Pekko counterpart.
 
 ## How it works
 
 This integration is not part of Apache Pekko.
 
-A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. For another process, `ohra.ext.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
+A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. A numeric loop compiled with numba's `@njit(nogil=True)` releases the GIL too, and goes to a thread the same way. For another process, `ohra.ext.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
 
 Messages are shared by reference and never copied. Keep them immutable: frozen dataclasses, and for arrays either copy before sending or set `arr.flags.writeable = False`.
 

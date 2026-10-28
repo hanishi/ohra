@@ -67,13 +67,14 @@ pip install 'ohra[numpy]'      # plus numpy, for ohra.ext.shm and the examples t
 pip install 'ohra[web]'        # plus FastAPI and uvicorn, for ohra.ext.fastapi and the fastapi_* examples
 pip install 'ohra[postgres]'   # plus psycopg, for ohra.ext.postgres, the durable state store for clusters
 pip install 'ohra[torch]'      # plus PyTorch, for the purchase predictor example
+pip install 'ohra[numba]'      # plus numba, for compiled loops in threads and examples/stockouts.py
 ```
 
 The examples and tests live in the repository, not the package. To run them, clone it and install it in editable mode, with the `dev` extra for pytest, pytest-asyncio, pyright, httpx and ruff:
 
 ```
 git clone https://github.com/hanishi/ohra.git && cd ohra
-pip install -e '.[dev,numpy,web,postgres,torch]'   # or: uv sync --all-extras
+pip install -e '.[dev,numpy,web,postgres,torch,numba]'   # or: uv sync --all-extras
 ```
 
 ## The book
@@ -89,7 +90,7 @@ pip install -e '.[dev,numpy,web,postgres,torch]'   # or: uv sync --all-extras
 7. [Sharding](https://github.com/hanishi/ohra/blob/main/docs/book/07-sharding.md): regions, shards and the coordinator, in one process and across nodes
 8. [Management and Kubernetes](https://github.com/hanishi/ohra/blob/main/docs/book/08-management-and-kubernetes.md): health checks, bootstrap, discovery, running on Docker Desktop
 9. [FastAPI](https://github.com/hanishi/ohra/blob/main/docs/book/09-fastapi.md): the actor system owned by the app, routes that ask actors
-10. [numpy and shared memory](https://github.com/hanishi/ohra/blob/main/docs/book/10-numpy-and-shared-memory.md): blocking work in a thread, large arrays to another process without a copy
+10. [numpy and shared memory](https://github.com/hanishi/ohra/blob/main/docs/book/10-numpy-and-shared-memory.md): blocking work in a thread, loops compiled with numba, large arrays to another process without a copy
 11. [Putting it together](https://github.com/hanishi/ohra/blob/main/docs/book/11-putting-it-together.md): one cart request through every layer
 
 Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-deviations.md), [performance](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-performance.md), and a [glossary](https://github.com/hanishi/ohra/blob/main/docs/book/glossary.md).
@@ -117,6 +118,7 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 | `examples/batching.py` | `batching` throughput and p99 latency curves |
 | `examples/population.py` | 100k single-arm actors against 16 shards behind `Routers.pool` |
 | `examples/shared_memory.py` | `SharedArray` against pickling for a 400MB array |
+| `examples/stockouts.py` | a loop numpy can't vectorize, a stockout simulation, four ways: pure Python in a thread, in a process with shared memory, numba in a thread, and numba with `nogil=True` in a thread, one analyst and eight at once, with the event loop's lag. Needs the `numba` extra: `uv run --extra numba python examples/stockouts.py` |
 
 The last four need numpy: `uv run --extra numpy python examples/bandit.py`. The `fastapi_*` examples need the `web` extra and run under uvicorn: `uv run --extra web uvicorn examples.fastapi_carts:app --port 8000`.
 

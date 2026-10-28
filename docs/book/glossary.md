@@ -14,6 +14,7 @@ Each term in plain words, with the chapter that introduces it. [Appendix A](appe
 - **Coordinator.** The cluster singleton that decides which node hosts each shard, and moves shards when nodes join or leave. [Chapter 7](07-sharding.md#the-idea)
 - **Dead letter.** A message that could not be delivered, because its actor has stopped or its path names no actor. [Chapter 1](01-actors.md#children-stopping-and-deathwatch)
 - **DeathWatch.** One actor asking to be told, with a `Terminated` signal, when another actor stops. [Chapter 1](01-actors.md#children-stopping-and-deathwatch)
+- **Decorator.** A function written with `@` above a `def`, which takes your function and hands it to whoever calls it later: the runtime for `@Behaviors.receive`, the actor's context for `@ctx.pipe_to_self`. [Chapter 1](01-actors.md#decorators)
 - **Discovery.** The lookup that lists where a service's nodes are: the Kubernetes API server, or a fixed list. [Chapter 8](08-management-and-kubernetes.md#the-idea)
 - **Entity.** One of many small actors that sharding addresses by id, such as one cart per customer. It starts on its first message. [Chapter 7](07-sharding.md#the-idea)
 - **Gossip.** How nodes share the membership list. Every second each node tells another what it knows, and a clock on each version says which version is newer. [Chapter 5](05-cluster.md#the-idea)

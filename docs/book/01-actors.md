@@ -109,7 +109,7 @@ Type `system.tell("two books please")` and pyright rejects it: the cart accepts 
 > - A message protocol is a union of frozen dataclasses (`type CartCmd = AddItem | GetCart`) instead of a sealed trait, and `match` replaces Scala's pattern match. `ref.tell(msg)` is `ref ! msg`, and `ask` is an awaited function.
 > - Handlers may be `async def`, and the actor stays one message at a time across every `await`. In Pekko a handler never blocks, so the same code would `pipeToSelf` a `Future`; here that is only needed for work you want to run alongside the actor, such as CPU work in a thread.
 > - Everything runs on one asyncio event loop per process. There are no dispatchers to configure.
-> - The `Behaviors` factories double as decorators, as in `@Behaviors.receive_message`. [Appendix B](appendix-deviations.md) lists every intentional difference.
+> - The `Behaviors` factories double as decorators, as in `@Behaviors.receive_message`, and so do `ctx.pipe_to_self` and `ctx.ask`, in place of Scala's `{ case ... }` blocks. [Decorators](#decorators) lists them all, and [appendix B](appendix-deviations.md) lists every intentional difference.
 
 ## How it works
 
@@ -137,7 +137,44 @@ flowchart LR
 
 Messages are frozen dataclasses, a command protocol is a union, and a handler dispatches with `match`. A handler returns the next behavior: a new one carrying new state, `Behaviors.same`, `Behaviors.stopped()`, or `Behaviors.unhandled`. Handlers may be `async def`; an awaiting handler keeps the actor busy, and the next message waits.
 
-`Behaviors.setup`, `receive`, `receive_message` and `receive_signal` each take one function and return a behavior, so they work as decorators. The decorator form and the call form are the same thing and can be mixed freely: `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`. The decorator form is new in ohra, since Apache Pekko has no equivalent; the snippets below and the examples use it. `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context.
+`setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context. All of them are usually written as decorators, described next.
+
+### Decorators
+
+A decorator is a function written with `@` above a `def`. `@X` above `def f` means `f = X(f)`: `X` takes your function, and the name `f` becomes whatever `X` returns. ohra uses decorators for one job, handing a function to whoever will call it later. So the rule for which decorator to use is: **the decorator belongs to whoever calls your function**.
+
+There are two kinds. The `Behaviors` decorators go on the functions that define an actor, and the runtime calls them, with `ctx` and each message. The `ctx` decorators go on a function inside a handler, where `ctx` already exists, and `ctx` calls it later with a result:
+
+```python
+@Behaviors.receive  # the runtime calls this with ctx and each message
+def on_message(ctx: ActorContext[AnalystCmd], msg: AnalystCmd) -> Behavior[AnalystCmd]:
+    match msg:
+        case TopSellers(reply_to):
+
+            @ctx.pipe_to_self(work)  # ctx calls this with the work's result
+            def _(result: Try[list[int]]) -> AnalystCmd: ...
+
+        ...
+```
+
+These are all of them:
+
+| Decorator | Your function receives | The name becomes | Chapter |
+|---|---|---|---|
+| `@Behaviors.setup` | `ctx`, once, when the actor starts | a behavior | [1](#a-first-example) |
+| `@Behaviors.receive` | `ctx` and each message | a behavior | [1](#a-first-example) |
+| `@Behaviors.receive_message` | each message | a behavior | [1](#a-first-example) |
+| `@Behaviors.receive_signal` | `ctx` and each signal, such as `PostStop` | a behavior | [1](#children-stopping-and-deathwatch) |
+| `@Behaviors.with_timers` | the actor's timers, once, when it starts | a behavior | [1](#timers-and-stash) |
+| `@Behaviors.persisted(store)` | the state | a factory: `cart(items)` saves the items, `cart.recover(id, empty)` starts the actor | [3](03-persistence.md) |
+| `@ctx.pipe_to_self(work)` | the work's result, a `Try` | your function, unchanged | [10](10-numpy-and-shared-memory.md) |
+| `@ctx.ask(ref, make, timeout=...)` | the reply, a `Try` | your function, unchanged | [ask and reply](#ask-and-reply) |
+| `@remotable` | (it goes on a message class) | the class, now allowed on the network | [4](04-remoting.md) |
+
+- **The `Behaviors` decorators turn the name into a behavior.** That is why a factory ends with `return on_message`: `on_message` is no longer a plain function but the behavior to start with.
+- **The `ctx` decorators leave the name as your function.** The name rarely matters, so it is usually `_`. Give it a real name when you call it again, as `examples/interaction_patterns/ask_between_actors.py` does.
+- **Every decorator is also a plain call.** `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`, `@ctx.pipe_to_self(work)` is `ctx.pipe_to_self(work, adapt)`, and `@remotable` is `remotable(AddItem)`. Use whichever reads better. Adding a signal handler to a message handler is only a call: `Behaviors.receive(on_message).receive_signal(on_signal)`.
+- **Some functions take no decorator.** `ctx.message_adapter(f)` is usually given a class, as in `ctx.message_adapter(_GotTotal)`. `Behaviors.with_stash(capacity, factory)` takes the capacity first. A helper that takes `ctx` and that you call yourself has nobody to hand it to.
 
 ### Ask and reply
 
@@ -179,7 +216,7 @@ def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
 
 The `make` argument is anything that turns a reply ref into the request: a lambda, or the message class itself when `reply_to` is its only field. Pyright infers the reply type from the request's `reply_to` field.
 
-`ctx.pipe_to_self(awaitable, adapt)` does the same for any awaitable, and `ctx.message_adapter(f)` gives you a ref of another type that translates into your own protocol.
+`ctx.pipe_to_self(awaitable, adapt)` does the same for any awaitable, and `ctx.message_adapter(f)` gives you a ref of another type that translates into your own protocol. Leave `adapt` out of `ctx.ask` or `ctx.pipe_to_self` and either one becomes a [decorator](#decorators) for it.
 
 ### Children, stopping, and DeathWatch
 

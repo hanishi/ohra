@@ -5,7 +5,7 @@
 - If a handler fails partway through `unstash_all`, the unprocessed messages stay in the buffer as in Pekko, but `resume` and `PreRestart` see the behavior from before the unstash began. Pekko tracks the intermediate behavior reached by the last successful message.
 - Exceptions in `PreRestart` and `PostStop` handlers are logged, not supervised.
 - `ask` and `ctx.ask` check the reply type but not that the target accepts the request, since the reply type is read from the request's `reply_to` field and pyright cannot tie both to one type parameter. `tell` is fully checked. Pekko checks both.
-- The `Behaviors` factories double as decorators. This is only a Python spelling of the same call, so there is nothing to port, but Apache Pekko code has no counterpart to it.
+- The `Behaviors` factories double as decorators. This is only a Python spelling of the same call, so there is nothing to port, but Apache Pekko code has no counterpart to it. `ctx.pipe_to_self` and `ctx.ask` without `adapt` are decorators too, the Python spelling of the block Scala passes as their last argument. [Chapter 1](01-actors.md#decorators) lists every decorator.
 - `ctx.timers` exposes the actor's `TimerScheduler` directly; Pekko hands it out only through `Behaviors.withTimers`. Both reach the same scheduler, and a restart cancels its timers either way.
 - `start_timer_at_fixed_rate`, `StashBuffer.unstash(n)` and `Routers.group` are not implemented.
 - Pekko's bounded mailbox only drops the new message. `overflow="drop_old"`, `overflow="fail"` (raise `MailboxOverflowError` in the sender) and the awaitable `offer` are additions. Adapted messages, timer messages and `pipe_to_self` results count against the capacity; they always use `tell`.

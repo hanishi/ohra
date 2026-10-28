@@ -13,6 +13,7 @@ from .cell import ActorCell
 from .mailbox import MailboxSelector
 from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
+from .scheduler import EventLoopScheduler, Scheduler
 from .remote.remoting import Remoting, UniqueAddress, resolve_local, unique_address
 
 if TYPE_CHECKING:
@@ -39,8 +40,12 @@ class ActorSystem[T](ActorRef[T]):
         cluster: ClusterSettings | None = None,
         shutdown: CoordinatedShutdownSettings | None = None,
         management: ManagementSettings | None = None,
+        scheduler: Scheduler | None = None,
     ) -> None:
         self.name = name
+        self.scheduler: Scheduler = scheduler or EventLoopScheduler()
+        """Pekko's ``system.scheduler``: actor timers, backoff delays and asks from the system
+        and from actors run on it."""
         self.log = logging.getLogger(f"ohra.system.{name}")
         self._dead_letters = logging.getLogger("ohra.dead_letters")
         if cluster is not None and address is None:
@@ -121,7 +126,7 @@ class ActorSystem[T](ActorRef[T]):
     async def ask[Res](
         self, make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float
     ) -> Res:
-        return await ask(self, make, timeout)
+        return await ask(self, make, timeout, scheduler=self.scheduler)
 
     def resolve(self, path: str) -> ActorRef[Any]:
         """The ref at a path: a local actor, a temp ref, or a RemoteRef on another node (needs an

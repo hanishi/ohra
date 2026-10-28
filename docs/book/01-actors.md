@@ -101,7 +101,7 @@ Save it as `cart.py` and run `python cart.py`; the next two chapters import from
 - **The `await`** inside the handler is safe. While the cart waits on the stock check, the second `AddItem` sits in the mailbox; it is read only when the first one is done, so it sees the book.
 - **`ActorSystem(cart({}), "shop")`** starts the cart as the system's first actor, its guardian, with an empty cart. The system is also a ref to it, so `system.ask` talks to the cart directly. Leaving the `async with` stops everything cleanly.
 
-Type `system.tell("two books please")` and pyright rejects it: the cart accepts only `CartCmd`. Later chapters build on this cart: [persistence](03-persistence.md) keeps it across restarts, [sharding](07-sharding.md) gives every customer their own, and [chapter 11](11-putting-it-together.md) puts it behind a web API.
+Type `system.tell("two books please")` and pyright rejects it: the cart accepts only `CartCmd`. Later chapters build on this cart: [persistence](03-persistence.md) keeps it across restarts, [sharding](07-sharding.md) gives every customer their own, [chapter 11](11-putting-it-together.md) puts it behind a web API, and [chapter 12](12-testing.md) tests it.
 
 > **Coming from Apache Pekko**
 >

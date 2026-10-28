@@ -36,6 +36,7 @@ from .mailbox import MailboxOverflowError, MailboxSelector
 from .ref import ActorRef, FunctionRef, LocalRef
 from .result import Failure, Success, Try
 from .routers import PoolRouter
+from .scheduler import Cancellable
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import Backoff, Restart, Resume, Stop
 
@@ -116,7 +117,7 @@ class TimerScheduler[T]:
     def __init__(self, cell: ActorCell[T]) -> None:
         self._cell = cell
         self._active: dict[object, object] = {}  # key -> generation token
-        self._handles: dict[object, asyncio.TimerHandle] = {}
+        self._handles: dict[object, Cancellable] = {}
 
     def start_single_timer(self, key: object, msg: T, delay: float) -> None:
         self._start(key, msg, delay, None)
@@ -142,7 +143,7 @@ class TimerScheduler[T]:
     def _start(self, key: object, msg: T, delay: float, interval: float | None) -> None:
         self.cancel(key)
         self._active[key] = token = object()
-        loop = asyncio.get_running_loop()
+        scheduler = self._cell.system.scheduler
 
         def deliver() -> object:
             if self._active.get(key) is not token:
@@ -151,14 +152,21 @@ class TimerScheduler[T]:
                 del self._active[key]
             return msg
 
+        fired = False
+
         def fire() -> None:
+            nonlocal fired
+            fired = True
             if interval is None:
-                del self._handles[key]
-            else:
-                self._handles[key] = loop.call_later(interval, fire)
+                self._handles.pop(key, None)
             self._cell.send_adapted(deliver)
 
-        self._handles[key] = loop.call_later(delay, fire)
+        if interval is None:
+            handle = scheduler.schedule_once(delay, fire)
+            if not fired:  # a scheduler may run a zero delay inside schedule_once
+                self._handles[key] = handle
+        else:
+            self._handles[key] = scheduler.schedule_with_fixed_delay(delay, interval, fire)
 
 
 async def _call[X](fn: Callable[..., MaybeAwaitable[X]], *args: Any) -> X:
@@ -210,7 +218,7 @@ class ActorCell[T]:
         self._waiter: asyncio.Future[None] | None = None  # set while the loop is idle in _run
         self._space: deque[asyncio.Future[None]] | None = None  # senders parked in offer()
         self._tasks: set[asyncio.Task[None]] = set()
-        self._timers: dict[object, asyncio.TimerHandle] = {}
+        self._timers: dict[object, Cancellable] = {}
         self.timers: TimerScheduler[T] = TimerScheduler(self)
         self._anon = itertools.count()
         self._task = loop.create_task(self._run(), name=path)
@@ -288,6 +296,15 @@ class ActorCell[T]:
             self._sys = deque()
         self._sys.append(msg)
         self._wake()
+
+    @property
+    def is_idle(self) -> bool:
+        """Stopped, or waiting for a message with nothing in its mailbox: what
+        ``ManualTime`` waits for before it moves the clock."""
+        if self.terminated:
+            return True
+        w = self._waiter
+        return w is not None and not w.done() and not self._user and not self._sys
 
     def _wake(self) -> None:
         w = self._waiter
@@ -569,8 +586,9 @@ class ActorCell[T]:
                 delay = strategy.delay(sup.attempt, random.random())
                 sup.attempt += 1
                 self.log.warning("restarting in %.3fs after %r", delay, e)
-                self._timers[sup.token] = asyncio.get_running_loop().call_later(
-                    delay, self._fire_backoff, sup.token
+                token = sup.token
+                self._timers[token] = self.system.scheduler.schedule_once(
+                    delay, lambda: self._fire_backoff(token)
                 )
                 return sup
             case _:

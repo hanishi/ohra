@@ -1,6 +1,6 @@
 [project]
 name = "ohra"
-version = "0.1.0"
+version = "0.2.0"
 description = "Apache Pekko Typed style actors on asyncio. Not affiliated with the Apache Software Foundation."
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -34,6 +34,7 @@ web = ["fastapi>=0.115", "uvicorn>=0.30", "websockets>=13"]
 postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 torch = ["torch>=2.5", "numpy>=2.0"]
 numba = ["numba>=0.68", "numpy>=2.0"]
+testkit = ["pytest>=8", "pytest-asyncio>=0.24"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from .behavior import Behavior, Behaviors, MaybeAwaitable
 from .mailbox import MailboxSelector
 from .ref import ActorRef, PromiseRef
+from .scheduler import EventLoopScheduler, Scheduler
 from .signals import PostStop, Signal
 
 if TYPE_CHECKING:
@@ -34,22 +35,32 @@ class Replyable[Res](Protocol):
 
 
 async def ask[Res](
-    target: ActorRef[Any], make: Callable[[ActorRef[Res]], Replyable[Res]], timeout: float
+    target: ActorRef[Any],
+    make: Callable[[ActorRef[Res]], Replyable[Res]],
+    timeout: float,
+    *,
+    scheduler: Scheduler | None = None,
 ) -> Res:
     """Send ``make(reply_to)`` to target and await the first reply.
 
     ``make`` is usually a lambda or the message class itself. The target's accepted message
     type is not checked here (see README); the reply type is.
-    A reply arriving after the timeout goes to dead letters; nothing is left pending.
+    A reply arriving after the timeout goes to dead letters; nothing is left pending. The
+    timeout runs on ``scheduler``, the system's when asked through it, else the event loop.
     """
     fut: asyncio.Future[Res] = asyncio.get_running_loop().create_future()
     reply_to = PromiseRef(fut, f"{target.path}/$ask-{next(_ids)}")
-    target.tell(make(reply_to))
+
+    def expire() -> None:
+        if not fut.done():
+            fut.set_exception(AskTimeoutError(f"ask to {target.path} timed out after {timeout}s"))
+
+    timer = (scheduler or EventLoopScheduler()).schedule_once(timeout, expire)
     try:
-        return await asyncio.wait_for(fut, timeout)
-    except TimeoutError:
-        raise AskTimeoutError(f"ask to {target.path} timed out after {timeout}s") from None
+        target.tell(make(reply_to))
+        return await fut
     finally:
+        timer.cancel()
         # held until here on purpose: remoting keeps only a weak temp path for it while the ask is
         # pending
         del reply_to

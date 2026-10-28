@@ -81,4 +81,4 @@ Delete pod B and its coordinated shutdown hands alice's shard off. The next requ
 
 ---
 
-[← numpy and shared memory](10-numpy-and-shared-memory.md) · [Contents](README.md) · [Appendix A: Apache Pekko names →](appendix-pekko-names.md)
+[← numpy and shared memory](10-numpy-and-shared-memory.md) · [Contents](README.md) · [Testing →](12-testing.md)

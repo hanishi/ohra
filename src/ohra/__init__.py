@@ -93,6 +93,7 @@ from .remote import Address, RemoteRef, UniqueAddress
 from .remote.serialization import Serialization, SerializationError, remotable
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
+from .scheduler import Cancellable, Scheduler
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
 from .system import ActorSystem
@@ -106,6 +107,7 @@ __all__ = [
     "AskTimeoutError",
     "Behavior",
     "Behaviors",
+    "Cancellable",
     "ChildFailed",
     "Cluster",
     "ClusterBootstrap",
@@ -182,6 +184,7 @@ __all__ = [
     "ResolvedTarget",
     "RevisionConflictError",
     "Routers",
+    "Scheduler",
     "SelfRemoved",
     "SelfUp",
     "Serialization",

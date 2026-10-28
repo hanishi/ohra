@@ -24,6 +24,7 @@ Each term in plain words, with the chapter that introduces it. [Appendix A](appe
 - **Leader.** The reachable node with the lowest address. It is the only node that changes members' statuses. [Chapter 5](05-cluster.md#the-idea)
 - **Mailbox.** An actor's queue of messages waiting to be handled. [Chapter 1](01-actors.md#the-idea)
 - **Management.** The small HTTP server on each node that serves the health checks, read-only cluster routes and the bootstrap. [Chapter 8](08-management-and-kubernetes.md#the-idea)
+- **Manual time.** A clock for tests that moves only when the test says so, so a test can fire an hour-long timer at once. [Chapter 12](12-testing.md#a-third-example-a-timer-with-manual-time)
 - **Member status.** Where a node is in its life in the cluster: joining, up, leaving, exiting, removed, or down. [Chapter 5](05-cluster.md#gossip-a-leader-and-agreement)
 - **Message.** A value sent to an actor, usually a frozen dataclass. [Chapter 1](01-actors.md#the-idea)
 - **Node.** One actor system in a cluster, usually one process. [Chapter 5](05-cluster.md#the-idea)
@@ -37,6 +38,7 @@ Each term in plain words, with the chapter that introduces it. [Appendix A](appe
 - **Remotable.** The mark on a message type that may cross the network. [Chapter 4](04-remoting.md#the-idea)
 - **Remoting.** Reaching actors in other processes through ordinary refs. [Chapter 4](04-remoting.md#the-idea)
 - **Revision.** The number of a saved state. A save must take the next number, so two copies of an actor cannot overwrite each other's saves. [Chapter 3](03-persistence.md#the-idea)
+- **Scheduler.** The system's clock for everything that waits: timers, backoff delays, ask timeouts. Tests can swap it for manual time. [Chapter 2](02-actor-system.md#how-it-works)
 - **Seed node.** A node that a new node contacts to join the cluster. [Chapter 5](05-cluster.md#a-first-example)
 - **Shard.** A group of entity ids, chosen by a hash, that lives on one node and moves as a unit. [Chapter 7](07-sharding.md#the-idea)
 - **Sharding.** Spreading entities over the nodes and reaching each one by id, wherever it lives. [Chapter 7](07-sharding.md#the-idea)
@@ -45,6 +47,7 @@ Each term in plain words, with the chapter that introduces it. [Appendix A](appe
 - **Store.** Where persisted state is kept: `SqliteStore`, `PostgresStore` or `InMemoryStore`. [Chapter 3](03-persistence.md#the-idea)
 - **Supervision.** What happens when a handler raises: the actor stops, unless a supervisor says to resume or restart it. [Chapter 1](01-actors.md#supervision)
 - **Tell.** Sending a message without waiting for anything back. [Chapter 1](01-actors.md#the-idea)
+- **Test probe.** A stand-in actor in a test: pass its ref where the actor under test sends messages, then await what arrives. [Chapter 12](12-testing.md#the-idea)
 - **Timer.** A message an actor schedules for itself, once or repeatedly. [Chapter 1](01-actors.md#timers-and-stash)
 - **Unreachable.** A node that has stopped answering heartbeats. It is suspected, not yet removed. [Chapter 5](05-cluster.md#the-idea)
 

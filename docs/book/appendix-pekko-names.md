@@ -57,6 +57,13 @@
 | `HashCodeMessageExtractor(numberOfShards)` | `ClusterShardingSettings(number_of_shards=...)`; the shard id is `crc32(entity_id) % number_of_shards` |
 | `ClusterShardingSettings` tuning parameters (`retry-interval`, `rebalance-interval`, `handoff-timeout`, `shard-start-timeout`, `buffer-size`, `rebalance-absolute-limit`, `rebalance-relative-limit`, `coordinator-singleton`) | `ClusterShardingSettings` fields in snake_case, seconds; `coordinator_singleton_settings` is a `ClusterSingletonSettings` |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
+| `system.scheduler.scheduleOnce / scheduleWithFixedDelay / scheduleAtFixedRate`, `Cancellable` | `system.scheduler.schedule_once / schedule_with_fixed_delay / schedule_at_fixed_rate`, `Cancellable`; delays in seconds; `ActorSystem(..., scheduler=...)` in place of `pekko.scheduler.implementation` |
+| `ActorTestKit()`, `spawn`, `stop`, `createTestProbe`, `shutdownTestKit` | `async with ActorTestKit() as testkit:`, `spawn`, `await stop`, `create_test_probe`; the shutdown is the end of the block; from `ohra.testkit` |
+| `TestProbe.expectMessage / expectNoMessage / expectMessageType / receiveMessage / receiveMessages / fishForMessage / expectTerminated / awaitAssert / within / remaining / remainingOrDefault / remainingOr / stop` | same, snake_case, every wait awaited; `within` is `async with probe.within(max, min=0)` |
+| `FishingOutcomes.complete / continue / continueAndIgnore / fail` | `FishingOutcomes.complete() / continue_() / continue_and_ignore() / fail(message)` |
+| `TestKitSettings`, `pekko.actor.testkit.typed.*` | `TestKitSettings(timefactor=..., single_expect_default=..., ...)`, in seconds |
+| `ManualTime(system)`, `ManualTime.config`, `timePasses`, `expectNoMessageFor` | `ManualTime(system)`, `ActorTestKit(manual_time=True)` or `@pytest.mark.manual_time`, `await time_passes`, `await expect_no_message_for` |
+| `ScalaTestWithActorTestKit` | the pytest plugin `ohra.testkit.pytest_plugin`: the `testkit` and `manual_time` fixtures |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
 | `system.ignoreRef` | `system.ignore_ref` |
@@ -65,4 +72,4 @@
 
 ---
 
-[← Putting it together: one cart request](11-putting-it-together.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)
+[← Testing](12-testing.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)

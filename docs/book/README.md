@@ -56,6 +56,7 @@ flowchart TB
 9. [FastAPI](09-fastapi.md)
 10. [numpy and shared memory](10-numpy-and-shared-memory.md)
 11. [Putting it together: one cart request](11-putting-it-together.md)
+12. [Testing](12-testing.md)
 
 Appendices
 

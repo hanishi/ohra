@@ -138,3 +138,26 @@ def persistence_is_typed() -> None:
 def remote_refs_are_typed(remote: RemoteRef[Ping], ping: Ping) -> None:
     remote.tell(ping)
     remote.tell("not a ping")  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class Greeting:
+    text: str
+
+
+@dataclass(frozen=True)
+class Bye:
+    pass
+
+
+async def probes_are_typed() -> None:
+    from ohra.testkit import ActorTestKit, TestProbe
+
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        x: int = await probe.receive_message()
+        probe.ref.tell("not an int")  # type: ignore[arg-type]
+        probe2: TestProbe[Greeting | Bye] = testkit.create_test_probe()
+        s: Greeting = await probe2.expect_message_type(Greeting)
+        wrong: Bye = await probe2.expect_message_type(Greeting)  # type: ignore[assignment]
+        del x, s, wrong

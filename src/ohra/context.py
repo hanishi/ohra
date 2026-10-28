@@ -153,11 +153,14 @@ class ActorContext[T]:
         if timeout is None:
             raise TypeError("ctx.ask needs a timeout")
         if adapt is not None:
-            self.pipe_to_self(ask(target, make, timeout), adapt)
+            self.pipe_to_self(
+                ask(target, make, timeout, scheduler=self._cell.system.scheduler), adapt
+            )
             return None
 
         def start(f: Callable[[Try[Res]], T]) -> Callable[[Try[Res]], T]:
-            self.pipe_to_self(ask(target, make, timeout), f)  # the ask starts only when applied
+            # the ask starts only when applied
+            self.pipe_to_self(ask(target, make, timeout, scheduler=self._cell.system.scheduler), f)
             return f
 
         return start

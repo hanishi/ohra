@@ -14,7 +14,7 @@ Apache Pekko Typed actors on asyncio, for Python 3.12+. No dependencies. *Ohra* 
 
 ohra is an independent project, built on the design of Apache Pekko and, before it, Akka, with thanks to both communities. It follows their semantics and names closely, but it is not part of the Apache Software Foundation.
 
-An actor is a function from a message to the next behavior. Typed refs make wrong messages a type error under pyright strict. Everything runs on one event loop, so a handler can `await` without losing the guarantee that an actor handles one message at a time. numpy work goes to threads and comes back as a message.
+An actor is a function from a message to the next behavior. Typed refs make wrong messages a type error under pyright strict. Everything runs on one event loop, so a handler can `await` without losing the guarantee that an actor handles one message at a time. numpy work goes to threads and comes back as a message. `ohra.testkit`, Pekko's test kit, tests actors with probes and fires timers on a manual clock.
 
 ```python
 import asyncio
@@ -54,7 +54,8 @@ async def main() -> None:
         print(await system.ask(GetTotal, timeout=1))  # 5
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 If you know Apache Pekko or Akka Typed, the names are the same in snake_case, and the semantics are checked against the Apache Pekko source. If you don't, [the book](https://github.com/hanishi/ohra/blob/main/docs/book/README.md) explains everything from the first actor to a sharded web app on Kubernetes.
@@ -68,14 +69,47 @@ pip install 'ohra[web]'        # plus FastAPI and uvicorn, for ohra.ext.fastapi 
 pip install 'ohra[postgres]'   # plus psycopg, for ohra.ext.postgres, the durable state store for clusters
 pip install 'ohra[torch]'      # plus PyTorch, for the purchase predictor example
 pip install 'ohra[numba]'      # plus numba, for compiled loops in threads and examples/stockouts.py
+pip install 'ohra[testkit]'    # plus pytest and pytest-asyncio, for ohra.testkit and its pytest fixtures
 ```
 
 The examples and tests live in the repository, not the package. To run them, clone it and install it in editable mode, with the `dev` extra for pytest, pytest-asyncio, pyright, httpx and ruff:
 
 ```
 git clone https://github.com/hanishi/ohra.git && cd ohra
-pip install -e '.[dev,numpy,web,postgres,torch,numba]'   # or: uv sync --all-extras
+pip install -e '.[dev,numpy,web,postgres,torch,numba,testkit]'   # or: uv sync --all-extras
 ```
+
+## Testing
+
+`ohra.testkit` is Apache Pekko's actor test kit: a test probe stands in for the actor on the other end, and manual time fires timers without waiting for them. Install `'ohra[testkit]'`, then turn on the pytest plugin in `conftest.py` and pytest-asyncio's auto mode in `pyproject.toml`:
+
+```python
+# conftest.py
+pytest_plugins = ["ohra.testkit.pytest_plugin"]
+```
+
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+```
+
+A test for the counter above, saved as `counter.py`:
+
+```python
+from counter import GetTotal, Increment, counter
+from ohra.testkit import ActorTestKit, TestProbe
+
+
+async def test_counter_adds_up(testkit: ActorTestKit):
+    ref = testkit.spawn(counter())
+    probe: TestProbe[int] = testkit.create_test_probe()
+    ref.tell(Increment(2))
+    ref.tell(Increment(3))
+    ref.tell(GetTotal(probe.ref))
+    await probe.expect_message(5)
+```
+
+The `testkit` fixture gives each test its own actor system and shuts it down afterwards. `probe.ref` goes where the actor replies, and `expect_message` waits up to 3 seconds for the next message, failing with `expected 5, found 4` or `timeout (3s) during expect_message while waiting for 5`. Mark a test `@pytest.mark.manual_time` and its `manual_time` fixture moves the clock: `await manual_time.time_passes(3600)` fires an hour-long timer at once. [Chapter 12](https://github.com/hanishi/ohra/blob/main/docs/book/12-testing.md) has the full guide and recipes for DeathWatch, restarts, backoff, persistence and sharding; the tests in [`examples/testing/`](https://github.com/hanishi/ohra/blob/main/examples/testing) run with `pytest examples/testing`.
 
 ## The book
 
@@ -92,6 +126,7 @@ pip install -e '.[dev,numpy,web,postgres,torch,numba]'   # or: uv sync --all-ext
 9. [FastAPI](https://github.com/hanishi/ohra/blob/main/docs/book/09-fastapi.md): the actor system owned by the app, routes that ask actors
 10. [numpy and shared memory](https://github.com/hanishi/ohra/blob/main/docs/book/10-numpy-and-shared-memory.md): blocking work in a thread, loops compiled with numba, large arrays to another process without a copy
 11. [Putting it together](https://github.com/hanishi/ohra/blob/main/docs/book/11-putting-it-together.md): one cart request through every layer
+12. [Testing](https://github.com/hanishi/ohra/blob/main/docs/book/12-testing.md): the test kit, probes, manual time for timers, pytest fixtures
 
 Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-deviations.md), [performance](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-performance.md), and a [glossary](https://github.com/hanishi/ohra/blob/main/docs/book/glossary.md).
 
@@ -124,7 +159,7 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 
 ## Development
 
-Layout follows Apache Pekko's modules: `ohra` is the actor core, `ohra.remote` the transport and serialization, `ohra.cluster` membership and the singleton, `ohra.cluster.sharding` the Shard, region and coordinator, `ohra.ext` the FastAPI, Postgres and shared-memory integrations. Every public name is importable from `ohra` and from its own subpackage.
+Layout follows Apache Pekko's modules: `ohra` is the actor core, `ohra.remote` the transport and serialization, `ohra.cluster` membership and the singleton, `ohra.cluster.sharding` the Shard, region and coordinator, `ohra.ext` the FastAPI, Postgres and shared-memory integrations, `ohra.testkit` the test kit. Every public name is importable from `ohra` and from its own subpackage, except the test kit's, which come from `ohra.testkit` only.
 
 ```
 pytest      # every test fails if any asyncio task outlives it

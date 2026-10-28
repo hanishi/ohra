@@ -451,7 +451,7 @@ wheels = [
 
 [[package]]
 name = "ohra"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -472,6 +472,10 @@ numpy = [
 postgres = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
+]
+testkit = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 torch = [
     { name = "numpy" },
@@ -496,13 +500,15 @@ requires-dist = [
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.380" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest", marker = "extra == 'testkit'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "pytest-asyncio", marker = "extra == 'testkit'", specifier = ">=0.24" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.17" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.5", index = "https://download.pytorch.org/whl/cpu" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.30" },
     { name = "websockets", marker = "extra == 'web'", specifier = ">=13" },
 ]
-provides-extras = ["dev", "numpy", "web", "postgres", "torch", "numba"]
+provides-extras = ["dev", "numpy", "web", "postgres", "torch", "numba", "testkit"]
 
 [[package]]
 name = "opentelemetry-api"

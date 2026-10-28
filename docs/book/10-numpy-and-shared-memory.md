@@ -160,7 +160,7 @@ top sellers: [947, 82, 762]
 ```
 
 - **`SharedArray.create(sales)`** copies the array into shared memory, once. The handle, `orders`, is three small fields: the memory's name, the shape and the dtype.
-- **`loop.run_in_executor(pool, top_sellers_in, orders)`** sends the handle to a worker process, and `pipe_to_self` takes the result as before. The rest of the analyst is unchanged.
+- **`loop.run_in_executor(pool, top_sellers_in, orders)`** sends the handle to a worker process, and `pipe_to_self` takes the result as before. The rest of the analyst is unchanged. [What pipe_to_self does](#what-pipe_to_self-does) says which part is asyncio's and which is ohra's.
 - **`handle.open()`** maps the same memory in the worker, read-only, so nothing is copied in either direction.
 - **Whoever holds the handle owns the memory**, and the owner calls `unlink()` once, here when the program is done. [Appendix B](appendix-deviations.md) has the rule.
 
@@ -208,6 +208,26 @@ This integration is not part of Apache Pekko.
 A handler that blocks the event loop stalls every actor. Run numpy work with `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)` and stash until the result comes back. numpy releases the GIL, so eight such actors use eight cores while a timer keeps ticking on time; pure-Python work in threads gains nothing. For another process, `ohra.ext.shm.SharedArray` hands over a large array as a three-field handle instead of a copy.
 
 Messages are shared by reference and never copied. Keep them immutable: frozen dataclasses, and for arrays either copy before sending or set `arr.flags.writeable = False`.
+
+### What pipe_to_self does
+
+In the second example, the two lines have different owners:
+
+```python
+work = loop.run_in_executor(pool, top_sellers_in, orders)  # asyncio
+ctx.pipe_to_self(work, lambda result: Computed(result, reply_to))  # ohra
+```
+
+`loop.run_in_executor` is plain asyncio. It sends the call to the process pool and returns a future that completes when the worker is done. ohra plays no part in it. The two rules it brings come from Python's process pools: the function, `top_sellers_in`, must be defined at module level, and its arguments must pickle. That is why `orders` is a `SharedArray` handle, 79 bytes, and not the 240 MB array.
+
+`ctx.pipe_to_self` is the only part that is ohra's, and it accepts anything that can be awaited: a coroutine, `asyncio.to_thread(...)`, or this executor future. It does four things:
+
+1. **It starts a background task** that awaits the work.
+2. **It turns the outcome into a `Try`**: `Success(value)`, or `Failure(exception)` if the work raised. A cancellation is passed on, not turned into a `Failure`.
+3. **It runs `adapt` inside the actor.** The outcome goes into the actor's own mailbox as an ordinary message, and `adapt` runs when the actor takes that message, between two others, never during a handler. So `adapt` may read the actor's state safely.
+4. **It ties the task to the actor.** If the actor stops first, the task is cancelled and nothing is delivered.
+
+Cancelling a task only stops the waiting. A thread from `asyncio.to_thread`, or a worker process that has already started a job, runs the job to the end, and its result is thrown away. Stopping an actor in Apache Pekko does not stop a running Future either. If abandoned work matters, have the job check a flag, or keep jobs short.
 
 ---
 

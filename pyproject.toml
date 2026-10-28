@@ -50,7 +50,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["src", "tests/typing_check.py"]
+include = ["src", "tests/typing_check.py", "examples"]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
 reportUnnecessaryTypeIgnoreComment = "error"

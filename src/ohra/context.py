@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from .mailbox import MailboxSelector
 from .patterns import Replyable, ask
@@ -84,12 +84,34 @@ class ActorContext[T]:
 
     # --- async integration ----------------------------------------------------
 
-    def pipe_to_self[R](self, awaitable: Awaitable[R], adapt: Callable[[Try[R]], T]) -> None:
+    @overload
+    def pipe_to_self[R](self, awaitable: Awaitable[R], adapt: Callable[[Try[R]], T]) -> None: ...
+    @overload
+    def pipe_to_self[R](
+        self, awaitable: Awaitable[R]
+    ) -> Callable[[Callable[[Try[R]], T]], Callable[[Try[R]], T]]: ...
+    def pipe_to_self[R](
+        self, awaitable: Awaitable[R], adapt: Callable[[Try[R]], T] | None = None
+    ) -> Callable[[Callable[[Try[R]], T]], Callable[[Try[R]], T]] | None:
         """Run awaitable in the background; deliver adapt(Success|Failure) to this actor.
 
         adapt runs inside the actor, so it may read actor state safely. The background
-        work is cancelled if the actor stops first."""
-        self._cell.pipe_to_self(awaitable, adapt)
+        work is cancelled if the actor stops first. Without adapt, this returns a decorator,
+        like Scala's ``pipeToSelf(future) { case Success(v) => ... }``::
+
+            @ctx.pipe_to_self(work)
+            def _(result: Try[R]) -> T:
+                match result: ...
+        """
+        if adapt is not None:
+            self._cell.pipe_to_self(awaitable, adapt)
+            return None
+
+        def start(f: Callable[[Try[R]], T]) -> Callable[[Try[R]], T]:
+            self._cell.pipe_to_self(awaitable, f)
+            return f
+
+        return start
 
     def message_adapter[U](self, f: Callable[[U], T]) -> ActorRef[U]:
         """A ref that accepts U and delivers f(u) to this actor. f runs inside the actor. The actor
@@ -102,13 +124,40 @@ class ActorContext[T]:
         self._cell.adapters.append(ref)
         return ref
 
+    @overload
     def ask[Res](
         self,
         target: ActorRef[Any],
         make: Callable[[ActorRef[Res]], Replyable[Res]],
         adapt: Callable[[Try[Res]], T],
         timeout: float,
-    ) -> None:
-        """Ask from inside an actor: the reply (or timeout failure) arrives as adapt(result)."""
-        reply: Awaitable[Res] = ask(target, make, timeout)
-        self.pipe_to_self(reply, adapt)
+    ) -> None: ...
+    @overload
+    def ask[Res](
+        self,
+        target: ActorRef[Any],
+        make: Callable[[ActorRef[Res]], Replyable[Res]],
+        *,
+        timeout: float,
+    ) -> Callable[[Callable[[Try[Res]], T]], Callable[[Try[Res]], T]]: ...
+    def ask[Res](
+        self,
+        target: ActorRef[Any],
+        make: Callable[[ActorRef[Res]], Replyable[Res]],
+        adapt: Callable[[Try[Res]], T] | None = None,
+        timeout: float | None = None,
+    ) -> Callable[[Callable[[Try[Res]], T]], Callable[[Try[Res]], T]] | None:
+        """Ask from inside an actor: the reply (or timeout failure) arrives as adapt(result).
+        Without adapt, this returns a decorator, as pipe_to_self does, and timeout must be given
+        by keyword: ``@ctx.ask(ref, make, timeout=1)``."""
+        if timeout is None:
+            raise TypeError("ctx.ask needs a timeout")
+        if adapt is not None:
+            self.pipe_to_self(ask(target, make, timeout), adapt)
+            return None
+
+        def start(f: Callable[[Try[Res]], T]) -> Callable[[Try[Res]], T]:
+            self.pipe_to_self(ask(target, make, timeout), f)  # the ask starts only when applied
+            return f
+
+        return start

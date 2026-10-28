@@ -181,6 +181,39 @@ async def test_pipe_to_self_success_and_failure():
     assert bad == "error: ConnectionError('bad')"
 
 
+@dataclass(frozen=True)
+class _Answer:
+    text: str
+    reply_to: ActorRef[str]
+
+
+type AnswerCmd = Fetch | _Answer
+
+
+async def test_pipe_to_self_as_a_decorator():
+    def on_message(ctx: ActorContext[AnswerCmd], msg: AnswerCmd) -> Behavior[AnswerCmd]:
+        match msg:
+            case Fetch(url, reply_to):
+
+                @ctx.pipe_to_self(fake_http(url))
+                def _(result: Try[str]) -> AnswerCmd:
+                    match result:
+                        case Success(body):
+                            return _Answer(body, reply_to)
+                        case Failure(e):
+                            return _Answer(f"error: {e!r}", reply_to)
+
+            case _Answer(text, reply_to):
+                reply_to.tell(text)
+        return Behaviors.same
+
+    async with ActorSystem(Behaviors.receive(on_message), "t") as system:
+        ok = await system.ask(lambda r: Fetch("good", r), timeout=1)
+        bad = await system.ask(lambda r: Fetch("bad", r), timeout=1)
+    assert ok == "body of good"
+    assert bad == "error: ConnectionError('bad')"
+
+
 async def test_pipe_to_self_is_cancelled_when_actor_stops():
     started = asyncio.Event()
 
@@ -255,3 +288,31 @@ async def test_ctx_ask_and_message_adapter():
 
     async with ActorSystem(Behaviors.setup(asker), "t2") as system:
         assert await system.ask(Report, timeout=1) == "total=3"
+
+
+async def test_ctx_ask_as_a_decorator():
+    def asker(ctx: ActorContext[ReporterCmd]) -> Behavior[ReporterCmd]:
+        c = ctx.spawn(counter(5), "counter")
+        waiting: list[ActorRef[str]] = []
+
+        def on_message(msg: ReporterCmd) -> Behavior[ReporterCmd]:
+            match msg:
+                case Report(reply_to):
+                    waiting.append(reply_to)
+
+                    @ctx.ask(c, GetTotal, timeout=1)
+                    def _(result: Try[int]) -> ReporterCmd:
+                        match result:
+                            case Success(total):
+                                return _GotTotal(total)
+                            case Failure():
+                                return _GotTotal(-1)
+
+                case _GotTotal(total):
+                    waiting.pop(0).tell(f"total={total}")
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    async with ActorSystem(Behaviors.setup(asker), "t") as system:
+        assert await system.ask(Report, timeout=1) == "total=5"

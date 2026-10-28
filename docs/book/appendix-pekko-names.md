@@ -5,8 +5,8 @@
 | `Behaviors.receive / receiveMessage / receiveSignal / setup / same / stopped / unhandled / empty / ignore` | same names, snake_case; handlers may be `async def` |
 | `ActorRef[-T]` | `ActorRef[T]`, contravariant, enforced by pyright strict |
 | `sealed trait` + case classes | `type Cmd = A \| B` + frozen dataclasses + `match` |
-| `ask`, `ctx.ask` | `await ask(ref, make, timeout)`, `ctx.ask(ref, make, adapt, timeout)` |
-| `ctx.pipeToSelf(future)(Try => T)` | `ctx.pipe_to_self(awaitable, adapt)` with `Success` / `Failure` |
+| `ask`, `ctx.ask` | `await ask(ref, make, timeout)`, `ctx.ask(ref, make, adapt, timeout)`, or `@ctx.ask(ref, make, timeout=...)` over `adapt` |
+| `ctx.pipeToSelf(future)(Try => T)` | `ctx.pipe_to_self(awaitable, adapt)` with `Success` / `Failure`, or `@ctx.pipe_to_self(awaitable)` over `adapt` |
 | `ctx.messageAdapter` | `ctx.message_adapter` |
 | `spawn`, `spawnAnonymous`, `ctx.stop(child)` | same |
 | `watch`, `watchWith`, `Terminated`, `ChildFailed`, `DeathPactException` | same; `DeathPactError` |

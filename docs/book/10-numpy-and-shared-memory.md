@@ -167,6 +167,38 @@ top sellers: [947, 82, 762]
 > **Coming from Apache Pekko**
 >
 > - `ctx.pipe_to_self(awaitable, adapt)` is `pipeToSelf`, with a thread or a process in place of a Future on another dispatcher.
+> - `adapt` receives a `Try`, `Success(value)` or `Failure(exception)`, as in Scala. The examples keep the `Try` in the message and match it in the handler, because a lambda cannot hold a `match`. To match in `adapt`, as `pipeToSelf(work) { case Success(...) => ...; case Failure(...) => ... }` does, leave `adapt` out: `ctx.pipe_to_self(work)` then returns a decorator, and the function under it becomes `adapt`. With a message for each outcome:
+>
+>   ```python
+>   @dataclass(frozen=True)
+>   class Computed:
+>       top: list[int]
+>       reply_to: ActorRef[list[int]]
+>
+>
+>   @dataclass(frozen=True)
+>   class ReportFailed:
+>       exception: Exception
+>
+>
+>   type AnalystCmd = TopSellers | CountSales | Computed | ReportFailed
+>   ```
+>
+>   the `TopSellers` case becomes:
+>
+>   ```python
+>   case TopSellers(reply_to):
+>
+>       @ctx.pipe_to_self(asyncio.to_thread(top_sellers, orders))
+>       def _(result: Try[list[int]]) -> AnalystCmd:
+>           match result:
+>               case Success(top):
+>                   return Computed(top, reply_to)
+>               case Failure(exception):
+>                   return ReportFailed(exception)
+>   ```
+>
+>   The handler then answers `Computed(top, reply_to)` and logs `ReportFailed`. `ctx.ask(target, make, timeout=...)` without `adapt` is a decorator in the same way.
 > - `SharedArray` has no Pekko counterpart.
 
 ## How it works

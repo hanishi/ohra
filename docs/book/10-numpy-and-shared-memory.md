@@ -227,6 +227,34 @@ ctx.pipe_to_self(work, lambda result: Computed(result, reply_to))  # ohra
 3. **It runs `adapt` inside the actor.** The outcome goes into the actor's own mailbox as an ordinary message, and `adapt` runs when the actor takes that message, between two others, never during a handler. So `adapt` may read the actor's state safely.
 4. **It ties the task to the actor.** If the actor stops first, the task is cancelled and nothing is delivered.
 
+One `TopSellers` request, from the ask to the reply:
+
+```mermaid
+sequenceDiagram
+  box Main process, one event loop
+    participant Caller
+    participant Analyst as Analyst actor
+    participant Task as pipe_to_self task
+  end
+  box Worker process
+    participant Worker
+  end
+  participant Shm as Shared memory
+  Caller->>Analyst: TopSellers
+  Analyst->>Worker: run_in_executor sends the handle, 79 bytes
+  Analyst->>Task: pipe_to_self(work, adapt)
+  Note over Analyst: the handler returns, and the analyst<br/>takes its next message, such as CountSales
+  Worker->>Shm: handle.open() maps the orders
+  Worker-->>Task: the top three, when the job is done
+  Task->>Analyst: Success(top), into the mailbox
+  Note over Analyst: adapt makes Computed(result, reply_to),<br/>which the handler then takes
+  Analyst-->>Caller: the top three, via reply_to
+```
+
+- **The analyst is never blocked.** Between sending the work and getting the result it handles other messages, which is how the first example answered `CountSales` while the report ran.
+- **Only the handle crosses to the worker**, and only the result comes back. The orders stay in shared memory, which both processes read.
+- **The result comes back as a message.** The task does not call the analyst; it puts the outcome in the analyst's mailbox, so it waits its turn behind any messages already there.
+
 Cancelling a task only stops the waiting. A thread from `asyncio.to_thread`, or a worker process that has already started a job, runs the job to the end, and its result is thrown away. Stopping an actor in Apache Pekko does not stop a running Future either. If abandoned work matters, have the job check a flag, or keep jobs short.
 
 ---

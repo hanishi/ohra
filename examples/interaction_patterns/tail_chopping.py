@@ -43,6 +43,7 @@ def tail_chopping[Reply](
     final_timeout: float,
     timeout_reply: Reply,
 ) -> Behavior[Command[Reply]]:
+    @Behaviors.with_timers
     def with_timers(timers: TimerScheduler[Command[Reply]]) -> Behavior[Command[Reply]]:
         @Behaviors.setup
         def setup(ctx: ActorContext[Command[Reply]]) -> Behavior[Command[Reply]]:
@@ -74,7 +75,7 @@ def tail_chopping[Reply](
 
         return setup
 
-    return Behaviors.with_timers(with_timers)
+    return with_timers
 
 
 # --- usage: three replicas with a long latency tail -----------------------------------------

@@ -111,19 +111,24 @@ from ohra.receptionist import Subscribe  # the cluster's Subscribe is the top-le
 GREETER = ServiceKey[Greet]("greeter")
 
 
+@Behaviors.setup
 def greeter_node(ctx: ActorContext[Listing[Greet]]) -> Behavior[Listing[Greet]]:
     Receptionist(ctx.system).ref.tell(Register(GREETER, ctx.spawn(greeter, "greeter")))
     # a Listing now, then one per change
     Receptionist(ctx.system).ref.tell(Subscribe(GREETER, ctx.self))
-    return Behaviors.receive_message(
-        lambda listing: print(sorted(r.path for r in listing.service_instances)) or Behaviors.same
-    )
+
+    @Behaviors.receive_message
+    def on_listing(listing: Listing[Greet]) -> Behavior[Listing[Greet]]:
+        print(sorted(r.path for r in listing.service_instances))
+        return Behaviors.same
+
+    return on_listing
 
 
 def greeter_system(port: int) -> ActorSystem[Listing[Greet]]:
     seeds = (Address("app", "127.0.0.1", 2551),)
     return ActorSystem(
-        Behaviors.setup(greeter_node),
+        greeter_node,
         "app",
         address=("127.0.0.1", port),
         cluster=ClusterSettings(seed_nodes=seeds),

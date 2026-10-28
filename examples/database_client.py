@@ -84,7 +84,7 @@ class Heartbeat:
 
 @dataclass(frozen=True)
 class Answer:
-    result: Try[str]
+    text: str
     reply_to: ActorRef[str]
 
 
@@ -125,18 +125,17 @@ def client(db: ActorRef[Query | Ping]) -> Behavior[Cmd]:
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Run(sql, reply_to):
-                        ctx.ask(
-                            db,
-                            lambda r: Query(sql, r),
-                            lambda res: Answer(res, reply_to),
-                            timeout=1,
-                        )
-                    case Answer(result, reply_to):
-                        reply_to.tell(
-                            result.value
-                            if isinstance(result, Success)
-                            else f"error: {result.exception}"
-                        )
+
+                        @ctx.ask(db, lambda r: Query(sql, r), timeout=1)
+                        def _(result: Try[str]) -> Cmd:
+                            match result:
+                                case Success(rows):
+                                    return Answer(rows, reply_to)
+                                case Failure(e):
+                                    return Answer(f"error: {e}", reply_to)
+
+                    case Answer(text, reply_to):
+                        reply_to.tell(text)
                     case Heartbeat():
                         ctx.log.info("heartbeat")
                     case Connected():

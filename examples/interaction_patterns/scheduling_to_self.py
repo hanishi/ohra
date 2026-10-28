@@ -30,6 +30,7 @@ class Batch:
 
 
 def buncher(target: ActorRef[Batch], after: float, max_size: int) -> Behavior[Command]:
+    @Behaviors.with_timers
     def with_timers(timers: TimerScheduler[Command]) -> Behavior[Command]:
         @Behaviors.receive_message
         def idle(msg: Command) -> Behavior[Command]:
@@ -59,7 +60,7 @@ def buncher(target: ActorRef[Batch], after: float, max_size: int) -> Behavior[Co
 
         return idle
 
-    return Behaviors.with_timers(with_timers)
+    return with_timers
 
 
 # --- schedule periodically: the same scheduler, a fixed-delay timer -------------------------
@@ -71,6 +72,7 @@ class Tick:
 
 
 def ticker(period: float) -> Behavior[Tick]:
+    @Behaviors.with_timers
     def with_timers(timers: TimerScheduler[Tick]) -> Behavior[Tick]:
         timers.start_timer_with_fixed_delay("tick", Tick(), period)
 
@@ -81,7 +83,7 @@ def ticker(period: float) -> Behavior[Tick]:
 
         return on_tick
 
-    return Behaviors.with_timers(with_timers)
+    return with_timers
 
 
 async def main() -> None:

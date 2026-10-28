@@ -42,6 +42,7 @@ def aggregator[Reply, Aggregate](
     aggregate: Callable[[list[Reply]], Aggregate],
     timeout: float,
 ) -> Behavior[Command[Reply]]:
+    @Behaviors.with_timers
     def with_timers(timers: TimerScheduler[Command[Reply]]) -> Behavior[Command[Reply]]:
         @Behaviors.setup
         def setup(ctx: ActorContext[Command[Reply]]) -> Behavior[Command[Reply]]:
@@ -66,7 +67,7 @@ def aggregator[Reply, Aggregate](
 
         return setup
 
-    return Behaviors.with_timers(with_timers)
+    return with_timers
 
 
 # --- usage: two hotels with different protocols, and one that is too slow ------------------

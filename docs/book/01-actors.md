@@ -312,7 +312,7 @@ def gated(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
     return waiting
 ```
 
-The Apache Pekko spelling, `Behaviors.with_timers(factory)` and `Behaviors.with_stash(capacity, factory)`, works too and is what the ported examples use.
+The Apache Pekko spelling, `Behaviors.with_timers(factory)` and `Behaviors.with_stash(capacity, factory)`, works too. The interaction pattern examples write `with_timers` as a decorator, the Python form of Pekko's `Behaviors.withTimers { timers => ... }`.
 
 ### Routers, batching, and bounded mailboxes
 

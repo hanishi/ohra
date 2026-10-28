@@ -65,6 +65,7 @@ pip install -e .            # the library
 pip install -e '.[numpy]'   # plus numpy, for the examples that use it
 pip install -e '.[web]'     # plus FastAPI and uvicorn, for ohra.ext.fastapi and the fastapi_* examples
 pip install -e '.[postgres]' # plus psycopg, for ohra.ext.postgres, the durable state store for clusters
+pip install -e '.[torch]'   # plus PyTorch, for the purchase predictor example
 pip install -e '.[dev]'     # plus pytest, pytest-asyncio, pyright, httpx
 ```
 
@@ -102,6 +103,7 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 | `examples/fastapi_carts.py` | a FastAPI service over actors: one entity per cart id through `Sharding`, persisted in SQLite with `Behaviors.persisted` so carts survive passivation and restarts, typed `ask` from routes to entities |
 | `examples/fastapi_chatroom.py` | the chat room over WebSockets: one connection actor per socket with an async handler that writes to it, rooms created on demand, and DeathWatch turning a closed socket into a "left" notice; serves a browser page at `/` |
 | `examples/fastapi_online_learning.py` | a feedback loop behind FastAPI: predictions micro-batched into one numpy call, outcomes posted back, a learner actor taking gradient steps in a thread and hot-swapping the model; serves a playground page at `/`, and `python examples/fastapi_online_learning.py` runs the server with a demo client |
+| `examples/fastapi_purchase_predictor.py` | the same loop with PyTorch: a model of which shopper buys which product, learned from simulated shoppers with hidden tastes; the learner trains its own copy in a thread and sends the predictor copies of the weights; the page at `/` shows the true tastes beside the model's predictions, accuracy over time, and a button that shifts the tastes so you can watch the model catch up. Needs the `web` and `torch` extras |
 | `examples/bandit.py` | Thompson sampling over sharded arms: Beta posteriors as arrays, one vectorized draw per shard, `ctx.ask` fan-out, a progress timer |
 | `examples/benchmark.py` | message throughput, round-trip latency and spawn cost of the runtime; the source of the [Performance](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-performance.md) table |
 | `examples/compute.py` | numpy in threads via `pipe_to_self(asyncio.to_thread(...))`, with a latency probe |

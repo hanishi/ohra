@@ -63,6 +63,7 @@ from .coordinated_shutdown import (
     JvmExitReason,
     Reason,
 )
+from .eventstream import AllDeadLetters, DeadLetter, Dropped, EventStream, UnhandledMessage
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .management import Management, ManagementSettings
 from .management.bootstrap import ClusterBootstrap, ClusterBootstrapSettings
@@ -103,6 +104,7 @@ __all__ = [
     "ActorRef",
     "ActorSystem",
     "ActorSystemTerminateReason",
+    "AllDeadLetters",
     "Address",
     "AskTimeoutError",
     "Behavior",
@@ -125,15 +127,18 @@ __all__ = [
     "CoordinatedShutdownSettings",
     "CurrentClusterState",
     "CurrentShardRegionState",
+    "DeadLetter",
     "DeathPactError",
     "Deregister",
     "Deregistered",
     "Down",
     "DownAll",
+    "Dropped",
     "Entity",
     "EntityContext",
     "EntityRef",
     "EntityTypeKey",
+    "EventStream",
     "Failure",
     "Find",
     "GetCurrentState",
@@ -211,6 +216,7 @@ __all__ = [
     "Try",
     "UniqueAddress",
     "UnreachableMember",
+    "UnhandledMessage",
     "Unsubscribe",
     "ask",
     "batching",

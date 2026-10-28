@@ -521,8 +521,8 @@ class ActorCell[T]:
                 strategy = cast(Backoff, sup.template.strategy)
                 if sup.stash is not None and len(sup.stash) < strategy.stash_capacity:
                     sup.stash.append(item)
-                else:
-                    self.system.dead_letter(item, self.ref)
+                else:  # Pekko's RestartSupervisor publishes Dropped here
+                    self.system.dropped(item, "Stash is full in [RestartSupervisor]", self.ref)
             return sup
         try:
             if is_signal:

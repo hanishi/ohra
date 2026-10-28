@@ -318,12 +318,73 @@ The Apache Pekko spelling, `Behaviors.with_timers(factory)` and `Behaviors.with_
 
 `Routers.pool(n, behavior)` spawns `n` routees and forwards each message by round robin, at random, or by `with_consistent_hashing_routing(key)` so that equal keys reach the same routee. `batching(max_n, max_wait, handle)` is a behavior that collects messages and hands them to `handle` in batches, which is where `np.add.at` earns its keep. `MailboxSelector.bounded(capacity, overflow=...)` passed to `spawn` bounds a mailbox and drops the new message, drops the oldest, or raises in the sender. A producer that can await should use `await ref.offer(msg)` instead of `tell`: on a full mailbox it waits for room, so a slow consumer slows the producer and nothing is lost. `tell` never waits, so it stays usable from callbacks and timers.
 
+### Dead letters and logging
+
+A message nobody receives is not lost silently. There are three kinds, all published on the system's **event stream**, `system.event_stream`, as Pekko's are:
+
+- **`DeadLetter(message, recipient)`**: the actor had stopped, its bounded mailbox was full, or remoting could not send the message.
+- **`UnhandledMessage(message, recipient)`**: the behavior returned `Behaviors.unhandled`, or had no handler for it, as `Behaviors.empty` has none.
+- **`Dropped(message, reason, recipient)`**: dropped on purpose, such as a message beyond the stash capacity while a backoff restart waits.
+
+All three are `AllDeadLetters`, and a subscription to a class also gets its subclasses. An actor that prints every dead letter:
+
+```python
+import asyncio
+
+from ohra import ActorContext, ActorSystem, Behavior, Behaviors, DeadLetter, EventStream
+
+
+def printer() -> Behavior[DeadLetter]:
+    @Behaviors.receive_message
+    def on_message(d: DeadLetter) -> Behavior[DeadLetter]:
+        print(f"dead letter to {d.recipient.path}: {d.message!r}")
+        return Behaviors.same
+
+    return on_message
+
+
+def guardian(ctx: ActorContext[str]) -> Behavior[str]:
+    log = ctx.spawn(printer(), "printer")
+    ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, log))
+    gone = ctx.spawn(Behaviors.stopped(), "gone")  # stops as soon as it starts
+    ctx.watch_with(gone, "gone has stopped")
+
+    @Behaviors.receive_message
+    def on_message(msg: str) -> Behavior[str]:
+        gone.tell("hello?")
+        return Behaviors.same
+
+    return on_message
+
+
+async def main() -> None:
+    async with ActorSystem(Behaviors.setup(guardian), "shop"):
+        await asyncio.sleep(0.1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+It prints `dead letter to ohra://shop/user/gone: 'hello?'`. `EventStream.Subscribe(DeadLetter, ref)` takes the class to subscribe to, `EventStream.Unsubscribe(ref)` ends every subscription of `ref`, and a subscriber that stops is unsubscribed. `EventStream.Publish(event)` sends any event of your own to its subscribers. The stream is local to one actor system. In tests, `testkit.create_dead_letter_probe()` subscribes a probe ([chapter 12](12-testing.md#a-message-that-nobody-receives)).
+
+ohra logs through Python's standard `logging` and configures nothing, so the application decides what is shown. Without configuration, Python prints warnings and errors to stderr. The loggers:
+
+| Logger | What it logs |
+|---|---|
+| `ohra.actor.<system>.<path>` | one per actor, `ctx.log`: `ohra://shop/user/cart` logs to `ohra.actor.shop.user.cart`. Restarts are warnings, failures errors |
+| `ohra.dead_letters` | every dead letter, unhandled and dropped message, at debug level |
+| `ohra.system.<name>` | the actor system |
+| `ohra.coordinated_shutdown`, `ohra.remote`, `ohra.management`, `ohra.testkit` | shutdown phases, connections, the management endpoint, manual time |
+
+The cluster, singleton and sharding actors are actors under `/system`, so `ohra.actor.shop.system` covers all of them. `logging.getLogger("ohra.dead_letters").setLevel(logging.DEBUG)` shows every dead letter; `logging.getLogger("ohra.actor.shop.system").setLevel(logging.WARNING)` quiets the cluster.
+
 ### Runtime model
 
 - One asyncio task per actor. System messages (stop, watch, death notifications, backoff timers) are processed before user messages.
 - A behavior is a value, and one value can start many actors (`Routers.pool`, or spawning it twice). Anything captured in its closure is then shared by all of them. Create per-actor state inside `Behaviors.setup`, `with_timers` or `with_stash`, which run once per actor.
 - A handler that awaits keeps the actor busy. Messages are serialized across awaits, which is the main reason to use actors on a single event loop. `test_async_handler_keeps_messages_serialized` pins this down.
-- Stopping an actor stops its children first (depth-first), then delivers `PostStop` to the last running behavior, then runs the `Behaviors.stopped(callback)` callback, then notifies watchers and the parent. Pending user messages become dead letters (logger `ohra.dead_letters`).
+- Stopping an actor stops its children first (depth-first), then delivers `PostStop` to the last running behavior, then runs the `Behaviors.stopped(callback)` callback, then notifies watchers and the parent. Pending user messages become dead letters ([Dead letters and logging](#dead-letters-and-logging)).
 - There is one `TimerScheduler` per actor, and a `restart` or `restart_with_backoff` cancels all of its timers before `PreRestart`, as Pekko's `RestartSupervisor` does. `resume` leaves them running.
 - Background work started with `pipe_to_self` is cancelled when the actor stops. Every test asserts that no asyncio task outlives the system.
 - Timer messages are validated when dequeued, so a message from a timer that was cancelled or restarted while it sat in the mailbox is dropped. `unstash_all` replays the stashed messages inside the current message's turn, before any new message.

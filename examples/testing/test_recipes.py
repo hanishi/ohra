@@ -192,3 +192,14 @@ async def test_the_write_lands(testkit: ActorTestKit):
         assert cache == {"a": 1}
 
     await probe.await_assert(landed)
+
+
+async def test_a_message_to_a_stopped_cart_is_a_dead_letter(testkit: ActorTestKit):
+    dead_letters = testkit.create_dead_letter_probe()
+    shop = testkit.spawn(cart({}))
+    await testkit.stop(shop)
+    probe: TestProbe[dict[str, int]] = testkit.create_test_probe()
+    shop.tell(GetCart(probe.ref))
+    letter = await dead_letters.receive_message()
+    assert (letter.message, letter.recipient) == (GetCart(probe.ref), shop)
+    await probe.expect_no_message()

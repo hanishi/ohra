@@ -10,6 +10,14 @@ from typing import TYPE_CHECKING, Any, Self
 
 from .behavior import Behavior, Behaviors
 from .cell import ActorCell
+from .eventstream import (
+    DeadLetter,
+    Dropped,
+    EventStream,
+    UnhandledMessage,
+    event_stream,
+    is_suppressed,
+)
 from .mailbox import MailboxSelector
 from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
@@ -71,6 +79,11 @@ class ActorSystem[T](ActorRef[T]):
             self, None, "system", f"{root}/system", Behaviors.empty
         )
         """Pekko's /system guardian: hosts the receptionist and the cluster daemon."""
+        self.event_stream: ActorRef[EventStream.Command] = self._system_root.spawn_child(
+            event_stream({}), "eventStream", None
+        ).ref
+        """Pekko's ``system.eventStream``: dead letters, unhandled and dropped messages are
+        published on it, and so is anything sent as ``EventStream.Publish(event)``."""
         self.receptionist: Receptionist | None = None
         """The receptionist extension, reached as ``Receptionist(system)``; started below, as
         Pekko's."""
@@ -213,9 +226,18 @@ class ActorSystem[T](ActorRef[T]):
 
     def dead_letter(self, msg: object, recipient: ActorRef[Any]) -> None:
         self._dead_letters.debug("dead letter to %s: %r", recipient.path, msg)
+        if not is_suppressed(msg):
+            self.event_stream.tell(EventStream.Publish(DeadLetter(msg, recipient)))
 
     def unhandled(self, msg: object, recipient: ActorRef[Any]) -> None:
         self._dead_letters.debug("unhandled by %s: %r", recipient.path, msg)
+        if not is_suppressed(msg):
+            self.event_stream.tell(EventStream.Publish(UnhandledMessage(msg, recipient)))
+
+    def dropped(self, msg: object, reason: str, recipient: ActorRef[Any]) -> None:
+        self._dead_letters.debug("dropped by %s (%s): %r", recipient.path, reason, msg)
+        if not is_suppressed(msg):
+            self.event_stream.tell(EventStream.Publish(Dropped(msg, reason, recipient)))
 
     async def __aenter__(self) -> Self:
         if self.remoting is not None:

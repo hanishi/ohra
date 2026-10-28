@@ -9,6 +9,7 @@ from types import TracebackType
 from typing import Any, Self
 
 from ..behavior import Behavior, Behaviors
+from ..eventstream import DeadLetter, Dropped, EventStream, UnhandledMessage
 from ..cell import _cell_of  # pyright: ignore[reportPrivateUsage]
 from ..ref import ActorRef
 from ..scheduler import Scheduler
@@ -75,6 +76,24 @@ class ActorTestKit:
         """A probe under ``/system``; its message type comes from the annotation at the call
         site: ``probe: TestProbe[int] = testkit.create_test_probe()``."""
         return TestProbe[M](self, name)
+
+    def create_dead_letter_probe(self) -> TestProbe[DeadLetter]:
+        """A probe subscribed to dead letters. The subscription is in place for every dead letter
+        after this call: both go through the event stream's mailbox, in order."""
+        return self._subscribed_probe(DeadLetter)
+
+    def create_unhandled_message_probe(self) -> TestProbe[UnhandledMessage]:
+        """A probe subscribed to unhandled messages."""
+        return self._subscribed_probe(UnhandledMessage)
+
+    def create_dropped_message_probe(self) -> TestProbe[Dropped]:
+        """A probe subscribed to dropped messages."""
+        return self._subscribed_probe(Dropped)
+
+    def _subscribed_probe[E](self, topic: type[E]) -> TestProbe[E]:
+        probe = TestProbe[E](self)
+        self.system.event_stream.tell(EventStream.Subscribe(topic, probe.ref))
+        return probe
 
     async def stop(self, ref: ActorRef[Any], max: float | None = None) -> None:
         """Stop an actor spawned by ``spawn`` and wait until it has stopped."""

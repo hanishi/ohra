@@ -102,6 +102,8 @@ A parent handing out one actor per id is also what [sharding](07-sharding.md) do
 
 **The scheduler.** `system.scheduler` runs everything that waits on a clock: actor timers, the delay before a backoff restart, and the timeouts of `system.ask` and `ctx.ask`. It is Pekko's `system.scheduler`, with `schedule_once`, `schedule_with_fixed_delay` and `schedule_at_fixed_rate`, each returning a `Cancellable`. By default it runs on the event loop. `ActorSystem(..., scheduler=...)` replaces it, which is how [manual time](12-testing.md#a-third-example-a-timer-with-manual-time) moves timers without waiting for them.
 
+**The event stream.** `system.event_stream` is Pekko's `system.eventStream`, an actor at `/system/eventStream` that takes `EventStream.Subscribe(cls, ref)`, `EventStream.Unsubscribe(ref)` and `EventStream.Publish(event)`. The runtime publishes every dead letter, unhandled message and dropped message on it; [chapter 1](01-actors.md#dead-letters-and-logging) shows how to subscribe.
+
 ### Receptionist
 
 Actors find each other through the Receptionist, Apache Pekko's service registry: a service registers under a `ServiceKey`, and anyone asks `Find` for the current refs under that key or `Subscribe`s to be sent a `Listing` now and after every change. Every system starts one; on a cluster node the registry is replicated, so a service registered on one node is found on the others as a `RemoteRef`. Entries follow their node: they vanish when the service stops or the member is removed, and while a node is unreachable its services drop from `service_instances` but stay in `all_service_instances`.

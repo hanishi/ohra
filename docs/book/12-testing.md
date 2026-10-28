@@ -185,7 +185,7 @@ It passes in a few milliseconds.
 > - Every wait is awaited, and durations are seconds as floats. Spawning and creating a probe are not awaited, as in Pekko.
 > - `ScalaTestWithActorTestKit` is the pytest plugin, and `ManualTime.config` is `@pytest.mark.manual_time` or `ActorTestKit(manual_time=True)`.
 > - The test kit's names come from `ohra.testkit`, not from `ohra`, since Pekko ships the test kit as a module of its own.
-> - `BehaviorTestKit`, `TestInbox`, `LoggingTestKit` and the dead-letter and unhandled-message probes are not ported yet. [Appendix B](appendix-deviations.md) has the full list.
+> - `createDeadLetterProbe`, `createUnhandledMessageProbe` and `createDroppedMessageProbe` are `create_dead_letter_probe()` and its siblings. `BehaviorTestKit`, `TestInbox` and `LoggingTestKit` are not ported yet. [Appendix B](appendix-deviations.md) has the full list.
 
 ## Testing common cases
 
@@ -440,6 +440,25 @@ async def test_the_write_lands(testkit: ActorTestKit):
 - **`landed` may be sync or async**, and it may raise any exception; each one counts as a failed try, as in Pekko.
 - **Prefer a message when you can.** A probe that receives a reply fails at once on a wrong value; `await_assert` waits out its whole `max` before it reports one.
 
+### A message that nobody receives
+
+A message to an actor that has stopped is a dead letter, published on the event stream ([chapter 1](01-actors.md#dead-letters-and-logging)). `create_dead_letter_probe()` subscribes a probe to them:
+
+```python
+async def test_a_message_to_a_stopped_cart_is_a_dead_letter(testkit: ActorTestKit):
+    dead_letters = testkit.create_dead_letter_probe()
+    shop = testkit.spawn(cart({}))
+    await testkit.stop(shop)
+    probe: TestProbe[dict[str, int]] = testkit.create_test_probe()
+    shop.tell(GetCart(probe.ref))
+    letter = await dead_letters.receive_message()
+    assert (letter.message, letter.recipient) == (GetCart(probe.ref), shop)
+    await probe.expect_no_message()
+```
+
+- **Every dead letter after `create_dead_letter_probe()` reaches the probe**, since the subscription and the dead letters go through the event stream's mailbox, in order. No `await` is needed in between.
+- `create_unhandled_message_probe()` and `create_dropped_message_probe()` do the same for unhandled and dropped messages.
+
 ## How it works
 
 ### The test kit
@@ -452,7 +471,7 @@ Leaving the `async with` terminates the system and waits for it, at most `system
 
 ### Probes
 
-A probe is an actor under `/system`, named `testProbe-N`, or `<name>-N` after the name you pass, with N counting up across the run, as in Pekko. Every message it receives goes into an asyncio queue, and every `expect_*` and `receive_*` method awaits that queue with a deadline. A probe with a message type other than the annotation's, such as `TestProbe[int](testkit)`, works too.
+A probe is an actor under `/system`, named `testProbe-N`, or `<name>-N` after the name you pass, with N counting up across the run, as in Pekko. Every message it receives goes into an asyncio queue, and every `expect_*` and `receive_*` method awaits that queue with a deadline. A probe with a message type other than the annotation's, such as `TestProbe[int](testkit)`, works too. `testkit.create_dead_letter_probe()`, `create_unhandled_message_probe()` and `create_dropped_message_probe()` return probes subscribed to the [event stream](01-actors.md#dead-letters-and-logging).
 
 | Method | Waits for |
 |---|---|

@@ -105,6 +105,8 @@ A parent handing out one actor per id is also what [sharding](07-sharding.md) do
 Actors find each other through the Receptionist, Apache Pekko's service registry: a service registers under a `ServiceKey`, and anyone asks `Find` for the current refs under that key or `Subscribe`s to be sent a `Listing` now and after every change. Every system starts one; on a cluster node the registry is replicated, so a service registered on one node is found on the others as a `RemoteRef`. Entries follow their node: they vanish when the service stops or the member is removed, and while a node is unreachable its services drop from `service_instances` but stay in `all_service_instances`.
 
 ```python
+import asyncio
+
 from ohra import Find, Listing, Receptionist, Register, ServiceKey
 from ohra.receptionist import Subscribe  # the cluster's Subscribe is the top-level one
 
@@ -136,8 +138,9 @@ def greeter_system(port: int) -> ActorSystem[Listing[Greet]]:
 
 
 async def main() -> None:
-    async with greeter_system(2551) as first, greeter_system(2552) as second:
-        await until(lambda: len(Cluster(second).state.members) == 2)
+    async with greeter_system(2551), greeter_system(2552) as second:
+        while len(Cluster(second).state.members) < 2:  # wait until both nodes have joined
+            await asyncio.sleep(0.1)
         listing = await ask(Receptionist(second).ref, lambda r: Find(GREETER, r), timeout=1)
         # one local ref, one RemoteRef to the greeter on the first node
         for ref in listing.service_instances:
@@ -170,20 +173,20 @@ import signal
 
 from ohra import CoordinatedShutdown, CoordinatedShutdownSettings
 
-system = ActorSystem(
-    guardian,
-    "app",
-    shutdown=CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM)),
-)
-
 
 async def drain() -> None:
     await server.close()  # stop taking requests before the node leaves the cluster
 
 
-CoordinatedShutdown(system).add_task("service-unbind", "stop-http", drain)
-# ctrl-c or SIGTERM runs the phases: user tasks, hand-offs, leave, stop
-await system.when_terminated()
+async def main() -> None:
+    system = ActorSystem(
+        guardian,
+        "app",
+        shutdown=CoordinatedShutdownSettings(run_on_signals=(signal.SIGINT, signal.SIGTERM)),
+    )
+    CoordinatedShutdown(system).add_task("service-unbind", "stop-http", drain)
+    # ctrl-c or SIGTERM runs the phases: user tasks, hand-offs, leave, stop
+    await system.when_terminated()
 ```
 
 The phases, in order: `before-service-unbind`, `service-unbind`, `service-requests-done`, `service-stop`, `before-cluster-shutdown`, `cluster-sharding-shutdown-region`, `cluster-leave`, `cluster-exiting`, `cluster-exiting-done`, `cluster-shutdown`, `before-actor-system-terminate`, `actor-system-terminate`. Tasks in one phase run concurrently; a task that fails is logged and the run continues, as Pekko's `recover = on`. A phase that outlives its timeout (`default_phase_timeout` 5 s; 10 s for the region, exiting and terminate phases; `phase_timeouts` overrides) is logged and its still-running tasks are cancelled, so a task must tolerate `CancelledError` at any await; Pekko lets such a task run on. `terminate()` returns at once, as Pekko's does: messages told after it may still be processed, so await `when_terminated()`. A guardian that stops on its own also runs the phases, after its actors are gone. `run(reason)` starts the run by hand; `shutdown_reason` says who did. A node that terminates while another member is unreachable and not downed waits out `cluster-exiting`, since the leader cannot move it to Exiting; the split-brain resolver below removes that wait.

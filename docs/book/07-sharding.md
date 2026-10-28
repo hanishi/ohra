@@ -149,7 +149,7 @@ Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "car
 from ohra import ClusterSharding, Entity, EntityTypeKey
 
 COUNTER = EntityTypeKey[CountUp]("Counter")
-region = ClusterSharding(system).init(Entity(COUNTER, counter))  # call it on every node
+region = ClusterSharding(system).init(Entity(COUNTER, lambda entity: counter()))  # every node
 print(await ask(ClusterSharding(system).entity_ref_for(COUNTER, "alice"), CountUp, timeout=3))
 ```
 

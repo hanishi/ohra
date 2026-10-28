@@ -147,12 +147,7 @@ def cluster_node(port: int, seed_port: int) -> ActorSystem[MemberEvent]:
 
 async def main() -> None:
     async with cluster_node(2551, 2551) as first, cluster_node(2552, 2551) as second:
-        await until(
-            lambda: (
-                all(m.status == "up" for m in Cluster(first).state.members)
-                and len(Cluster(first).state.members) == 2
-            )
-        )
+        await members_up(first, 2)  # from the first example
         # Address(name='app', host='127.0.0.1', port=2551)
         print(Cluster(first).state.leader)
         Cluster(first).manager.tell(Leave(Cluster(second).self_address))

@@ -113,7 +113,7 @@ There is never more than one instance as long as membership is agreed. That is w
 ```python
 from ohra import ClusterSingleton, SingletonActor
 
-proxy = ClusterSingleton(system).init(SingletonActor(counter, "counter"))  # call it on every node
+proxy = ClusterSingleton(system).init(SingletonActor(counter(), "counter"))  # every node
 # answered by the one instance
 print(await ask(proxy, Hit, timeout=3))
 ```

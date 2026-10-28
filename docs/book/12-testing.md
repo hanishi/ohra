@@ -500,13 +500,13 @@ sequenceDiagram
   participant Test
   participant MT as ManualTime
   participant Sched as Explicitly triggered scheduler
-  participant Actor
+  participant Reminders as reminders actor
   Test->>MT: time_passes(3600)
   MT->>MT: settle: every mailbox empty
   MT->>Sched: next job due by 3600?
   Sched-->>MT: the reminder's timer, at 3600
   MT->>Sched: run it, the clock reads 3600
-  Sched->>Actor: Due("stand up")
+  Sched->>Reminders: Due("stand up")
   MT->>MT: settle: the actor replies to the probe
   MT->>Sched: next job due by 3600?
   Sched-->>MT: none

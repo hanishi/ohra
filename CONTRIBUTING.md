@@ -46,6 +46,7 @@ uv run pyright       # strict mode, 0 errors
 ## Invariants (do not break)
 
 - An actor processes one message at a time, including across awaits in its handler.
+  An await in a handler holds the actor, stops included, so ohra's own handlers await only on prompt, bounded work.
 - System messages are processed before user messages.
 - Stop order: children (await their `done`) → PostStop → mark terminated → notify watchers and parent. There are no awaits between "mark terminated" and the notifications.
 - Nothing leaks: timers in `ActorCell._timers` and background tasks in `ActorCell._tasks` are cancelled in `_finish`.

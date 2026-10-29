@@ -28,7 +28,8 @@ def cart(items: dict[str, int]) -> Behavior[CartCmd]:
     async def on_message(msg: CartCmd) -> Behavior[CartCmd]:
         match msg:
             case AddItem(sku, qty, reply_to):
-                await check_stock(sku)  # the next message waits
+                async with asyncio.timeout(1):  # a stall fails the actor instead of hanging it
+                    await check_stock(sku)  # the next message waits
                 updated = {**items, sku: items.get(sku, 0) + qty}
                 reply_to.tell(updated)
                 return cart(updated)

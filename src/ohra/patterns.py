@@ -48,6 +48,19 @@ async def ask[Res](
     A reply arriving after the timeout goes to dead letters; nothing is left pending. The
     timeout runs on ``scheduler``, the system's when asked through it, else the event loop.
     """
+    return await start_ask(target, make, timeout, scheduler=scheduler)
+
+
+def start_ask[Res](
+    target: ActorRef[Any],
+    make: Callable[[ActorRef[Res]], Replyable[Res]],
+    timeout: float,
+    *,
+    scheduler: Scheduler | None = None,
+) -> asyncio.Future[Res]:
+    """Start the timeout and send the request now, as Pekko's AskPattern does, and return the
+    reply's future: await it or cancel it, which ends the ask. A failing ``make`` or ``tell``
+    raises here."""
     fut: asyncio.Future[Res] = asyncio.get_running_loop().create_future()
     reply_to = PromiseRef(fut, f"{target.path}/$ask-{next(_ids)}")
 
@@ -56,14 +69,15 @@ async def ask[Res](
             fut.set_exception(AskTimeoutError(f"ask to {target.path} timed out after {timeout}s"))
 
     timer = (scheduler or EventLoopScheduler()).schedule_once(timeout, expire)
+    # the callback holds reply_to until the ask ends: remoting keeps only a weak temp path for it
+    fut.add_done_callback(lambda _: (timer.cancel(), reply_to))
     try:
         target.tell(make(reply_to))
-        return await fut
-    finally:
-        timer.cancel()
-        # held until here on purpose: remoting keeps only a weak temp path for it while the ask is
-        # pending
-        del reply_to
+    except BaseException:
+        timer.cancel()  # now: the done callbacks run only on the next loop iteration
+        fut.cancel()
+        raise
+    return fut
 
 
 class _Flush:

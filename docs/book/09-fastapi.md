@@ -80,7 +80,83 @@ async def total(system: ActorSystem[Command] = actors.depends()) -> dict[str, in
     return {"total": await system.ask(GetTotal, timeout=1)}
 ```
 
-Inside a WebSocket route the same dependency works, and the connection actor pattern in `examples/fastapi_chatroom.py` keeps one actor per socket.
+## WebSockets: the route owns the connection
+
+A WebSocket route takes the same dependency. What it shouldn't do is hand the socket to an actor. Writing to a socket is an await, and an actor that awaits in its handler is held until the await returns: no other message gets through, not even a stop. One slow client is then enough to wedge its actor.
+
+The route keeps the socket instead and gives the actors an outbox. `ohra.stream.ActorSource.actor_ref` is both at once: actors tell its `ref`, which never waits, and the route sends what comes out of it with `async for`.
+
+```python
+import asyncio
+from dataclasses import dataclass
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from ohra import ActorRef, ActorSystem, Behavior, Behaviors
+from ohra.ext.fastapi import Actors
+from ohra.stream import ActorSource, BufferOverflowError, OverflowStrategy
+
+type Frame = dict[str, str]
+
+
+@dataclass(frozen=True)
+class Say:
+    text: str
+    outbox: ActorRef[Frame]
+
+
+def echo() -> Behavior[Say]:
+    @Behaviors.receive_message
+    def on_message(msg: Say) -> Behavior[Say]:
+        msg.outbox.tell({"echo": msg.text})  # a tell: the actor never waits on the socket
+        return Behaviors.same
+
+    return on_message
+
+
+actors = Actors(echo(), "echo")
+app = FastAPI(lifespan=actors.lifespan)
+
+
+@app.websocket("/ws")
+async def chat(ws: WebSocket, system: ActorSystem[Say] = actors.depends()) -> None:
+    await ws.accept()
+    outbox: ActorSource[Frame] = ActorSource.actor_ref(
+        completion_matcher=lambda _: False,
+        failure_matcher=lambda _: None,
+        buffer_size=256,
+        overflow_strategy=OverflowStrategy.fail,
+    )
+
+    async def send() -> None:  # the route, not an actor, writes to the socket
+        try:
+            async for frame in outbox:
+                await ws.send_json(frame)
+        except BufferOverflowError:
+            await ws.close(code=1008, reason="too slow")
+
+    sending = asyncio.create_task(send())
+    try:
+        while True:
+            system.tell(Say(await ws.receive_text(), outbox.ref))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sending.cancel()
+        await asyncio.wait([sending])
+```
+
+- **`outbox.ref`** is an ordinary `ActorRef[Frame]`, so it travels in messages like any other ref.
+- **The buffer holds 256 frames.** A client that falls that far behind fails the loop with `BufferOverflowError` under `OverflowStrategy.fail`, and the route closes the socket with code 1008. `drop_head`, `drop_tail` and `drop_buffer` drop frames instead, and with `buffer_size=0` a frame is dropped unless the loop is already waiting for one.
+- **`completion_matcher` and `failure_matcher`** let an actor end the loop: a message the first matches ends it once the buffer is drained, and an exception the second returns is raised in the loop at once. Here neither matches, and the loop ends when the route cancels it.
+- **Once the loop has ended,** or the outbox is cancelled with `cancel()` or by cancelling the task that iterates it, tells to `outbox.ref` are dead letters, logged at debug on `ohra.dead_letters`. A `break` doesn't cancel it: a later `async for` takes the rest.
+- **Annotate the outbox,** as `outbox: ActorSource[Frame] = ...`: the frame type comes from the annotation, since the lambdas don't name it.
+
+`examples/fastapi_chatroom.py` is the full version: one connection actor per socket that turns room events into frames for its outbox, rooms created by a lobby, and a room that watches its connection actors to tell the others when someone leaves.
+
+> **Coming from Apache Pekko**
+>
+> - `ActorSource.actorRef` comes from Pekko's stream-typed module. ohra has no streams, so there's no `Source` and no graph: the object it returns is both the source and its materialized ref. The [appendix B](appendix-deviations.md) entry lists the rest.
 
 ---
 

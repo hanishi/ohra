@@ -69,6 +69,7 @@ uv run pyright       # strict mode, 0 errors
 - `remote/`: `remoting.py` (transport, addresses, `RemoteRef`) and `serialization.py` (`@remotable`).
 - `cluster/`: `core.py` (the membership daemon and the `Cluster` extension), its internals `gossip.py`, `reachability.py`, `vector_clock.py`, `failure_detector.py`, the split-brain resolver `sbr.py`, then `singleton.py` and `sharding/` (`shard.py`: the Shard actor and the single-node `Sharding`; `coordinator.py`; `region.py`; the `ClusterSharding` extension in `__init__.py`).
 - `management/`: Pekko Management for Kubernetes: `http.py` (stdlib HTTP/1.1 server and client), `health.py`, the `Management` extension in `__init__.py`, `cluster_http.py` (read-only routes), `bootstrap.py` (cluster bootstrap), `kubernetes.py` (API discovery).
+- `stream/`: `actor_source.py`, Pekko's stream-typed `ActorSource.actorRef`: an outbox that actors tell and a route iterates. There are no streams beyond it.
 - `ext/`: `fastapi.py`, `postgres.py` (`PostgresStore`, durable state for clusters) and `shm.py`, integrations outside the core.
 - `testkit/`: Pekko's actor-testkit-typed: `actor_testkit.py`, `probe.py` (`TestProbe`, `FishingOutcomes`), `manual_time.py` (`ManualTime`, `ExplicitlyTriggeredScheduler`), `settings.py`, and `pytest_plugin.py`, the only module that imports pytest.
 - `docs/book/`: the documentation, one chapter per layer with Mermaid diagrams; README.md is only the front page.

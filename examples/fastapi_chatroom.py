@@ -1,7 +1,8 @@
-"""The chat room over WebSockets. Each connection is an actor whose async handler writes to
-its socket; each room is an actor with one session child per user; rooms are created on
-demand by the lobby. A room watches its clients' connection actors, so when a socket closes
-and its actor stops, the room removes the session and tells the others.
+"""The chat room over WebSockets. The route owns the socket: actors tell frames to an outbox,
+an ``ActorSource``, and the route sends what comes out of it. Each connection is an actor that
+turns room events into frames; each room is an actor with one session child per user; rooms
+are created on demand by the lobby. A room watches its clients' connection actors, so when a
+socket closes and its actor stops, the room removes the session and tells the others.
 
     uv run --extra web uvicorn examples.fastapi_chatroom:app --port 8000
 
@@ -24,6 +25,7 @@ from fastapi.responses import HTMLResponse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Signal, Terminated
+from ohra.stream import ActorSource, BufferOverflowError, OverflowStrategy
 from ohra.ext.fastapi import Actors
 
 # --- room protocol (as in examples/chatroom.py, plus join/leave notices) ----------------------
@@ -154,15 +156,15 @@ class Denied:
 
 type JoinResult = Joined | Denied
 
+type Frame = dict[str, str]
 
-def connection(ws: WebSocket, reply_to: ActorRef[JoinResult]) -> Behavior[SessionEvent]:
-    """Forwards room events to the socket. The handler is async, so sending is just an await;
-    the actor stays busy during it and later events wait in the mailbox, in order."""
+
+def connection(outbox: ActorRef[Frame], reply_to: ActorRef[JoinResult]) -> Behavior[SessionEvent]:
+    """Turns room events into frames for the route's outbox. Telling never waits, so the actor
+    is free for its next message, a stop included, however slow the socket is."""
 
     @Behaviors.receive
-    async def on_message(
-        ctx: ActorContext[SessionEvent], msg: SessionEvent
-    ) -> Behavior[SessionEvent]:
+    def on_message(ctx: ActorContext[SessionEvent], msg: SessionEvent) -> Behavior[SessionEvent]:
         match msg:
             case SessionGranted(handle):
                 reply_to.tell(Joined(handle, ctx.self))
@@ -170,9 +172,9 @@ def connection(ws: WebSocket, reply_to: ActorRef[JoinResult]) -> Behavior[Sessio
                 reply_to.tell(Denied(reason))
                 return Behaviors.stopped()
             case MessagePosted(screen_name, message):
-                await ws.send_json({"type": "message", "from": screen_name, "text": message})
+                outbox.tell({"type": "message", "from": screen_name, "text": message})
             case Notice(text):
-                await ws.send_json({"type": "notice", "text": text})
+                outbox.tell({"type": "notice", "text": text})
         return Behaviors.same
 
     return on_message
@@ -185,7 +187,7 @@ def connection(ws: WebSocket, reply_to: ActorRef[JoinResult]) -> Behavior[Sessio
 class Join:
     room: str
     screen_name: str
-    ws: WebSocket
+    outbox: ActorRef[Frame]
     reply_to: ActorRef[JoinResult]
 
 
@@ -201,9 +203,9 @@ def lobby() -> Behavior[LobbyCmd]:
     @Behaviors.receive
     def on_message(ctx: ActorContext[LobbyCmd], msg: LobbyCmd) -> Behavior[LobbyCmd]:
         match msg:
-            case Join(room_name, screen_name, ws, reply_to):
+            case Join(room_name, screen_name, outbox, reply_to):
                 room: ActorRef[RoomCmd] = ctx.child(room_name) or ctx.spawn(chat_room(), room_name)
-                conn = ctx.spawn_anonymous(connection(ws, reply_to))
+                conn = ctx.spawn_anonymous(connection(outbox, reply_to))
                 room.tell(GetSession(screen_name, conn))
             case Leave(conn):
                 ctx.stop(conn)  # the room is watching it and will drop the session
@@ -224,12 +226,29 @@ async def chat(
     ws: WebSocket, room: str, screen_name: str, system: ActorSystem[LobbyCmd] = actors.depends()
 ) -> None:
     await ws.accept()
-    result: JoinResult = await system.ask(lambda r: Join(room, screen_name, ws, r), timeout=2)
+    outbox: ActorSource[Frame] = ActorSource.actor_ref(
+        completion_matcher=lambda _: False,
+        failure_matcher=lambda _: None,
+        buffer_size=256,
+        overflow_strategy=OverflowStrategy.fail,
+    )
+
+    async def send() -> None:
+        try:
+            async for frame in outbox:
+                await ws.send_json(frame)
+        except BufferOverflowError:  # a client too slow to keep up is let go
+            await ws.close(code=1008, reason="too slow")
+
+    result: JoinResult = await system.ask(
+        lambda r: Join(room, screen_name, outbox.ref, r), timeout=2
+    )
     match result:
         case Denied(reason):
             await ws.send_json({"type": "denied", "text": reason})
             await ws.close()
         case Joined(handle, conn):
+            sending = asyncio.create_task(send())
             try:
                 while True:
                     handle.tell(PostMessage(await ws.receive_text()))
@@ -237,6 +256,8 @@ async def chat(
                 pass
             finally:
                 system.tell(Leave(conn))
+                sending.cancel()
+                await asyncio.wait([sending])
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>chat</title>

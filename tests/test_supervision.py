@@ -16,6 +16,7 @@ from ohra import (
     SupervisorStrategy,
 )
 from ohra.supervision import SupervisorStrategy as S
+from ohra.testkit import ActorTestKit, TestProbe
 
 from .util import eventually
 
@@ -167,3 +168,105 @@ async def test_unsupervised_failure_stops_actor():
     system.tell(Add(-1))
     await asyncio.wait_for(system.when_terminated(), 1)
     await eventually(lambda: system.is_terminated)
+
+
+@dataclass(frozen=True)
+class StopChild:
+    after_pending: bool
+
+
+def parent_of(child: Behavior[Cmd], refs: TestProbe[ActorRef[Cmd]]) -> Behavior[StopChild]:
+    """Spawns ``child``, hands its ref to ``refs``, and stops it on ``StopChild``."""
+
+    @Behaviors.setup
+    def setup(ctx: ActorContext[StopChild]) -> Behavior[StopChild]:
+        kid = ctx.spawn(child, "kid")
+        refs.ref.tell(kid)
+
+        @Behaviors.receive_message
+        def on_message(msg: StopChild) -> Behavior[StopChild]:
+            ctx.stop(kid, after_pending=msg.after_pending)
+            return Behaviors.same
+
+        return on_message
+
+    return setup
+
+
+async def test_an_after_pending_stop_during_a_backoff_runs_the_stashed_messages_first():
+    # Pekko's RestartSupervisor stashes the stop (a PoisonPill signal) behind them
+    async with ActorTestKit() as testkit:
+        events: list[str] = []
+        refs: TestProbe[ActorRef[Cmd]] = testkit.create_test_probe()
+        totals: TestProbe[int] = testkit.create_test_probe()
+        child = Behaviors.supervise(started(events)).on_failure(
+            S.restart_with_backoff(0.05, 0.05, 0.0)
+        )
+        parent = testkit.spawn(parent_of(child, refs))
+        kid = await refs.receive_message()
+        kid.tell(Add(-1))  # fails: backing off
+        kid.tell(Add(3))  # stashed
+        kid.tell(Get(totals.ref))  # stashed
+        parent.tell(StopChild(after_pending=True))  # passivation
+        assert await totals.receive_message() == 3
+        await totals.expect_terminated(kid)
+
+
+async def test_a_stop_during_a_backoff_dead_letters_the_stashed_messages():
+    async with ActorTestKit() as testkit:
+        events: list[str] = []
+        dead = testkit.create_dead_letter_probe()
+        refs: TestProbe[ActorRef[Cmd]] = testkit.create_test_probe()
+        child = Behaviors.supervise(started(events)).on_failure(
+            S.restart_with_backoff(10, 10, 0.0)
+        )
+        parent = testkit.spawn(parent_of(child, refs))
+        kid = await refs.receive_message()
+        kid.tell(Add(-1))  # fails: backing off for 10 s
+        await eventually(lambda: events == ["setup", "pre-restart at 0"])
+        kid.tell(Add(3))
+        for _ in range(3):  # let the child stash it
+            await asyncio.sleep(0)
+        parent.tell(StopChild(after_pending=False))
+        letter = await dead.receive_message()
+        assert letter.message == Add(3)
+
+
+async def test_a_failure_out_of_restarts_during_the_replay_dead_letters_the_rest():
+    async with ActorTestKit() as testkit:
+        events: list[str] = []
+        dead = testkit.create_dead_letter_probe()
+        refs: TestProbe[ActorRef[Cmd]] = testkit.create_test_probe()
+        child = Behaviors.supervise(started(events)).on_failure(
+            S.restart_with_backoff(0.01, 0.01, 0.0).with_max_restarts(1)
+        )
+        testkit.spawn(parent_of(child, refs))
+        kid = await refs.receive_message()
+        kid.tell(Add(-1))  # fails: backing off
+        kid.tell(Add(-2))  # replayed first after the restart, and fails out of restarts
+        kid.tell(Add(3))
+        await refs.expect_terminated(kid)
+        assert (await dead.receive_message()).message == Add(3)
+
+
+async def test_a_restart_failing_with_an_unsupervised_error_dead_letters_the_stash():
+    starts: list[int] = []
+
+    def setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+        starts.append(len(starts))
+        if len(starts) == 2:
+            raise OSError("down at the restart")
+        return fragile([])
+
+    async with ActorTestKit() as testkit:
+        dead = testkit.create_dead_letter_probe()
+        refs: TestProbe[ActorRef[Cmd]] = testkit.create_test_probe()
+        child = Behaviors.supervise(Behaviors.setup(setup)).on_failure(
+            S.restart_with_backoff(0.01, 0.01, 0.0), ValueError
+        )
+        testkit.spawn(parent_of(child, refs))
+        kid = await refs.receive_message()
+        kid.tell(Add(-1))  # fails: backing off
+        kid.tell(Add(3))
+        await refs.expect_terminated(kid)
+        assert (await dead.receive_message()).message == Add(3)

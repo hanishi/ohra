@@ -872,6 +872,40 @@ async def test_passivating_an_entity_mid_write_loses_no_forwarded_message():
     assert store.states["c"] == (3, 2)
 
 
+class GatedFailingStore(GatedStore):
+    """save waits for the gate, then fails while ``fail`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = True
+
+    async def save(self, persistence_id: str, state: int, revision: int) -> None:
+        if self.fail:
+            self.events.append("saving")
+            await self.gate.wait()
+            self.fail = False
+            raise OSError("db down")
+        await super().save(persistence_id, state, revision)
+
+
+async def test_an_after_pending_stop_survives_a_failed_write_under_backoff():
+    store, log, events = GatedFailingStore(), [], []
+    supervised = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(
+        SupervisorStrategy.restart_with_backoff(0.01, 0.01, 0)
+    )
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        parent = testkit.spawn(stopper(supervised, events))
+        parent.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        parent.tell(Add(2, probe.ref))  # stashed behind the write
+        parent.tell(StopChild())  # reaches the write in flight
+        store.gate.set()  # the write fails: a backoff restart replays Add(2), then the stop
+        assert await probe.receive_message() == 2
+        await eventually(lambda: events == ["terminated"])
+    assert store.states["c"] == (2, 1)
+
+
 # --- failures and supervision while recovering or persisting ------------------------------------
 
 

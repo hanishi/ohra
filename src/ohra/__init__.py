@@ -96,6 +96,7 @@ from .remote.serialization import Serialization, SerializationError, remotable
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
 from .scheduler import Cancellable, Scheduler
+from .stream import ActorSource, BufferOverflowError, OverflowStrategy
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
 from .system import ActorSystem
@@ -103,6 +104,7 @@ from .system import ActorSystem
 __all__ = [
     "ActorContext",
     "ActorRef",
+    "ActorSource",
     "ActorSystem",
     "ActorSystemTerminateReason",
     "AllDeadLetters",
@@ -110,6 +112,7 @@ __all__ = [
     "AskTimeoutError",
     "Behavior",
     "Behaviors",
+    "BufferOverflowError",
     "Cancellable",
     "ChildFailed",
     "Cluster",
@@ -168,6 +171,7 @@ __all__ = [
     "MemberRemoved",
     "MemberUp",
     "MemberWeaklyUp",
+    "OverflowStrategy",
     "Passivate",
     "Management",
     "ManagementSettings",

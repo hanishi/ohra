@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 
 import pytest
@@ -230,6 +231,71 @@ async def test_pipe_to_self_is_cancelled_when_actor_stops():
     await started.wait()
     system.terminate()
     await system.when_terminated()  # the autouse fixture checks the pipe task is gone
+
+
+async def test_pipe_to_self_closes_work_the_actor_stopped_before_it_started():
+    async def work() -> str:
+        return "never"
+
+    coro = work()
+
+    def guardian(ctx: ActorContext[str]) -> Behavior[str]:
+        ctx.pipe_to_self(coro, lambda r: "done")
+        return Behaviors.stopped()
+
+    async with ActorSystem(Behaviors.setup(guardian), "t") as system:
+        await system.when_terminated()
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+
+
+@dataclass(frozen=True)
+class Asked:
+    reply_to: ActorRef[str]
+
+
+async def test_ctx_ask_sends_its_request_before_a_later_tell():
+    # Pekko's ctx.ask sends the request before it returns; only the reply is piped back
+    seen: list[str] = []
+    done = asyncio.Event()
+
+    @Behaviors.receive_message
+    def target(msg: Asked | str) -> Behavior[Asked | str]:
+        match msg:
+            case Asked(reply_to):
+                seen.append("asked")
+                reply_to.tell("ok")
+            case _:
+                seen.append(msg)
+                done.set()
+        return Behaviors.same
+
+    def guardian(ctx: ActorContext[str]) -> Behavior[str]:
+        t = ctx.spawn(target, "target")
+        ctx.ask(t, Asked, lambda r: "answered", timeout=1)
+        t.tell("told after")
+        return Behaviors.ignore
+
+    async with ActorSystem(Behaviors.setup(guardian), "t"):
+        await done.wait()
+    assert seen == ["asked", "told after"]
+
+
+async def test_ctx_ask_fails_the_handler_when_the_request_cannot_be_made():
+    failures: list[BaseException] = []
+
+    def bad_request(_reply_to: ActorRef[str]) -> Asked:
+        raise ValueError("bad request")
+
+    def guardian(ctx: ActorContext[str]) -> Behavior[str]:
+        try:
+            ctx.ask(ctx.self, bad_request, lambda r: "answered", timeout=1)
+        except ValueError as e:
+            failures.append(e)
+        return Behaviors.stopped()
+
+    async with ActorSystem(Behaviors.setup(guardian), "t") as system:
+        await system.when_terminated()
+    assert [str(e) for e in failures] == ["bad request"]
 
 
 @dataclass(frozen=True)

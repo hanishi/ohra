@@ -187,7 +187,7 @@ These are all of them:
 
 ### Ask and reply
 
-A request carries its own `reply_to`. From outside the system, `ask` returns the reply or raises `AskTimeoutError`. From inside an actor, `ctx.ask` delivers the reply to the asking actor as a message, wrapped in `Success` or `Failure`.
+A request carries its own `reply_to`. From outside the system, `ask` returns the reply or raises `AskTimeoutError`. From inside an actor, `ctx.ask` sends the request and starts the timeout before it returns, as in Apache Pekko, so the request is ahead of anything the actor sends the target after it, and a request that can't be made or sent raises in the handler. The reply comes back to the asking actor as a message, wrapped in `Success` or `Failure`.
 
 ```python
 from ohra import ActorContext, Failure, Success, Try

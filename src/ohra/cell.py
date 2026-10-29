@@ -386,9 +386,17 @@ class ActorCell[T]:
                 result = Failure(e)
             self.send_adapted(lambda: adapt(result))
 
+        def settle(task: asyncio.Task[None]) -> None:
+            self._tasks.discard(task)
+            if task.cancelled():  # perhaps before run() reached its await: end the work too
+                if inspect.iscoroutine(awaitable):
+                    awaitable.close()
+                elif isinstance(awaitable, asyncio.Future):
+                    awaitable.cancel()
+
         task = asyncio.get_running_loop().create_task(run(), name=f"{self.path}/$pipe")
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(settle)
 
     # --- message loop ----------------------------------------------------------------
 

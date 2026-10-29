@@ -167,6 +167,25 @@ async def test_ask_times_out_only_when_time_passes():
             await task
 
 
+async def test_ctx_ask_times_out_after_its_timeout_from_the_call():
+    @dataclass(frozen=True)
+    class Ping:
+        reply_to: ActorRef[int]
+
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual_time = ManualTime(testkit.system)
+        probe: TestProbe[str] = testkit.create_test_probe()
+        silent = testkit.spawn(Behaviors.ignore)
+
+        def asker(ctx: ActorContext[str]) -> Behavior[str]:
+            ctx.ask(silent, Ping, lambda r: type(r).__name__, timeout=5)
+            return Behaviors.receive_message(lambda m: (probe.ref.tell(m), Behaviors.same)[1])
+
+        testkit.spawn(Behaviors.setup(asker))
+        await manual_time.time_passes(5)
+        await probe.expect_message("Failure", max=0.5)
+
+
 async def test_backoff_restart_under_manual_time():
     def failing(probe: ActorRef[str]) -> Behavior[str]:
         def setup(_ctx: ActorContext[str]) -> Behavior[str]:

@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, overload
 
 from .mailbox import MailboxSelector
-from .patterns import Replyable, ask
+from .patterns import Replyable, start_ask
 from .ref import ActorRef, FunctionRef
 from .result import Try
 
@@ -154,13 +154,15 @@ class ActorContext[T]:
             raise TypeError("ctx.ask needs a timeout")
         if adapt is not None:
             self.pipe_to_self(
-                ask(target, make, timeout, scheduler=self._cell.system.scheduler), adapt
+                start_ask(target, make, timeout, scheduler=self._cell.system.scheduler), adapt
             )
             return None
 
         def start(f: Callable[[Try[Res]], T]) -> Callable[[Try[Res]], T]:
             # the ask starts only when applied
-            self.pipe_to_self(ask(target, make, timeout, scheduler=self._cell.system.scheduler), f)
+            self.pipe_to_self(
+                start_ask(target, make, timeout, scheduler=self._cell.system.scheduler), f
+            )
             return f
 
         return start

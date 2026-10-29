@@ -906,6 +906,64 @@ async def test_an_after_pending_stop_survives_a_failed_write_under_backoff():
     assert store.states["c"] == (2, 1)
 
 
+@dataclass(frozen=True)
+class WatchPeer:
+    peer: ActorRef[object]
+
+
+def watching_counter(
+    store: Store[int], gone: TestProbe[ActorRef[object]]
+) -> Behavior[Cmd | WatchPeer]:
+    """A counter at "c" that watches a peer on ``WatchPeer`` and tells ``gone`` when one
+    terminates."""
+
+    def setup(ctx: ActorContext[Cmd | WatchPeer]) -> Behavior[Cmd | WatchPeer]:
+        @Behaviors.persisted(store)
+        def counting(total: int) -> Behavior[Cmd | WatchPeer]:
+            def on_message(msg: Cmd | WatchPeer) -> Behavior[Cmd | WatchPeer]:
+                match msg:
+                    case WatchPeer(peer):
+                        ctx.watch(peer)
+                    case Add(n, reply_to):
+                        nb = counting(total + n)
+                        return nb if reply_to is None else nb.then_reply(reply_to, total + n)
+                    case _:
+                        pass
+                return Behaviors.same
+
+            def on_signal(
+                _ctx: ActorContext[Cmd | WatchPeer], sig: Signal
+            ) -> Behavior[Cmd | WatchPeer]:
+                if isinstance(sig, Terminated):
+                    gone.ref.tell(sig.ref)
+                return Behaviors.same
+
+            return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+        return counting.recover("c", empty=0)
+
+    return Behaviors.setup(setup)
+
+
+async def test_a_terminated_held_during_a_failed_write_under_backoff_survives_the_restart():
+    store = GatedFailingStore()
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        gone: TestProbe[ActorRef[object]] = testkit.create_test_probe()
+        peer = testkit.spawn(Behaviors.ignore)
+        ref = testkit.spawn(
+            Behaviors.supervise(watching_counter(store, gone)).on_failure(
+                SupervisorStrategy.restart_with_backoff(0.01, 0.01, 0)
+            )
+        )
+        ref.tell(WatchPeer(peer))
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        await testkit.stop(peer)  # its Terminated is held behind the write
+        store.gate.set()  # the write fails: a backoff restart
+        assert await gone.receive_message() == peer
+
+
 # --- failures and supervision while recovering or persisting ------------------------------------
 
 

@@ -14,9 +14,10 @@ from ohra import (
     PreRestart,
     Signal,
     SupervisorStrategy,
+    Terminated,
 )
 from ohra.supervision import SupervisorStrategy as S
-from ohra.testkit import ActorTestKit, TestProbe
+from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 
 from .util import eventually
 
@@ -270,3 +271,89 @@ async def test_a_restart_failing_with_an_unsupervised_error_dead_letters_the_sta
         kid.tell(Add(3))
         await refs.expect_terminated(kid)
         assert (await dead.receive_message()).message == Add(3)
+
+
+@dataclass(frozen=True)
+class WatchPeer:
+    peer: ActorRef[object]
+
+
+def watcher(events: list[str], gone: TestProbe[ActorRef[object]]) -> Behavior[Cmd | WatchPeer]:
+    """Counts like ``started``, watches a peer on ``WatchPeer``, and tells ``gone`` when one
+    terminates."""
+
+    def setup(ctx: ActorContext[Cmd | WatchPeer]) -> Behavior[Cmd | WatchPeer]:
+        events.append("setup")
+        return counting(ctx, 0)
+
+    def counting(ctx: ActorContext[Cmd | WatchPeer], total: int) -> Behavior[Cmd | WatchPeer]:
+        def on_message(msg: Cmd | WatchPeer) -> Behavior[Cmd | WatchPeer]:
+            match msg:
+                case WatchPeer(peer):
+                    ctx.watch(peer)
+                case Add(n) if n < 0:
+                    raise ValueError(n)
+                case Add(n):
+                    return counting(ctx, total + n)
+                case Get(reply_to):
+                    reply_to.tell(total)
+            return Behaviors.same
+
+        def on_signal(
+            _ctx: ActorContext[Cmd | WatchPeer], sig: Signal
+        ) -> Behavior[Cmd | WatchPeer]:
+            if sig is PreRestart:
+                events.append("pre-restart")
+            elif isinstance(sig, Terminated):
+                gone.ref.tell(sig.ref)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+    return Behaviors.setup(setup)
+
+
+async def test_a_terminated_during_a_backoff_is_delivered_after_the_restart():
+    # Pekko's RestartSupervisor stashes signals with the messages while it restarts
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual = ManualTime(testkit.system)
+        events: list[str] = []
+        gone: TestProbe[ActorRef[object]] = testkit.create_test_probe()
+        totals: TestProbe[int] = testkit.create_test_probe()
+        peer = testkit.spawn(Behaviors.ignore)
+        ref = testkit.spawn(
+            Behaviors.supervise(watcher(events, gone)).on_failure(
+                S.restart_with_backoff(1, 1, 0.0)
+            )
+        )
+        ref.tell(WatchPeer(peer))
+        ref.tell(Add(-1))  # fails: backing off
+        ref.tell(Add(3))
+        await eventually(lambda: events == ["setup", "pre-restart"])
+        await testkit.stop(peer)  # its Terminated arrives while backing off
+        ref.tell(Get(totals.ref))
+        await gone.expect_no_message(0.05)
+        await manual.time_passes(1)  # the restart
+        assert await gone.receive_message() == peer
+        assert await totals.receive_message() == 3
+
+
+async def test_a_stop_during_a_backoff_dead_letters_the_messages_but_not_a_terminated():
+    async with ActorTestKit(manual_time=True) as testkit:
+        events: list[str] = []
+        dead = testkit.create_dead_letter_probe()
+        gone: TestProbe[ActorRef[object]] = testkit.create_test_probe()
+        peer = testkit.spawn(Behaviors.ignore)
+        ref = testkit.spawn(
+            Behaviors.supervise(watcher(events, gone)).on_failure(
+                S.restart_with_backoff(1, 1, 0.0)
+            )
+        )
+        ref.tell(WatchPeer(peer))
+        ref.tell(Add(-1))  # fails: backing off
+        ref.tell(Add(3))
+        await eventually(lambda: events == ["setup", "pre-restart"])
+        await testkit.stop(peer)  # its Terminated is stashed behind Add(3)
+        await testkit.stop(ref)
+        assert (await dead.receive_message()).message == Add(3)
+        await dead.expect_no_message(0.05)

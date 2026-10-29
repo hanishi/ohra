@@ -193,8 +193,25 @@ async def test_proxies_on_the_host_and_elsewhere_follow_the_hand_over():
         await eventually(lambda: all(all_up(n, 3) for n in (a, b, c)), timeout=5)
         log: Log = []
         proxies = [start(n, log, p) for n, p in zip((a, b, c), (p1, p2, p3), strict=True)]
-        assert await ask(proxies[0], Hit, timeout=3) == 1  # the proxy on the host itself
-        assert await ask(proxies[1], Hit, timeout=3) == 2  # the same instance from elsewhere
+        hits_over_the_wire: list[Json] = []
+        remoting = a.remoting
+        assert remoting is not None
+        deliver = remoting._handle  # pyright: ignore[reportPrivateUsage]
+
+        def counting_hits(frame: Json) -> None:
+            message = frame.get("message") if isinstance(frame, dict) else None
+            if isinstance(message, dict) and message.get("$type") == "Hit":
+                hits_over_the_wire.append(frame)
+            deliver(frame)
+
+        remoting._handle = counting_hits  # pyright: ignore[reportPrivateUsage]
+        try:
+            assert await ask(proxies[0], Hit, timeout=3) == 1  # the proxy on the host itself
+            assert hits_over_the_wire == []  # delivered locally
+            assert await ask(proxies[1], Hit, timeout=3) == 2  # the same instance from elsewhere
+            assert len(hits_over_the_wire) == 1
+        finally:
+            remoting._handle = deliver  # pyright: ignore[reportPrivateUsage]
         successor = ports_by_age(c)[1]
         host = (p1, p2, p3).index(successor)
         Cluster(c).manager.tell(Leave(Address("c", "127.0.0.1", p1)))

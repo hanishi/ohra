@@ -401,7 +401,8 @@ class _Manager:
 
     def deliver_change(self) -> None:
         """OldestChangedBuffer's GetNext: one change at a time, only when the manager has asked."""
-        if self.waiting_for_change and self.tracker is not None:
+        # as Pekko's sendFirstChange: a node shutting itself down waits for SelfExiting
+        if self.waiting_for_change and self.tracker is not None and not self.cluster.is_terminated:
             change = self.tracker.next_change()
             if change is not None:
                 self.waiting_for_change = False

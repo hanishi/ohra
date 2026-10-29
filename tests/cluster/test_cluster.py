@@ -497,7 +497,7 @@ async def test_a_stopped_local_subscriber_is_forgotten(caplog: pytest.LogCapture
         Cluster(a).subscriptions.tell(Subscribe(subscriber, ClusterDomainEvent))
         subscriber.tell("stop")
         await eventually(
-            lambda: a.resolve(subscriber.path) is None if False else _gone(a, subscriber.path),
+            lambda: _gone(a, subscriber.path),
             timeout=2,
         )
         with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):

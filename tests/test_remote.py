@@ -281,6 +281,10 @@ async def test_peer_restart_is_detected(caplog: pytest.LogCaptureFixture):
             path = a.path
             b.resolve(path).tell(Greet("one", b.ignore_ref))
             await eventually(lambda: log1 == ["one"])
+        remoting = b.remoting
+        assert remoting is not None
+        # b has seen the old connection close, so "two" cannot go out on it
+        await eventually(lambda: not remoting._associations)  # pyright: ignore[reportPrivateUsage]
         async with node(greeter(log2), "a", port_a):  # the same address, a new uid
             await eventually(lambda: _port_open(port_a))
             b.resolve(path).tell(Greet("two", b.ignore_ref))

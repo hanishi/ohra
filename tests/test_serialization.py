@@ -82,6 +82,13 @@ def test_unregistered_dataclass_raises():
         Serialization.decode({"$type": "Unregistered", "x": 1}, lambda _p: _never())
 
 
+def test_a_dict_with_a_reserved_key_raises_at_the_sender():
+    # decode reads them as a ref, a dataclass, or (as a pair) an entity ref: refuse them all
+    for key in ("$ref", "$type", "$entity", "$region"):
+        with pytest.raises(SerializationError, match="reserved"):
+            Serialization.encode({key: "x"}, lambda r: r.path)
+
+
 def test_manifest_collision_raises_unless_same_class():
     Serialization.register(A)  # same class again: fine
 

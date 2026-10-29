@@ -116,6 +116,8 @@ def event_stream(
                             ctx.system.dead_letter(event, ref)
                 return Behaviors.same
             case EventStream.Subscribe(topic, ref):
+                if topic in subscribers.get(ref, ()):  # as Pekko's subscribe: already there
+                    return Behaviors.same
                 watched = _watched(ref)
                 if ref not in subscribers and watched is not None:
                     ctx.watch(watched)

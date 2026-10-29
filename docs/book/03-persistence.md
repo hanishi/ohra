@@ -75,14 +75,14 @@ Persistence stores the latest state, like Pekko's `DurableStateBehavior`, and ha
 
 ### The state is written before anyone hears about it
 
-**Recovery is one read.** `recover(id, empty)` is a `setup` that loads the stored state and revision, or starts from `empty` at revision 0, records the incarnation for this actor's task, and calls the factory once. There is no replay, so recovery time does not grow with history.
+**Recovery is one read.** `recover(id, empty)` is a `setup` that asks the store for the stored state and revision, or starts from `empty` at revision 0. When the answer arrives it records the incarnation for this actor's task and calls the factory once. There is no replay, so recovery time does not grow with history.
 
-**A write is a setup too.** Calling `cart(updated)` inside a handler does not build a behavior directly. It returns a `Persist` value, which is a `Setup`. The runtime starts any returned setup before it takes the next message, so the write happens inside the same turn:
+**A write is a setup too.** Calling `cart(updated)` inside a handler does not build a behavior directly. It returns a `Persist` value, which is a `Setup`. The runtime starts it before it takes the next message:
 
-1. Save the state with the next revision, awaiting the store.
-2. Build the next behavior from the saved state.
+1. Hand the save, with the next revision, to the store, and wait for the answer as a message.
+2. When the store answers, build the next behavior from the saved state.
 3. Run the deferred effects, `then_reply` and `then_run`, in order.
-4. Install the behavior, then take the next message.
+4. Install the behavior, then handle the commands that arrived meanwhile, in order.
 
 ```mermaid
 sequenceDiagram
@@ -92,11 +92,37 @@ sequenceDiagram
   Caller->>Cart: AddItem(book, reply_to)
   Note over Cart: handler returns cart(updated)
   Cart->>Store: save(items, revision n + 1)
+  Caller->>Cart: ViewCart(reply_to)
+  Note over Cart: stashed until the store answers
   Store-->>Cart: committed
   Note over Cart: build next behavior, run then_reply
   Cart-->>Caller: reply(updated items)
-  Note over Cart: install it, then take the next message
+  Note over Cart: install it, then handle ViewCart
+  Cart-->>Caller: reply(updated items)
 ```
+
+### While it waits on the store
+
+A persisted actor never waits on its store inside a handler. It hands the call to the store, as Apache Pekko's `DurableStateBehavior` does, and goes into a state of its own until the answer arrives as a message: recovering while it loads, persisting while it writes.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Recovering
+  Recovering --> Running: state loaded
+  Recovering --> Failed: load failed or timed out
+  Running --> Persisting: a handler returns factory(state)
+  Persisting --> Running: written, effects run, stashed commands handled
+  Persisting --> Failed: write failed
+  Failed --> [*]
+```
+
+- **Commands wait in order.** A command that arrives while the actor recovers or writes goes into an internal stash, separate from any `Behaviors.with_stash` of your own, and is handled once the store has answered, in the order it came. It sees the new state. A command that writes again sends the actor back to persisting, and the rest wait there.
+- **The stash is bounded.** It holds 4096 commands by default, `Behaviors.persisted(store, stash_capacity=...)` to change it. A command that doesn't fit is dropped and published as `Dropped(msg, "Stash is full in [DurableState]", ref)` on the event stream.
+- **A stalled recovery fails.** `recover(id, empty, recovery_timeout=30.0)`: a load that hasn't answered by then fails the actor with `RecoveryTimedOutError`, so a store that never answers can't leave the actor waiting forever.
+- **The actor stays stoppable.** `ctx.stop(ref)` stops it at once, even in the middle of a write. The write may still commit, but no effect runs, so the caller gets no reply. Its `PostStop` handler is the one of the behavior before the write.
+- **An `after_pending` stop finishes first.** `ctx.stop(ref, after_pending=True)`, which is how sharding passivates an entity, lets the write, its reply and the stashed commands finish, then stops. Commands sent after the stop are unhandled. So a passivation never loses a message the shard had already forwarded.
+- **Signals wait too.** A `Terminated` or `ChildFailed` that arrives during a write is handled after it, by the new behavior.
+- **Supervision.** A recovery that fails, by a load error or a timeout, is a failing start: a plain `restart` escalates it, as it would a failing `setup`, so supervise `recover(...)` with `restart_with_backoff` to retry a store that is down, as Pekko recommends. A failed write under `restart` reloads the committed state, and the commands and signals that came during the write go to the new incarnation. Under `resume` the actor carries on with the behavior it had before the write, and gets them there.
 
 A failed write raises before step 2. The actor fails with its old behavior and no reply has left, so the caller never hears of a state that was not stored. A supervisor that restarts it runs `recover` again and reloads what was committed.
 
@@ -163,7 +189,7 @@ Apache Pekko offers two persistence styles. `EventSourcedBehavior` stores the ev
 
 - **State stays where every other behavior keeps it.** In ohra, state is the parameter of a behavior factory, `counter(total)`, and a handler returns the next behavior. Persistence keeps that: `Behaviors.persisted(store)` wraps the factory, and a handler that returns `counter(total + by)` has, by construction, named the next state. There is no command handler, no event handler and no `Effect` type. A read returns `Behaviors.same` and writes nothing.
 - **Recovery is one read, always.** `factory.recover(id, empty)` loads the stored state and calls the factory once. There is no replay, so recovery time does not grow with the number of commands handled, and there are no snapshots to tune or event schemas to keep decodable as the code evolves. What is given up is history: there are no events to project into other read models or to audit. If an entity's history is the product, as in a ledger, event sourcing is the right tool and this is not it.
-- **Write, then install, then effects.** The returned behavior is a `setup` whose async factory writes the state, builds the next behavior, runs the deferred `then_reply` and `then_run` effects, and installs. A failed write raises before anything is installed or replied, so the actor fails with its old behavior and supervision decides; a `restart` around `recover` reloads the committed state. A failing effect after the commit is logged and does not roll memory back behind the store. Pekko reaches the same ordering through its stash-while-persisting machinery; here the runtime's existing rule, that a returned `setup` runs before the next message, is enough, and `cell.py` has no persistence code.
+- **Write, then install, then effects.** The returned behavior is a `setup` that hands the save to the store and waits for the answer in a persisting state, stashing commands, as Pekko's `PersistingState` does. On the answer it builds the next behavior, runs the deferred `then_reply` and `then_run` effects, installs it and handles the stash. A failed write raises before anything is installed or replied, so the actor fails with its old behavior and supervision decides; a `restart` around `recover` reloads the committed state. A failing effect after the commit is logged and does not roll memory back behind the store. The runtime knows only one thing about persistence: a recovering or persisting actor gets its `PostStop` on the behavior before the write, and an `after_pending` stop waits for the write.
 - **Every write carries a revision.** The store rejects a write that is not exactly one past what it holds, so two incarnations of one id, for example in two processes, cannot overwrite each other silently; the second writer's actor fails. Pekko's durable state has the same optimistic check and surfaces it the same way, as a failure of the actor.
 - **The incarnation is implicit.** Pekko threads the persistence id through the behavior. Here `recover` records the id, store and revision for the actor's asyncio task, and every state the actor later returns finds it there. The record is bound to the task that recovered it, so a child actor cannot inherit its parent's incarnation, and bound to the factory, so a state from a different persisted factory fails the actor instead of writing into the wrong store.
 

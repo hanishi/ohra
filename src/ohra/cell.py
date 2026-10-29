@@ -16,17 +16,20 @@ import logging
 import random
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from .behavior import (
     SAME,
     UNHANDLED,
+    POISON_PILL,
     Behavior,
+    Holding,
     MaybeAwaitable,
     Receive,
     Setup,
     Stopped,
+    StoreAnswer,
     Supervised,
     Unstash,
     WithTimers,
@@ -174,6 +177,13 @@ async def _call[X](fn: Callable[..., MaybeAwaitable[X]], *args: Any) -> X:
     if inspect.isawaitable(r):
         return await cast(Awaitable[X], r)
     return r
+
+
+def _held_by(b: Behavior[Any] | None) -> Holding[Any] | None:
+    """The Holding under any supervisors, if the behavior is waiting on a store."""
+    while isinstance(b, _Supervisor):
+        b = b.inner
+    return b if isinstance(b, Holding) else None
 
 
 _STOPPED: Behavior[Any] = Stopped()
@@ -392,7 +402,10 @@ class ActorCell[T]:
                             continue
                     if msg is _POISON:
                         self._poisoned = False
-                        self._set(_STOPPED)
+                        if self._holding():  # a store call is in flight: let it finish first
+                            self._set(await self._deliver(self._behavior, POISON_PILL))
+                        else:
+                            self._set(_STOPPED)
                         continue
                     self._set(await self._deliver(self._behavior, msg))
                 else:
@@ -451,7 +464,7 @@ class ActorCell[T]:
             elif isinstance(b, PoolRouter):
                 b = b.start(self.ctx)
             elif isinstance(b, Unstash):
-                b = await self._replay(await self._start(b.behavior), b.messages)
+                b = await self._unstash(await self._start(b.behavior), b)
             elif isinstance(b, Supervised):
                 return await self._start_supervised(b)
             elif b is SAME or b is UNHANDLED:
@@ -474,8 +487,27 @@ class ActorCell[T]:
         if nb is SAME or nb is UNHANDLED:
             return current
         if isinstance(nb, Unstash):
-            return await self._replay(await self._canonicalize(nb.behavior, current), nb.messages)
-        return await self._start(nb)
+            return await self._unstash(await self._canonicalize(nb.behavior, current), nb)
+        started = await self._start(nb)
+        if isinstance(started, Holding) and started.visible is None:
+            return replace(started, visible=current)
+        return started
+
+    async def _unstash(self, b: Behavior[T], u: Unstash[T]) -> Behavior[T]:
+        if u.held is not None:
+            u.held.answered = b  # what a resume during the replay below goes back to
+        for sig in u.signals:
+            if isinstance(b, Stopped):
+                break
+            b = await self._signal(b, sig)
+        b = await self._replay(b, u.messages)
+        if u.stop_after and not isinstance(b, Stopped):
+            self._poisoned = True
+            self._user.appendleft(_POISON)
+        return b
+
+    def _holding(self) -> bool:
+        return _held_by(self._behavior) is not None
 
     async def _replay(self, b: Behavior[T], msgs: deque[Any]) -> Behavior[T]:
         """Deliver the messages queued now, in order. Messages added meanwhile stay queued.
@@ -494,6 +526,8 @@ class ActorCell[T]:
             return await self._supervise(b, msg, is_signal=False)
         if isinstance(b, Receive):
             r = b
+            if isinstance(msg, StoreAnswer) and not isinstance(r, Holding):
+                return r  # a store answer for an earlier incarnation, which a restart replaced
             nb = await _call(r.on_message, self.ctx, msg)
             if nb is UNHANDLED:
                 self.system.unhandled(msg, self.ref)
@@ -506,6 +540,10 @@ class ActorCell[T]:
         if isinstance(b, Receive):
             r = b
             if isinstance(sig, _BackoffRestart):
+                return r
+            if isinstance(r, Holding) and (sig is PostStop or sig is PreRestart):
+                if r.visible is not None:
+                    await self._signal(r.visible, sig)
                 return r
             nb = UNHANDLED if r.on_signal is None else await _call(r.on_signal, self.ctx, sig)
             if nb is UNHANDLED and isinstance(sig, Terminated):
@@ -532,7 +570,9 @@ class ActorCell[T]:
         except sup.template.exc_type as e:
             if item is PostStop or item is PreRestart:
                 raise
-            return await self._on_failure(sup, e)
+            # a failing recovery is a failing start, as when recover's load ran in a setup
+            starting = isinstance(sup.inner, Holding) and sup.inner.held.recovery_failed
+            return await self._on_failure(sup, e, during_start=starting)
         if isinstance(nb, Stopped):
             return nb
         sup.inner = nb
@@ -547,6 +587,18 @@ class ActorCell[T]:
             case Resume():
                 if during_start:
                     raise e
+                held = sup.inner
+                if isinstance(held, Holding):
+                    # carry on with the behavior built once the store answered, or, if the store
+                    # call itself failed, the one from before it; it gets what came meanwhile
+                    h = held.held
+                    resumed = h.answered if h.answered is not None else held.visible
+                    if resumed is None:
+                        raise e
+                    back = Unstash(h.stash, resumed, tuple(h.signals), h.poisoned)
+                    self.log.warning("resuming after %r", e)
+                    sup.inner = await self._unstash(resumed, back)
+                    return sup
                 self.log.warning("resuming after %r", e)
                 return sup
             case Stop():
@@ -561,10 +613,16 @@ class ActorCell[T]:
                     raise e
                 sup.restarts.append(now)
                 self.log.warning("restarting after %r", e)
+                held = sup.inner
                 await self._pre_restart(sup)
                 if stop_children:
                     await self._stop_children()
                 inner = await self._start(sup.template.initial)
+                if isinstance(held, Holding) and not isinstance(inner, Stopped):
+                    # what came during the failed store call goes to the new incarnation
+                    h = held.held
+                    carried = Unstash(h.stash, inner, tuple(h.signals), h.poisoned)
+                    inner = await self._unstash(inner, carried)
                 if isinstance(inner, Stopped):
                     return inner
                 sup.inner = inner
@@ -578,11 +636,14 @@ class ActorCell[T]:
                 if 0 <= strategy.max_restarts <= sup.attempt:
                     raise e
                 sup.last_failure = now
+                held = sup.inner
                 await self._pre_restart(sup)
                 await self._stop_children()
                 sup.inner = None
                 if sup.stash is None:
                     sup.stash = deque()
+                if isinstance(held, Holding):  # what came during the failed store call
+                    sup.stash.extendleft(reversed(held.held.stash))
                 delay = strategy.delay(sup.attempt, random.random())
                 sup.attempt += 1
                 self.log.warning("restarting in %.3fs after %r", delay, e)
@@ -657,6 +718,9 @@ class ActorCell[T]:
             if isinstance(m, _Watch):
                 self.watched_by.add(m.watcher)
         self._sys = None
+        holding = _held_by(self._last_live)
+        for m in holding.held.stash if holding is not None else ():
+            self.system.dead_letter(m, self.ref)  # commands stashed during a store call
         for m in self._user:
             if m is not _POISON:
                 self.system.dead_letter(m, self.ref)

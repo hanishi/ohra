@@ -292,6 +292,100 @@ async def test_persisted_entity_survives_passivation():
     assert log == ["become 0", "become 3", "become 3"]
 
 
+# --- recovering and persisting states, as Apache Pekko's DurableStateBehavior ----------------
+
+from ohra import Dropped, PostStop, RecoveryTimedOutError, StashBuffer  # noqa: E402
+from ohra.testkit import ActorTestKit, ManualTime, TestProbe  # noqa: E402
+
+
+class GatedLoadStore(GatedStore):
+    """A GatedStore whose load also waits, on its own gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_gate = asyncio.Event()
+
+    async def load(self, persistence_id: str) -> tuple[int, int] | None:
+        await self.load_gate.wait()
+        return await super().load(persistence_id)
+
+
+def failures(child_behavior: Behavior[Cmd], seen: list[BaseException]) -> Behavior[Cmd]:
+    """Spawns the child, forwards to it, and records the cause it failed with."""
+
+    def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+        child = ctx.spawn(child_behavior, "child")
+        ctx.watch(child)
+
+        def on_message(msg: Cmd) -> Behavior[Cmd]:
+            child.tell(msg)
+            return Behaviors.same
+
+        def on_signal(_ctx: ActorContext[Cmd], sig: Signal) -> Behavior[Cmd]:
+            if isinstance(sig, ChildFailed):
+                seen.append(sig.cause)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+    return Behaviors.setup(setup)
+
+
+async def test_commands_during_recovery_run_after_it_in_order():
+    store, log = GatedLoadStore(), []
+    store.states["c"] = (5, 1)
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(counter(store, log).recover("c", empty=0))
+        ref.tell(Add(1, probe.ref))
+        ref.tell(Add(2, probe.ref))
+        store.gate.set()
+        store.load_gate.set()
+        assert await probe.receive_messages(2) == [6, 8]
+
+
+async def test_a_stalled_load_fails_the_actor_with_recovery_timed_out():
+    store, log = GatedLoadStore(), []
+    seen: list[BaseException] = []
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual = ManualTime(testkit.system)
+        testkit.spawn(
+            failures(counter(store, log).recover("c", empty=0, recovery_timeout=5), seen)
+        )
+        await manual.time_passes(5)
+        await eventually(lambda: bool(seen))
+    assert isinstance(seen[0], RecoveryTimedOutError)
+    assert str(seen[0]) == "Recovery timed out, didn't get state within 5s"
+
+
+async def test_a_full_recovery_stash_drops_with_a_reason():
+    store, log = GatedLoadStore(), []
+
+    @Behaviors.persisted(store, stash_capacity=2)
+    def small(total: int) -> Behavior[Cmd]:
+        return Behaviors.receive_message(lambda _msg: Behaviors.same)
+
+    async with ActorTestKit() as testkit:
+        dropped = testkit.create_dropped_message_probe()
+        ref = testkit.spawn(small.recover("c", empty=0))
+        third = Add(3)
+        for msg in (Add(1), Add(2), third):
+            ref.tell(msg)
+        assert await dropped.receive_message() == Dropped(
+            third, "Stash is full in [DurableState]", ref
+        )
+        store.load_gate.set()
+
+
+async def test_a_stop_during_recovery_stops_at_once():
+    store, log = GatedLoadStore(), []
+    async with ActorTestKit() as testkit:
+        ref = testkit.spawn(counter(store, log).recover("c", empty=0))
+        await asyncio.sleep(0)
+        await testkit.stop(ref, max=1)  # raises if the actor is still waiting on its load
+    assert log == []
+
+
 # --- Task 3: SqliteStore -------------------------------------------------------------------------
 
 import contextlib  # noqa: E402
@@ -518,3 +612,459 @@ def test_sqlite_store_opens_a_fresh_database_from_racing_processes(tmp_path):
         for p in procs:
             p.join()
     assert [r for r in results if r != "ok"] == []
+
+
+async def test_commands_during_a_write_run_after_it_and_see_the_new_state():
+    store, log = GatedStore(), []
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(counter(store, log).recover("c", empty=0))
+        ref.tell(Add(1, probe.ref))
+        ref.tell(Get(probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        store.gate.set()
+        assert await probe.receive_messages(2) == [1, 1]
+
+
+async def test_a_stop_during_a_stalled_write_stops_at_once_without_a_reply():
+    store, log = GatedStore(), []
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(counter(store, log).recover("c", empty=0))
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        await testkit.stop(ref, max=1)  # raises if the actor is still waiting on its write
+        await probe.expect_no_message(0.05)
+    assert store.states == {}
+
+
+async def test_a_message_replayed_after_a_write_can_write_again_in_order():
+    store, log = GatedStore(), []
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(counter(store, log).recover("c", empty=0))
+        for n in (1, 2, 3):
+            ref.tell(Add(n, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        store.gate.set()
+        assert await probe.receive_messages(3) == [1, 3, 6]
+    assert store.states["c"] == (6, 3)
+
+
+async def test_a_late_load_from_before_a_restart_is_ignored():
+    store, log = GatedLoadStore(), []
+    store.states["c"] = (5, 1)
+    supervised = Behaviors.supervise(
+        counter(store, log).recover("c", empty=0, recovery_timeout=1)
+    ).on_failure(SupervisorStrategy.restart_with_backoff(0.5, 0.5, 0))
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual = ManualTime(testkit.system)
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(supervised)
+        await manual.time_passes(1)  # the first recovery times out
+        await manual.time_passes(0.5)  # the backoff restart loads again
+        store.gate.set()
+        store.load_gate.set()  # both loads answer; the first incarnation's must be ignored
+        ref.tell(Add(1, probe.ref))
+        assert await probe.receive_message() == 6
+    assert log == ["become 5", "become 6"]
+    assert store.states["c"] == (6, 2)
+
+
+@dataclass(frozen=True)
+class Hold:
+    pass
+
+
+@dataclass(frozen=True)
+class Release:
+    reply_to: ActorRef[int]
+
+
+type HoldCmd = Add | Hold | Release
+
+
+async def test_messages_a_user_stash_replays_into_a_write_run_after_it():
+    store = GatedStore()
+    store.gate.set()
+
+    def with_stash(stash: StashBuffer[HoldCmd]) -> Behavior[HoldCmd]:
+        def idle(total: int) -> Behavior[HoldCmd]:
+            def on_message(msg: HoldCmd) -> Behavior[HoldCmd]:
+                match msg:
+                    case Add(n, reply_to) if reply_to is not None:
+                        return saved(total + n).then_reply(reply_to, total + n)
+                    case Hold():
+                        return busy(total)
+                    case _:
+                        return Behaviors.same
+
+            return Behaviors.receive_message(on_message)
+
+        def busy(total: int) -> Behavior[HoldCmd]:
+            def on_message(msg: HoldCmd) -> Behavior[HoldCmd]:
+                match msg:
+                    case Release(reply_to):
+                        return stash.unstash_all(saved(total + 100).then_reply(reply_to, 100))
+                    case _:
+                        stash.stash(msg)
+                        return Behaviors.same
+
+            return Behaviors.receive_message(on_message)
+
+        saved = Behaviors.persisted(store)(idle)
+        return saved.recover("h", empty=0)
+
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(Behaviors.with_stash(10, with_stash))
+        for msg in (Hold(), Add(1, probe.ref), Add(2, probe.ref), Release(probe.ref)):
+            ref.tell(msg)
+        assert await probe.receive_messages(3) == [100, 101, 103]
+    assert store.states["h"] == (103, 3)
+
+
+@dataclass(frozen=True)
+class WatchIt:
+    ref: ActorRef[object]
+
+
+type WatchCmd = Add | WatchIt
+
+
+async def test_terminated_during_a_write_is_delivered_after_it():
+    store = GatedStore()
+    probe_box: list[TestProbe[int]] = []
+
+    @Behaviors.persisted(store)
+    def watching(total: int) -> Behavior[WatchCmd]:
+        def on_message(ctx: ActorContext[WatchCmd], msg: WatchCmd) -> Behavior[WatchCmd]:
+            match msg:
+                case WatchIt(ref):
+                    ctx.watch(ref)
+                    return Behaviors.same
+                case Add(n, reply_to) if reply_to is not None:
+                    return watching(total + n).then_reply(reply_to, total + n)
+                case Add():
+                    return Behaviors.same
+
+        def on_signal(_ctx: ActorContext[WatchCmd], sig: Signal) -> Behavior[WatchCmd]:
+            if isinstance(sig, Terminated):
+                probe_box[0].ref.tell(-1)
+            return Behaviors.same
+
+        return Behaviors.receive(on_message).receive_signal(on_signal)
+
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        probe_box.append(probe)
+        other = testkit.spawn(Behaviors.receive_message(lambda _m: Behaviors.same))
+        ref = testkit.spawn(watching.recover("w", empty=0))
+        ref.tell(WatchIt(other))
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        await testkit.stop(other)
+        await asyncio.sleep(0.01)
+        store.gate.set()
+        assert await probe.receive_messages(2) == [1, -1]
+
+
+async def test_post_stop_during_a_write_reaches_the_pre_write_behavior():
+    store = GatedStore()
+    probe_box: list[TestProbe[int]] = []
+
+    @Behaviors.persisted(store)
+    def stopping(total: int) -> Behavior[Cmd]:
+        def on_message(msg: Cmd) -> Behavior[Cmd]:
+            match msg:
+                case Add(n, reply_to) if reply_to is not None:
+                    return stopping(total + n).then_reply(reply_to, total + n)
+                case _:
+                    return Behaviors.same
+
+        def on_signal(_ctx: ActorContext[Cmd], sig: Signal) -> Behavior[Cmd]:
+            if sig is PostStop:
+                probe_box[0].ref.tell(-total - 100)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        probe_box.append(probe)
+        ref = testkit.spawn(stopping.recover("p", empty=0))
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        await testkit.stop(ref, max=1)
+        assert await probe.receive_message() == -100  # the pre-write behavior, total 0
+
+
+@dataclass(frozen=True)
+class StopChild:
+    pass
+
+
+def stopper(child_behavior: Behavior[Cmd], events: list[str]) -> Behavior[Cmd | StopChild]:
+    """Forwards to its child, stops it after pending on StopChild, and records its end."""
+
+    def setup(ctx: ActorContext[Cmd | StopChild]) -> Behavior[Cmd | StopChild]:
+        child = ctx.spawn(child_behavior, "child")
+        ctx.watch(child)
+
+        def on_message(msg: Cmd | StopChild) -> Behavior[Cmd | StopChild]:
+            match msg:
+                case StopChild():
+                    ctx.stop(child, after_pending=True)
+                case _:
+                    child.tell(msg)
+            return Behaviors.same
+
+        def on_signal(
+            _ctx: ActorContext[Cmd | StopChild], sig: Signal
+        ) -> Behavior[Cmd | StopChild]:
+            if isinstance(sig, Terminated):
+                events.append("terminated")
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+    return Behaviors.setup(setup)
+
+
+async def test_an_after_pending_stop_during_a_write_finishes_it_first():
+    store, log, events = GatedStore(), [], []
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        unhandled = testkit.create_unhandled_message_probe()
+        parent = testkit.spawn(stopper(counter(store, log).recover("c", empty=0), events))
+        parent.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        late = Add(3, probe.ref)
+        for msg in (Add(2, probe.ref), StopChild(), late):
+            parent.tell(msg)
+        assert (await unhandled.receive_message()).message == late
+        assert events == []
+        store.gate.set()
+        assert await probe.receive_messages(2) == [1, 3]
+        await eventually(lambda: events == ["terminated"])
+    assert store.states["c"] == (3, 2)
+
+
+async def test_passivating_an_entity_mid_write_loses_no_forwarded_message():
+    store, log = GatedStore(), []
+    counter_key = EntityTypeKey[Cmd]("Counter")
+    persisted = counter(store, log)
+    region = Sharding.init(
+        Entity(
+            counter_key, lambda e: persisted.recover(e.entity_id, empty=0)
+        ).with_passivate_after(0.02)
+    )
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        c = Sharding.entity_ref_for(testkit.spawn(region), "c")
+        c.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        c.tell(Add(2, probe.ref))
+        await asyncio.sleep(0.1)  # idle past passivate_after while the write is gated
+        store.gate.set()
+        assert await probe.receive_messages(2) == [1, 3]
+        assert await ask(c, Get, timeout=1) == 3
+    assert store.states["c"] == (3, 2)
+
+
+# --- failures and supervision while recovering or persisting ------------------------------------
+
+
+class DownStore(InMemoryStore[int]):
+    """Every load fails, and counts the attempts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loads = 0
+
+    async def load(self, persistence_id: str) -> tuple[int, int] | None:
+        self.loads += 1
+        raise OSError("down")
+
+
+class TwoLoadStore(GatedStore):
+    """The first load waits on gates[0], every later one on gates[1]."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gates = [asyncio.Event(), asyncio.Event()]
+        self.loads = 0
+
+    async def load(self, persistence_id: str) -> tuple[int, int] | None:
+        i, self.loads = self.loads, self.loads + 1
+        await self.gates[min(i, 1)].wait()
+        return await super().load(persistence_id)
+
+
+class SwitchableStore(InMemoryStore[int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = True
+
+    async def save(self, persistence_id: str, state: int, revision: int) -> None:
+        if self.fail:
+            raise OSError("db down")
+        await super().save(persistence_id, state, revision)
+
+
+async def test_a_failing_load_under_restart_fails_the_actor_instead_of_spinning():
+    store, log = DownStore(), []
+    seen: list[BaseException] = []
+    supervised = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(
+        SupervisorStrategy.restart()
+    )
+    async with ActorTestKit() as testkit:
+        testkit.spawn(failures(supervised, seen))
+        await eventually(lambda: bool(seen))
+        await asyncio.sleep(0.02)
+    assert isinstance(seen[0], OSError)
+    assert (
+        store.loads == 1
+    )  # a plain restart on a failing recovery escalates, as on a failing setup
+
+
+async def test_a_late_load_from_before_a_restart_never_reaches_the_user_behavior():
+    store = TwoLoadStore()
+    store.gate.set()
+    store.states["c"] = (5, 1)
+    seen: list[object] = []
+
+    @Behaviors.persisted(store)
+    def spy(total: int) -> Behavior[Cmd]:
+        def on_message(msg: Cmd) -> Behavior[Cmd]:
+            seen.append(msg)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    supervised = Behaviors.supervise(spy.recover("c", empty=0, recovery_timeout=1)).on_failure(
+        SupervisorStrategy.restart_with_backoff(0.5, 0.5, 0)
+    )
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual = ManualTime(testkit.system)
+        ref = testkit.spawn(supervised)
+        await manual.time_passes(1)  # the first recovery times out
+        await manual.time_passes(0.5)  # the backoff restart loads again
+        store.gates[1].set()  # the second load answers first: the actor is running
+        await eventually(lambda: store.loads == 2)
+        await asyncio.sleep(0.01)
+        store.gates[0].set()  # the first incarnation's load answers late
+        await asyncio.sleep(0.01)
+        ref.tell(Add(1))
+        await eventually(lambda: bool(seen))
+    assert seen == [Add(1)]
+
+
+async def test_resume_after_a_failed_write_carries_on_with_the_pre_write_behavior():
+    store, log = SwitchableStore(), []
+    supervised = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(
+        SupervisorStrategy.resume()
+    )
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(supervised)
+        ref.tell(Add(1, probe.ref))  # the save fails: resumed
+        await asyncio.sleep(0.02)
+        store.fail = False
+        ref.tell(Add(2, probe.ref))
+        assert await probe.receive_message() == 2  # the pre-write total was 0
+    assert store.states["c"] == (2, 1)
+
+
+async def test_a_restart_during_a_write_keeps_the_stashed_commands_and_held_signals():
+    store = GatedStore()
+    events: list[str] = []
+
+    @Behaviors.persisted(store)
+    def w(total: int) -> Behavior[WatchCmd]:
+        def on_message(ctx: ActorContext[WatchCmd], msg: WatchCmd) -> Behavior[WatchCmd]:
+            match msg:
+                case WatchIt(ref):
+                    ctx.watch(ref)
+                    return Behaviors.same
+                case Add(n, reply_to) if reply_to is not None:
+                    return w(total + n).then_reply(reply_to, total + n)
+                case Add():
+                    return Behaviors.same
+
+        def on_signal(_ctx: ActorContext[WatchCmd], sig: Signal) -> Behavior[WatchCmd]:
+            if isinstance(sig, Terminated):
+                events.append("terminated")
+            return Behaviors.same
+
+        return Behaviors.receive(on_message).receive_signal(on_signal)
+
+    supervised = Behaviors.supervise(w.recover("c", empty=0)).on_failure(
+        SupervisorStrategy.restart()
+    )
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        other = testkit.spawn(Behaviors.receive_message(lambda _m: Behaviors.same))
+        ref = testkit.spawn(supervised)
+        ref.tell(WatchIt(other))
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        ref.tell(Add(2, probe.ref))  # into the internal stash
+        await testkit.stop(other)  # its Terminated is held
+        await asyncio.sleep(0.01)
+        store.states["c"] = (99, 7)  # the save becomes a revision conflict: restart
+        store.gate.set()
+        assert await probe.receive_message() == 101  # recovered 99, then the stashed Add(2)
+        await eventually(lambda: events == ["terminated"])
+
+
+async def test_nested_supervision_lets_an_after_pending_stop_finish_the_write():
+    store, log, events = GatedStore(), [], []
+    inner = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(
+        SupervisorStrategy.restart(), ValueError
+    )
+    outer = Behaviors.supervise(inner).on_failure(SupervisorStrategy.stop(), OSError)
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        parent = testkit.spawn(stopper(outer, events))
+        parent.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        parent.tell(Add(2, probe.ref))
+        parent.tell(StopChild())
+        await asyncio.sleep(0.01)
+        store.gate.set()
+        assert await probe.receive_messages(2) == [1, 3]
+        await eventually(lambda: events == ["terminated"])
+
+
+async def test_a_stop_during_a_write_dead_letters_the_stashed_commands():
+    store, log = GatedStore(), []
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        dead = testkit.create_dead_letter_probe()
+        ref = testkit.spawn(counter(store, log).recover("c", empty=0))
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        stashed = Add(2, probe.ref)
+        ref.tell(stashed)
+        await asyncio.sleep(0.01)  # let it reach the internal stash
+        await testkit.stop(ref, max=1)
+        assert (await dead.receive_message()).message == stashed
+
+
+async def test_resume_after_a_replayed_command_fails_keeps_the_committed_state():
+    store, log = GatedStore(), []
+    supervised = Behaviors.supervise(counter(store, log).recover("c", empty=0)).on_failure(
+        SupervisorStrategy.resume()
+    )
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[int] = testkit.create_test_probe()
+        ref = testkit.spawn(supervised)
+        ref.tell(Add(1, probe.ref))
+        await eventually(lambda: store.events == ["saving"])
+        ref.tell(Boom())  # stashed; raises when replayed after the write
+        ref.tell(Add(2, probe.ref))
+        await asyncio.sleep(0.01)
+        store.gate.set()
+        assert await probe.receive_messages(2) == [1, 3]
+    assert store.states["c"] == (3, 2)

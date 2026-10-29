@@ -69,7 +69,8 @@ def cart(items: dict[str, int]) -> Behavior[CartCmd]:
     async def on_message(msg: CartCmd) -> Behavior[CartCmd]:
         match msg:
             case AddItem(sku, qty, reply_to):
-                await check_stock(sku)  # the next message waits
+                async with asyncio.timeout(1):  # a stall fails the actor instead of hanging it
+                    await check_stock(sku)  # the next message waits
                 updated = {**items, sku: items.get(sku, 0) + qty}
                 reply_to.tell(updated)
                 return cart(updated)
@@ -98,7 +99,7 @@ Save it as `cart.py` and run `python cart.py`; the next two chapters import from
 - **The messages** are frozen dataclasses. `AddItem` and `GetCart` each carry a `reply_to`, the address the answer should go to. `CartCmd` lists every message the cart understands.
 - **`cart(items)`** is the behavior. It takes the cart's current contents and returns what to do with the next message. The state is just this parameter: there is no object being mutated.
 - **The handler** is an ordinary `match`. Adding an item replies with the new contents and returns `cart(updated)`, the same behavior holding new state. Reading replies and returns `Behaviors.same`, which means nothing changed.
-- **The `await`** inside the handler is safe. While the cart waits on the stock check, the second `AddItem` sits in the mailbox; it is read only when the first one is done, so it sees the book.
+- **The `await`** inside the handler lets no other message in. While the cart waits on the stock check, the second `AddItem` sits in the mailbox; it is read only when the first one is done, so it sees the book. The price is that the cart takes nothing else while it waits, not even a stop, which is why the await has a timeout. [When a handler may await](#when-a-handler-may-await) says which awaits are worth that.
 - **`ActorSystem(cart({}), "shop")`** starts the cart as the system's first actor, its guardian, with an empty cart. The system is also a ref to it, so `system.ask` talks to the cart directly. Leaving the `async with` stops everything cleanly.
 
 Type `system.tell("two books please")` and pyright rejects it: the cart accepts only `CartCmd`. Later chapters build on this cart: [persistence](03-persistence.md) keeps it across restarts, [sharding](07-sharding.md) gives every customer their own, [chapter 11](11-putting-it-together.md) puts it behind a web API, and [chapter 12](12-testing.md) tests it.
@@ -107,7 +108,7 @@ Type `system.tell("two books please")` and pyright rejects it: the cart accepts 
 >
 > - The names are Pekko's Scala DSL in snake_case: `Behaviors.receiveMessage` is `Behaviors.receive_message`, `Behaviors.setup` stays `Behaviors.setup`, and `ActorRef[T]` is `ActorRef[T]`. [Appendix A](appendix-pekko-names.md) maps the rest.
 > - A message protocol is a union of frozen dataclasses (`type CartCmd = AddItem | GetCart`) instead of a sealed trait, and `match` replaces Scala's pattern match. `ref.tell(msg)` is `ref ! msg`, and `ask` is an awaited function.
-> - Handlers may be `async def`, and the actor stays one message at a time across every `await`. In Pekko a handler never blocks, so the same code would `pipeToSelf` a `Future`; here that is only needed for work you want to run alongside the actor, such as CPU work in a thread.
+> - Handlers may be `async def`, and the actor stays one message at a time across every `await`. Pekko's handlers are synchronous: the same code would `pipeToSelf` a `Future`, or block on `Await.result(f, timeout)`, blocking that Pekko discourages. An await in an ohra handler costs that one actor what blocking would: it takes nothing else, not even a stop, until the await returns. Use `pipe_to_self` for anything that can take long, as in Pekko.
 > - Everything runs on one asyncio event loop per process. There are no dispatchers to configure.
 > - The `Behaviors` factories double as decorators, as in `@Behaviors.receive_message`, and so do `ctx.pipe_to_self` and `ctx.ask`, in place of Scala's `{ case ... }` blocks. [Decorators](#decorators) lists them all, and [appendix B](appendix-deviations.md) lists every intentional difference.
 
@@ -122,20 +123,28 @@ flowchart LR
   subgraph cell["ActorCell: one asyncio task"]
     sysq["<b>System queue</b><br/>always first"] --> next
     userq["<b>User queue</b><br/>may be bounded"] --> next
-    next["<b>Take next</b><br/>system, else user"] --> handler["<b>Await handler</b><br/>nothing else runs"]
+    next["<b>Take next</b><br/>system, else user"] --> handler["<b>Await handler</b><br/>nothing else runs,<br/>not even a stop"]
     handler --> install["<b>Install result</b><br/>the next behavior"]
     install -- next message --> next
   end
 ```
 
 - **Two queues.** The system queue holds stop, watch and death notifications, and always goes first. The user queue holds ordinary messages and may be bounded, dropping new or old messages or raising when full.
-- **Serialized across awaits.** The loop awaits the handler before it takes the next message. A handler can await I/O and no other message runs in between. That is why actors are useful on a single event loop.
+- **Serialized across awaits.** The loop awaits the handler before it takes the next message. A handler can await I/O and no other message runs in between. That is why actors are useful on a single event loop. It also means the system queue waits too: a stop sent during the await is handled after it.
 - **Behaviors are values.** A handler returns the next behavior: itself with new state, `Behaviors.same`, or `Behaviors.stopped()`. State lives in a closure or a factory parameter, so `counter(n + 1)` is the whole state change. `setup`, `with_timers` and `with_stash` run once when the behavior is started.
 - **The ref is the only handle.** `ctx.self` is a `LocalRef` whose `tell` appends to the cell's queue. A message adapter or `pipe_to_self` also lands in the user queue, so their results are serialized with everything else.
 
 ### Messages and behaviors
 
-Messages are frozen dataclasses, a command protocol is a union, and a handler dispatches with `match`. A handler returns the next behavior: a new one carrying new state, `Behaviors.same`, `Behaviors.stopped()`, or `Behaviors.unhandled`. Handlers may be `async def`; an awaiting handler keeps the actor busy, and the next message waits.
+Messages are frozen dataclasses, a command protocol is a union, and a handler dispatches with `match`. A handler returns the next behavior: a new one carrying new state, `Behaviors.same`, `Behaviors.stopped()`, or `Behaviors.unhandled`. Handlers may be `async def`; an awaiting handler keeps the actor busy, and the next message, a stop included, waits.
+
+### When a handler may await
+
+An await in a handler holds the actor until it returns. That gives three cases. The first two are ohra's own, since Pekko has no await in a handler; the third is the one Apache Pekko's [Blocking Needs Careful Management](https://pekko.apache.org/docs/pekko/current/typed/dispatchers.html#blocking-management) is about.
+
+- **Fine: an await that is short and sure to finish,** where you want the next message to wait, as the cart's stock check does. Give it a timeout, `async with asyncio.timeout(s):`, as Pekko's `Await.result(f, timeout)` takes one by signature. A stall then fails the actor: a [supervisor](#supervision) can restart it, and without one it stops, taking the system with it when it is the guardian.
+- **Hangs the actor: an await that can take long or never finish,** such as a send to a client, a call to a peer with no timeout, or a long job. Until it returns the actor can't be stopped, and nothing fails, so supervision never steps in. `system.terminate()` and leaving `async with ActorSystem` wait for it too. Use `ctx.pipe_to_self`: the actor goes on, and the result comes back as a message. For a connection, let the route own it and give the actors an `ohra.stream.ActorSource`, as [chapter 9](09-fastapi.md#websockets-the-route-owns-the-connection) shows.
+- **Blocks every actor: a blocking call,** async handler or not: `time.sleep`, a synchronous database driver, a CPU-heavy loop. It holds the event loop, and every actor on it. Run it in a thread and pipe the result back: `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)`. This is Pekko's advice to make the blocking call in a `Future` on a thread pool with an upper limit: `to_thread` runs on the loop's default executor, a bounded thread pool. Pekko's first remedy, a dedicated dispatcher, has no counterpart, since ohra has no dispatchers.
 
 `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context. All of them are usually written as decorators, described next.
 
@@ -316,7 +325,7 @@ The Apache Pekko spelling, `Behaviors.with_timers(factory)` and `Behaviors.with_
 
 ### Routers, batching, and bounded mailboxes
 
-`Routers.pool(n, behavior)` spawns `n` routees and forwards each message by round robin, at random, or by `with_consistent_hashing_routing(key)` so that equal keys reach the same routee. `batching(max_n, max_wait, handle)` is a behavior that collects messages and hands them to `handle` in batches, which is where `np.add.at` earns its keep. `MailboxSelector.bounded(capacity, overflow=...)` passed to `spawn` bounds a mailbox and drops the new message, drops the oldest, or raises in the sender. A producer that can await should use `await ref.offer(msg)` instead of `tell`: on a full mailbox it waits for room, so a slow consumer slows the producer and nothing is lost. `tell` never waits, so it stays usable from callbacks and timers.
+`Routers.pool(n, behavior)` spawns `n` routees and forwards each message by round robin, at random, or by `with_consistent_hashing_routing(key)` so that equal keys reach the same routee. `batching(max_n, max_wait, handle)` is a behavior that collects messages and hands them to `handle` in batches, which is where `np.add.at` earns its keep. An async `handle` holds the batcher while it runs, so one that can stall needs a timeout. `MailboxSelector.bounded(capacity, overflow=...)` passed to `spawn` bounds a mailbox and drops the new message, drops the oldest, or raises in the sender. A producer that can await should use `await ref.offer(msg)` instead of `tell`: on a full mailbox it waits for room, so a slow consumer slows the producer and nothing is lost. `tell` never waits, so it stays usable from callbacks and timers.
 
 ### Dead letters and logging
 

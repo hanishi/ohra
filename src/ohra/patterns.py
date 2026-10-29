@@ -78,7 +78,9 @@ def batching[T](
 ) -> Behavior[T]:
     """Hand messages to ``handle`` in batches: when ``max_n`` have arrived, or ``max_wait``
     seconds after the first message of a batch. Messages arriving while an async
-    ``handle`` runs form the next batch. A pending batch is flushed on stop. Not in Pekko.
+    ``handle`` runs form the next batch. An async ``handle`` holds the batcher, stops included,
+    until it returns, so one that can stall needs a timeout. A pending batch is flushed on stop.
+    Not in Pekko.
     """
 
     def with_timers(timers: TimerScheduler[T | _Flush]) -> Behavior[T | _Flush]:

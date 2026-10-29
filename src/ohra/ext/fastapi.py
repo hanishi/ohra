@@ -133,6 +133,8 @@ class Actors[T]:
                 if ws.application_state == WebSocketState.CONNECTED:  # else the client is gone
                     with contextlib.suppress(WebSocketDisconnect):
                         await ws.close(code=1008, reason="too slow")
+                if receiving in done:  # it failed in the same tick: that is still an error
+                    receiving.result()
             else:
                 for task in done:
                     task.result()

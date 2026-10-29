@@ -850,6 +850,53 @@ async def test_an_after_pending_stop_during_a_write_finishes_it_first():
     assert store.states["c"] == (3, 2)
 
 
+async def test_an_after_pending_stop_during_recovery_with_nothing_stashed_skips_the_factory():
+    # as Pekko's Recovering.onRecoveryCompleted: a PoisonPill and an empty stash stop at once
+    store, log, events = GatedLoadStore(), [], []
+    async with ActorTestKit() as testkit:
+        unhandled = testkit.create_unhandled_message_probe()
+        parent = testkit.spawn(stopper(counter(store, log).recover("c", empty=0), events))
+        parent.tell(StopChild())
+        late = Add(1)
+        parent.tell(late)
+        assert (await unhandled.receive_message()).message == late  # the stop reached the child
+        store.load_gate.set()
+        await eventually(lambda: events == ["terminated"])
+    assert log == []  # the recovered behavior was never built
+
+
+async def test_an_after_pending_stop_during_recovery_delivers_the_held_signals_first():
+    store, seen, events = GatedLoadStore(), list[Signal](), list[str]()
+    kids: list[ActorRef[None]] = []
+
+    @Behaviors.persisted(store)
+    def watcher(_total: int) -> Behavior[Cmd]:
+        def on_signal(_ctx: ActorContext[Cmd], sig: Signal) -> Behavior[Cmd]:
+            seen.append(sig)
+            return Behaviors.same
+
+        return Behaviors.receive_message(lambda _m: Behaviors.same).receive_signal(on_signal)
+
+    def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+        kids.append(ctx.spawn(Behaviors.stopped(), "kid"))
+        ctx.watch(kids[0])
+        return watcher.recover("w", empty=0)
+
+    async with ActorTestKit() as testkit:
+        probe: TestProbe[None] = testkit.create_test_probe()
+        unhandled = testkit.create_unhandled_message_probe()
+        parent = testkit.spawn(stopper(Behaviors.setup(setup), events))
+        await eventually(lambda: bool(kids))
+        await probe.expect_terminated(kids[0])  # so the recovering child holds its Terminated
+        parent.tell(StopChild())
+        late = Add(1)
+        parent.tell(late)
+        assert (await unhandled.receive_message()).message == late
+        store.load_gate.set()
+        await eventually(lambda: events == ["terminated"])
+    assert any(isinstance(sig, Terminated) and sig.ref == kids[0] for sig in seen)
+
+
 async def test_passivating_an_entity_mid_write_loses_no_forwarded_message():
     store, log = GatedStore(), []
     counter_key = EntityTypeKey[Cmd]("Counter")

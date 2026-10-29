@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from dataclasses import dataclass
 
@@ -184,6 +185,33 @@ async def test_ctx_ask_times_out_after_its_timeout_from_the_call():
         testkit.spawn(Behaviors.setup(asker))
         await manual_time.time_passes(5)
         await probe.expect_message("Failure", max=0.5)
+
+
+async def test_an_ask_that_failed_before_the_actor_stopped_logs_nothing():
+    # a zero timeout fails the reply future inside ctx.ask; the actor stops in the same step,
+    # so its pipe task never starts and nobody would read that failure
+    @dataclass(frozen=True)
+    class Ping:
+        reply_to: ActorRef[int]
+
+    errors: list[str] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _, context: errors.append(str(context["message"])))
+    try:
+        async with ActorTestKit(manual_time=True) as testkit:
+            silent = testkit.spawn(Behaviors.ignore)
+
+            def asker(ctx: ActorContext[str]) -> Behavior[str]:
+                ctx.ask(silent, Ping, lambda r: "answered", timeout=0)
+                return Behaviors.stopped()
+
+            ref = testkit.spawn(Behaviors.setup(asker))
+            probe: TestProbe[str] = testkit.create_test_probe()
+            await probe.expect_terminated(ref)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+    assert errors == []
 
 
 async def test_backoff_restart_under_manual_time():

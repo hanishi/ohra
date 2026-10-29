@@ -13,7 +13,7 @@ from typing import Protocol
 
 class Cancellable(Protocol):
     def cancel(self) -> bool:
-        """Cancel it; True if this call cancelled it, False if it was already cancelled."""
+        """Cancel it; True if this call cancelled it, False if it was already cancelled or ran."""
         ...
 
     @property
@@ -37,14 +37,15 @@ class Scheduler(Protocol):
 class _Scheduled:
     """A job on the event loop; holds its current handle so a repeating job stays cancellable."""
 
-    __slots__ = ("handle", "cancelled")
+    __slots__ = ("handle", "cancelled", "ran")
 
     def __init__(self) -> None:
         self.handle: asyncio.TimerHandle | None = None
         self.cancelled = False
+        self.ran = False  # a one-shot that ran can't be cancelled, as in Pekko
 
     def cancel(self) -> bool:
-        if self.cancelled:
+        if self.cancelled or self.ran:
             return False
         self.cancelled = True
         if self.handle is not None:
@@ -61,7 +62,12 @@ class EventLoopScheduler:
 
     def schedule_once(self, delay: float, fn: Callable[[], None]) -> Cancellable:
         job = _Scheduled()
-        job.handle = asyncio.get_running_loop().call_later(delay, fn)
+
+        def run() -> None:
+            job.ran = True
+            fn()
+
+        job.handle = asyncio.get_running_loop().call_later(delay, run)
         return job
 
     def schedule_with_fixed_delay(

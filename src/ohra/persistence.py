@@ -40,6 +40,7 @@ from .behavior import (
     Held,
     Holding,
     Setup,
+    Stopped,
     StoreAnswer,
     Unstash,
 )
@@ -271,6 +272,8 @@ class Persisted[S, T]:
                 match msg:
                     case _GetSuccess(t, loaded) if t is token:
                         ctx.timers.cancel(_RECOVERY_TIMER)
+                        if held.poisoned and not held.stash and not held.signals:  # as Pekko
+                            return Stopped()
                         state, revision = loaded if loaded is not None else (empty, 0)
                         task = asyncio.current_task()
                         _current.set(_Incarnation(persistence_id, self, revision, task))

@@ -31,7 +31,7 @@ from ..context import ActorContext
 from ..patterns import AskTimeoutError
 from ..ref import ActorRef
 from ..signals import Signal, Terminated
-from ..stream import ActorSource, BufferOverflowError, OverflowStrategy
+from ..stream import ActorSource, OverflowStrategy
 from ..system import ActorSystem
 
 _log = logging.getLogger(__name__)
@@ -89,6 +89,9 @@ class Actors[T]:
             overflow_strategy=overflow_strategy,
         )
         root = self.system._root  # pyright: ignore[reportPrivateUsage]
+        if root.stopping:  # the system is shutting down
+            await ws.close(code=1001, reason="going away")
+            return
         cell = root.spawn_child(_flow(props, out.ref), None, None)
         # Play's sink watches the wrapper: however it ends, the frames told so far go out first
         cell.done.add_done_callback(lambda _: out.ref.tell(_DONE))
@@ -101,6 +104,8 @@ class Actors[T]:
                     try:
                         msg = decode(text)
                     except Exception:
+                        if ws.application_state != WebSocketState.CONNECTED:
+                            return  # the server closed meanwhile: the frame comes too late
                         _log.warning("closing a WebSocket: decode rejected a frame", exc_info=True)
                         await ws.close(code=1003, reason="unsupported data")
                         return
@@ -108,20 +113,29 @@ class Actors[T]:
 
         async def send() -> None:
             with contextlib.suppress(WebSocketDisconnect):  # the client may be gone already
-                try:
-                    async for frame in out:
-                        await ws.send_json(frame)
-                except BufferOverflowError:
-                    await ws.close(code=1008, reason="too slow")
-                else:  # the actor stopped and its frames are sent
-                    await ws.close()
+                async for frame in out:
+                    await ws.send_json(frame)
+                await ws.close()  # the actor stopped and its frames are sent
 
         receiving = asyncio.create_task(receive())
         sending = asyncio.create_task(send())
+        overflowed = False
+
+        def overflow() -> None:  # Pekko fails downstream at once, even in the middle of a send
+            nonlocal overflowed
+            overflowed = True
+            sending.cancel()
+
+        out._on_failure = overflow  # pyright: ignore[reportPrivateUsage]
         try:
             done, _ = await asyncio.wait({receiving, sending}, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
+            if overflowed:
+                if ws.application_state == WebSocketState.CONNECTED:  # else the client is gone
+                    with contextlib.suppress(WebSocketDisconnect):
+                        await ws.close(code=1008, reason="too slow")
+            else:
+                for task in done:
+                    task.result()
         finally:  # everything before the await: in a cancelled scope (anyio) every await raises
             flow.tell(_CLOSE)
             out.cancel()

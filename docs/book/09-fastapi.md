@@ -122,7 +122,8 @@ async def chat(ws: WebSocket) -> None:
 
 - **One actor per connection.** `actors.websocket(ws, echo, Said)` accepts the socket, spawns `echo(out)`, tells it `Said(text)` for every frame that comes in, and sends every message it tells `out` as JSON. It returns when the connection is over.
 - **The two lives are tied.** A closed socket stops the actor, after the frames it already has. An actor that stops, by returning `Behaviors.stopped()` or by failing, closes the socket once the frames it told `out` are sent, and so does the system shutting down.
-- **`out` holds 16 frames** (`buffer_size`). A client that falls further behind is closed with code 1008 under the default `OverflowStrategy.fail`. The drop strategies drop frames instead.
+- **`out` holds 16 frames** (`buffer_size`). A client that falls further behind is closed with code 1008 under the default `OverflowStrategy.fail`, even one that has stopped reading so that a send never returns. The drop strategies drop frames instead.
+- **A connection that arrives while the system shuts down** is closed with 1001 (going away).
 - **`decode` is the trust boundary.** A frame it rejects by raising closes the socket with 1003 (unsupported data), logged with its traceback on `ohra.ext.fastapi`, and stops the actor.
 
 `examples/fastapi_chatroom.py` is the full version: a connection actor per socket that joins a room through a lobby, turns the client's frames into posts and room events into frames for `out`, and a room that watches its connection actors to tell the others when someone leaves.
@@ -192,7 +193,7 @@ async def chat(ws: WebSocket, system: ActorSystem[Say] = actors.depends()) -> No
 ```
 
 - **`outbox.ref`** is an ordinary `ActorRef[Frame]`, so it travels in messages like any other ref.
-- **The buffer holds 256 frames.** A client that falls that far behind fails the loop with `BufferOverflowError` under `OverflowStrategy.fail`, and the route closes the socket with code 1008. `drop_head`, `drop_tail` and `drop_buffer` drop frames instead, and with `buffer_size=0` a frame is dropped unless the loop is already waiting for one.
+- **The buffer holds 256 frames.** A client that falls that far behind fails the loop with `BufferOverflowError` under `OverflowStrategy.fail`, and the route closes the socket with code 1008. The loop sees the error at its next step, so a send that never returns hides it; `actors.websocket` cancels such a send. `drop_head`, `drop_tail` and `drop_buffer` drop frames instead, and with `buffer_size=0` a frame is dropped unless the loop is already waiting for one.
 - **`completion_matcher` and `failure_matcher`** let an actor end the loop: a message the first matches ends it once the buffer is drained, and an exception the second returns is raised in the loop at once. Here neither matches, and the loop ends when the route cancels it.
 - **Once the loop has ended,** or the outbox is cancelled with `cancel()` or by cancelling the task that iterates it, tells to `outbox.ref` are dead letters, logged at debug on `ohra.dead_letters`. A `break` doesn't cancel it: a later `async for` takes the rest.
 - **Annotate the outbox,** as `outbox: ActorSource[Frame] = ...`: the frame type comes from the annotation, since the lambdas don't name it.

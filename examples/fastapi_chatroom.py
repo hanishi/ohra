@@ -195,7 +195,8 @@ def connection(
     @Behaviors.setup
     def setup(ctx: ActorContext[ConnectionMsg]) -> Behavior[ConnectionMsg]:
         lobby.tell(Join(room, screen_name, ctx.self))
-        return Behaviors.with_stash(16, with_stash)
+        # frames from before the room answers: room for as many as the route buffers out
+        return Behaviors.with_stash(256, with_stash)
 
     return setup
 

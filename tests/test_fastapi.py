@@ -7,17 +7,18 @@ import asyncio
 import dataclasses
 import gc
 import importlib.util
+import inspect
 from dataclasses import dataclass
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
 httpx = pytest.importorskip("httpx")
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, WebSocket  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 from ohra import ActorRef, ActorSystem, Behavior, Behaviors, PostStop, Signal  # noqa: E402
@@ -132,7 +133,16 @@ def test_chatroom_relays_messages_and_rejects_a_taken_name():
 
 
 def test_no_chatroom_actor_holds_the_socket():
-    assert "ws" not in {f.name for f in dataclasses.fields(_chatroom().Join)}
+    # only the route touches the socket: no message carries it, no behavior factory takes it
+    chatroom = _chatroom()
+    routes = {getattr(route, "endpoint", None) for route in chatroom.app.routes}
+    for name, value in vars(chatroom).items():
+        if dataclasses.is_dataclass(value):
+            fields = [str(f.type) for f in dataclasses.fields(value)]
+            assert not any("WebSocket" in t for t in fields), name
+        elif inspect.isfunction(value) and value not in routes:
+            params = [str(p.annotation) for p in inspect.signature(value).parameters.values()]
+            assert not any("WebSocket" in t for t in params), name
 
 
 class FakeSocket:
@@ -158,6 +168,10 @@ class FakeSocket:
         self.sent: list[Any] = []
         self.closed: int | None = None
         self.application_state = WebSocketState.CONNECTED
+
+    def socket(self) -> WebSocket:
+        """This fake where a route expects Starlette's WebSocket."""
+        return cast(WebSocket, self)
 
     async def accept(self) -> None:
         pass
@@ -240,7 +254,7 @@ async def test_websocket_relays_frames_both_ways():
     actors = Actors(Behaviors.ignore, "ws")
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket()
-        connection = asyncio.create_task(actors.websocket(ws, echo, Said))  # type: ignore[arg-type]
+        connection = asyncio.create_task(actors.websocket(ws.socket(), echo, Said))
         ws.incoming.put_nowait("hi")
         await eventually(lambda: ws.sent == [{"echo": "hi"}])
         ws.incoming.put_nowait(WebSocketDisconnect(1000))
@@ -255,7 +269,7 @@ async def test_closing_the_socket_stops_the_actor():
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket()
         connection = asyncio.create_task(
-            actors.websocket(ws, lambda out: echo(out, stopped), Said)  # type: ignore[arg-type]
+            actors.websocket(ws.socket(), lambda out: echo(out, stopped), Said)
         )
         ws.incoming.put_nowait(WebSocketDisconnect(1000))
         await connection
@@ -266,7 +280,7 @@ async def test_an_actor_that_stops_closes_the_socket_after_its_frames():
     actors = Actors(Behaviors.ignore, "ws")
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket()
-        await actors.websocket(ws, talker({"n": "1"}, {"n": "2"}), Said)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), talker({"n": "1"}, {"n": "2"}), Said)
         assert ws.sent == [{"n": "1"}, {"n": "2"}]
         assert ws.closed == 1000
 
@@ -276,7 +290,18 @@ async def test_overflow_closes_with_1008():
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket()
         frames = [{"n": str(i)} for i in range(3)]
-        await actors.websocket(ws, talker(*frames), Said, buffer_size=1)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), talker(*frames), Said, buffer_size=1)
+        assert ws.closed == 1008
+
+
+async def test_a_receive_failure_in_the_tick_of_an_overflow_is_raised():
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        ws.incoming.put_nowait(RuntimeError("receive broke"))  # before the route sees the overflow
+        frames = [{"n": str(i)} for i in range(3)]
+        with pytest.raises(RuntimeError, match="receive broke"):
+            await actors.websocket(ws.socket(), talker(*frames), Said, buffer_size=1)
         assert ws.closed == 1008
 
 
@@ -292,7 +317,7 @@ async def test_a_send_that_fails_ends_the_connection_and_stops_the_actor():
         async with actors.lifespan(FastAPI()):
             ws = FakeSocket(WebSocketDisconnect(1006))  # the client's TCP dropped mid-send
             connection = asyncio.create_task(
-                actors.websocket(ws, lambda out: echo(out, stopped), Said)  # type: ignore[arg-type]
+                actors.websocket(ws.socket(), lambda out: echo(out, stopped), Said)
             )
             ws.incoming.put_nowait("hi")
             await connection
@@ -315,7 +340,7 @@ async def test_a_route_cancelled_by_the_server_still_stops_the_actor():
 
         async def route() -> None:
             with scope:
-                await actors.websocket(ws, lambda out: echo(out, stopped), Said)  # type: ignore[arg-type]
+                await actors.websocket(ws.socket(), lambda out: echo(out, stopped), Said)
 
         connection = asyncio.create_task(route())
         ws.incoming.put_nowait("hi")
@@ -346,7 +371,7 @@ async def test_frames_the_actor_already_has_are_handled_when_the_client_closes()
         for frame in ("1", "2", "3"):
             ws.incoming.put_nowait(frame)
         ws.incoming.put_nowait(WebSocketDisconnect(1000))
-        await actors.websocket(ws, slow, Said)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), slow, Said)
         gate.set()
         await eventually(lambda: got == ["1", "2", "3"])
 
@@ -355,7 +380,7 @@ async def test_terminating_the_system_closes_open_connections():
     actors = Actors(Behaviors.ignore, "ws")
     ws = FakeSocket()
     async with actors.lifespan(FastAPI()):
-        connection = asyncio.create_task(actors.websocket(ws, echo, Said))  # type: ignore[arg-type]
+        connection = asyncio.create_task(actors.websocket(ws.socket(), echo, Said))
         ws.incoming.put_nowait("hi")
         await eventually(lambda: ws.sent == [{"echo": "hi"}])
     await asyncio.wait_for(connection, 1)
@@ -370,7 +395,7 @@ async def test_an_actor_that_fails_to_start_closes_the_socket():
 
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket()
-        await asyncio.wait_for(actors.websocket(ws, broken, Said), 1)  # type: ignore[arg-type]
+        await asyncio.wait_for(actors.websocket(ws.socket(), broken, Said), 1)
         assert ws.closed == 1000
 
 
@@ -380,7 +405,7 @@ async def test_a_close_after_the_client_left_is_not_an_error():
     actors = Actors(Behaviors.ignore, "ws")
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket(close_error=WebSocketDisconnect(1006))
-        await actors.websocket(ws, talker({"n": "1"}), Said)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), talker({"n": "1"}), Said)
         assert ws.sent == [{"n": "1"}]
 
 
@@ -388,7 +413,7 @@ async def test_a_frame_in_the_tick_the_server_closes_is_not_an_error():
     actors = Actors(Behaviors.ignore, "ws")
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket(frame_on_close="late")
-        await actors.websocket(ws, talker({"n": "1"}), Said)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), talker({"n": "1"}), Said)
         assert ws.closed == 1000
 
 
@@ -404,7 +429,7 @@ async def test_a_frame_decode_rejects_closes_with_1003_and_stops_the_actor():
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket()
         ws.incoming.put_nowait("")
-        await actors.websocket(ws, lambda out: echo(out, stopped), strict)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), lambda out: echo(out, stopped), strict)
         assert ws.closed == 1003
         await eventually(stopped.is_set)
 
@@ -413,7 +438,7 @@ async def test_a_client_that_stops_reading_is_closed_with_1008():
     actors = Actors(Behaviors.ignore, "ws")
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket(sends_block_after=1)
-        websocket = actors.websocket(ws, echo, Said, buffer_size=1)  # type: ignore[arg-type]
+        websocket = actors.websocket(ws.socket(), echo, Said, buffer_size=1)
         connection = asyncio.create_task(websocket)
         ws.incoming.put_nowait("a")
         await eventually(lambda: ws.sent == [{"echo": "a"}])
@@ -448,7 +473,7 @@ async def test_a_connection_while_the_system_shuts_down_is_closed_with_1001():
         await started.wait()  # the guardian is stopping, waiting on its child
         try:
             ws = FakeSocket()
-            await actors.websocket(ws, echo, Said)  # type: ignore[arg-type]
+            await actors.websocket(ws.socket(), echo, Said)
             assert ws.closed == 1001
         finally:
             gate.set()
@@ -479,7 +504,7 @@ async def test_an_overflow_after_the_client_left_is_not_an_error():
             return echo(out)
 
         ws.incoming.put_nowait("a")
-        await asyncio.wait_for(actors.websocket(ws, props, Said, buffer_size=1), 1)  # type: ignore[arg-type]
+        await asyncio.wait_for(actors.websocket(ws.socket(), props, Said, buffer_size=1), 1)
 
 
 async def test_a_rejected_frame_in_the_tick_the_server_closes_is_not_an_error():
@@ -492,5 +517,5 @@ async def test_a_rejected_frame_in_the_tick_the_server_closes_is_not_an_error():
 
     async with actors.lifespan(FastAPI()):
         ws = FakeSocket(frame_on_close="")
-        await actors.websocket(ws, talker({"n": "1"}), strict)  # type: ignore[arg-type]
+        await actors.websocket(ws.socket(), talker({"n": "1"}), strict)
         assert ws.closed == 1000

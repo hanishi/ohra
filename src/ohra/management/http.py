@@ -26,6 +26,11 @@ _HEAD_TIMEOUT = 10.0
 _MAX_BODY = 1024 * 1024  # every caller expects small JSON
 
 
+def _is_decimal(text: str) -> bool:
+    # "²".isdigit(), but int("²") raises; so does int() past 4300 digits
+    return text.isascii() and text.isdigit() and len(text) <= 18
+
+
 @dataclass(frozen=True)
 class Response:
     status: int
@@ -187,42 +192,58 @@ async def get(
             parts.hostname, port, ssl=context, server_hostname=parts.hostname if context else None
         )
         try:
-            lines = [f"GET {target} HTTP/1.1", f"Host: {parts.netloc}", "Connection: close"]
-            lines += [f"{k}: {v}" for k, v in (headers or {}).items()]
-            writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
-            await writer.drain()
-            status_line = (await reader.readuntil(b"\n")).decode("latin-1").split(" ", 2)
-            if (
-                len(status_line) < 2
-                or not status_line[0].startswith("HTTP/1.")
-                or not status_line[1].isdigit()
-            ):
-                raise HttpError(f"malformed status line from {url}")
-            status = int(status_line[1])
-            response_headers: dict[str, str] = {}
-            while True:
-                header = (await reader.readuntil(b"\n")).decode("latin-1")
-                if header in ("\r\n", "\n"):
-                    break
-                name, _, value = header.partition(":")
-                response_headers[name.strip().lower()] = value.strip()
-            if response_headers.get("transfer-encoding", "").lower() == "chunked":
-                body = b""
-                while True:
-                    size = int((await reader.readuntil(b"\n")).split(b";")[0].strip() or b"0", 16)
-                    if size == 0:
-                        break
-                    body += await reader.readexactly(size)
-                    await reader.readuntil(b"\n")
-            elif "content-length" in response_headers:
-                length = response_headers["content-length"]
-                if not length.isdigit() or int(length) > _MAX_BODY:
-                    raise HttpError(f"bad Content-Length {length!r} from {url}")
-                body = await reader.readexactly(int(length))
-            else:
-                body = await reader.read(_MAX_BODY)
-            return status, body
+            return await read_reply(reader, writer)
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError) as e:
+            raise HttpError(f"truncated or oversized reply from {url}") from e
         finally:
             writer.close()
+
+    async def read_reply(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> tuple[int, bytes]:
+        lines = [f"GET {target} HTTP/1.1", f"Host: {parts.netloc}", "Connection: close"]
+        lines += [f"{k}: {v}" for k, v in (headers or {}).items()]
+        writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
+        await writer.drain()
+        status_line = (await reader.readuntil(b"\n")).decode("latin-1").split(" ", 2)
+        if (
+            len(status_line) < 2
+            or not status_line[0].startswith("HTTP/1.")
+            or not _is_decimal(status_line[1])
+        ):
+            raise HttpError(f"malformed status line from {url}")
+        status = int(status_line[1])
+        response_headers: dict[str, str] = {}
+        while True:
+            header = (await reader.readuntil(b"\n")).decode("latin-1")
+            if header in ("\r\n", "\n"):
+                break
+            name, _, value = header.partition(":")
+            response_headers[name.strip().lower()] = value.strip()
+        if response_headers.get("transfer-encoding", "").lower() == "chunked":
+            body = b""
+            while True:
+                size_field = (await reader.readuntil(b"\n")).split(b";")[0].strip() or b"0"
+                if not all(c in b"0123456789abcdefABCDEF" for c in size_field):
+                    raise HttpError(f"bad chunk size {size_field!r} from {url}")
+                size = int(size_field, 16)
+                if size == 0:
+                    break
+                if len(body) + size > _MAX_BODY:
+                    raise HttpError(f"chunked body over {_MAX_BODY} bytes from {url}")
+                body += await reader.readexactly(size)
+                await reader.readuntil(b"\n")
+        elif "content-length" in response_headers:
+            length = response_headers["content-length"]
+            if not _is_decimal(length) or int(length) > _MAX_BODY:
+                raise HttpError(f"bad Content-Length {length!r} from {url}")
+            body = await reader.readexactly(int(length))
+        else:
+            body = b""  # until the server closes
+            while chunk := await reader.read(_MAX_BODY + 1 - len(body)):
+                body += chunk
+                if len(body) > _MAX_BODY:
+                    raise HttpError(f"body over {_MAX_BODY} bytes from {url}")
+        return status, body
 
     return await asyncio.wait_for(exchange(), timeout)

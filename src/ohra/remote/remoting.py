@@ -115,7 +115,7 @@ class RemoteRef[T](ActorRef[T]):
 
 
 class TempRefs:
-    """Paths for refs that have no actor behind them: ask reply refs, adapters, entity refs.
+    """Paths for refs that have no actor behind them: ask reply refs and adapters.
     Weakly held, so an entry lives exactly as long as the ref it stands for."""
 
     def __init__(self, root: str) -> None:

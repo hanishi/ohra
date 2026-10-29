@@ -27,6 +27,7 @@ class SerializationError(Exception):
 
 _registry: dict[str, type] = {}
 _manifests: dict[type, str] = {}
+_RESERVED = frozenset(("$ref", "$type", "$entity", "$region"))
 _hints: dict[type, dict[str, Any]] = {}
 
 
@@ -71,6 +72,8 @@ class Serialization:
             for k, v in cast(dict[object, object], value).items():
                 if not isinstance(k, str):
                     raise SerializationError(f"dict keys must be str, not {type(k).__name__}")
+                if k in _RESERVED:  # decode would read the dict as a ref or a dataclass
+                    raise SerializationError(f"dict key {k!r} is reserved for refs and manifests")
                 out[k] = Serialization.encode(v, ref_path)
             return out
         manifest = _manifests.get(type(value))

@@ -186,6 +186,15 @@ def _held_by(b: Behavior[Any] | None) -> Holding[Any] | None:
     return b if isinstance(b, Holding) else None
 
 
+def _backing_off(b: Behavior[Any] | None) -> _Supervisor[Any] | None:
+    """The supervisor waiting out a backoff, if any: it stashes what arrives until the restart."""
+    while isinstance(b, _Supervisor):
+        if b.inner is None:
+            return b
+        b = b.inner
+    return None
+
+
 _STOPPED: Behavior[Any] = Stopped()
 
 
@@ -402,10 +411,7 @@ class ActorCell[T]:
                             continue
                     if msg is _POISON:
                         self._poisoned = False
-                        if self._holding():  # a store call is in flight: let it finish first
-                            self._set(await self._deliver(self._behavior, POISON_PILL))
-                        else:
-                            self._set(_STOPPED)
+                        self._set(await self._poison(self._behavior))
                         continue
                     self._set(await self._deliver(self._behavior, msg))
                 else:
@@ -506,8 +512,16 @@ class ActorCell[T]:
             self._user.appendleft(_POISON)
         return b
 
-    def _holding(self) -> bool:
-        return _held_by(self._behavior) is not None
+    async def _poison(self, b: Behavior[T]) -> Behavior[T]:
+        """A stop after the messages ahead of it. A backoff stashes it behind them, as Pekko's
+        RestartSupervisor stashes a PoisonPill; a store call in flight finishes first."""
+        sup = _backing_off(b)
+        if sup is not None and sup.stash is not None:
+            sup.stash.append(_POISON)  # even when full: a stop must not be dropped
+            return b
+        if _held_by(b) is not None:
+            return await self._deliver(b, POISON_PILL)
+        return _STOPPED
 
     async def _replay(self, b: Behavior[T], msgs: deque[Any]) -> Behavior[T]:
         """Deliver the messages queued now, in order. Messages added meanwhile stay queued.
@@ -515,11 +529,17 @@ class ActorCell[T]:
         for _ in range(len(msgs)):
             if isinstance(b, Stopped):
                 break
-            b = await self._deliver(b, msgs.popleft())
+            msg = msgs.popleft()
+            b = await (self._poison(b) if msg is _POISON else self._deliver(b, msg))
         if isinstance(b, Stopped):
-            while msgs:
-                self.system.dead_letter(msgs.popleft(), self.ref)
+            self._dead_letters(msgs)
         return b
+
+    def _dead_letters(self, msgs: deque[Any]) -> None:
+        """Empty ``msgs`` into dead letters. A queued stop is not a message: it goes quietly."""
+        while msgs:
+            if (msg := msgs.popleft()) is not _POISON:
+                self.system.dead_letter(msg, self.ref)
 
     async def _deliver(self, b: Behavior[T], msg: Any) -> Behavior[T]:
         if isinstance(b, _Supervisor):
@@ -643,7 +663,8 @@ class ActorCell[T]:
                 if sup.stash is None:
                     sup.stash = deque()
                 if isinstance(held, Holding):  # what came during the failed store call
-                    sup.stash.extendleft(reversed(held.held.stash))
+                    h = held.held
+                    sup.stash.extendleft(reversed([*h.stash, *([_POISON] if h.poisoned else [])]))
                 delay = strategy.delay(sup.attempt, random.random())
                 sup.attempt += 1
                 self.log.warning("restarting in %.3fs after %r", delay, e)
@@ -662,14 +683,18 @@ class ActorCell[T]:
     async def _backoff_restart(self, sup: _Supervisor[T]) -> Behavior[T]:
         stash, sup.stash = sup.stash or deque(), None
         try:
-            inner = await self._start(sup.template.initial)
-        except sup.template.exc_type as e:
-            sup.stash = stash
-            return await self._on_failure(sup, e, during_start=False)
-        if isinstance(inner, Stopped):
-            return await self._replay(inner, stash)
-        sup.inner = inner
-        return await self._replay(sup, stash)
+            try:
+                inner = await self._start(sup.template.initial)
+            except sup.template.exc_type as e:
+                sup.stash, stash = stash, deque[Any]()  # backing off again: the stash goes back
+                return await self._on_failure(sup, e, during_start=False)
+            if isinstance(inner, Stopped):
+                return await self._replay(inner, stash)
+            sup.inner = inner
+            return await self._replay(sup, stash)
+        except BaseException:
+            self._dead_letters(stash)  # the actor fails: what the restart didn't reach
+            raise
 
     async def _pre_restart(self, sup: _Supervisor[T]) -> None:
         self.timers.cancel_all()  # as Pekko's RestartSupervisor: timers do not survive a restart
@@ -721,10 +746,10 @@ class ActorCell[T]:
         holding = _held_by(self._last_live)
         for m in holding.held.stash if holding is not None else ():
             self.system.dead_letter(m, self.ref)  # commands stashed during a store call
-        for m in self._user:
-            if m is not _POISON:
-                self.system.dead_letter(m, self.ref)
-        self._user.clear()
+        backing_off = _backing_off(self._last_live)
+        if backing_off is not None and backing_off.stash is not None:
+            self._dead_letters(backing_off.stash)  # messages stashed during a backoff
+        self._dead_letters(self._user)
         self.adapters.clear()
         note = _DeathNotify(self, self.failure)
         for w in self.watched_by:

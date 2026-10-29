@@ -214,7 +214,8 @@ async def test_an_after_pending_stop_during_a_backoff_runs_the_stashed_messages_
 
 
 async def test_a_stop_during_a_backoff_dead_letters_the_stashed_messages():
-    async with ActorTestKit() as testkit:
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual = ManualTime(testkit.system)
         events: list[str] = []
         dead = testkit.create_dead_letter_probe()
         refs: TestProbe[ActorRef[Cmd]] = testkit.create_test_probe()
@@ -226,8 +227,7 @@ async def test_a_stop_during_a_backoff_dead_letters_the_stashed_messages():
         kid.tell(Add(-1))  # fails: backing off for 10 s
         await eventually(lambda: events == ["setup", "pre-restart at 0"])
         kid.tell(Add(3))
-        for _ in range(3):  # let the child stash it
-            await asyncio.sleep(0)
+        await manual.time_passes(0.001)  # settles first: the child has stashed it
         parent.tell(StopChild(after_pending=False))
         letter = await dead.receive_message()
         assert letter.message == Add(3)
@@ -357,3 +357,18 @@ async def test_a_stop_during_a_backoff_dead_letters_the_messages_but_not_a_termi
         await testkit.stop(ref)
         assert (await dead.receive_message()).message == Add(3)
         await dead.expect_no_message(0.05)
+
+
+async def test_a_zero_delay_backoff_under_manual_time_leaves_no_timer_behind():
+    # ManualTime runs a zero delay inside schedule_once, before the handle could be stored
+    async with ActorTestKit(manual_time=True) as testkit:
+        events: list[str] = []
+        ref = testkit.spawn(
+            Behaviors.supervise(started(events)).on_failure(S.restart_with_backoff(0, 0, 0.0))
+        )
+        ref.tell(Add(-1))
+        totals: TestProbe[int] = testkit.create_test_probe()
+        ref.tell(Get(totals.ref))
+        assert await totals.receive_message() == 0  # restarted
+        cell = ref._cell  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        assert not cell._timers  # pyright: ignore[reportUnknownMemberType]

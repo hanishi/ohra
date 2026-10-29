@@ -41,6 +41,15 @@ async def test_cancel_before_it_runs():
     assert ran == []
 
 
+async def test_cancel_after_it_ran_returns_false():
+    # as Pekko's LightArrayRevolverScheduler: an executed task cannot be cancelled
+    ran: list[int] = []
+    c = EventLoopScheduler().schedule_once(0.01, lambda: ran.append(1))
+    await asyncio.sleep(0.05)
+    assert ran == [1]
+    assert c.cancel() is False
+
+
 async def test_fixed_delay_repeats_until_cancelled():
     ran: list[int] = []
     c = EventLoopScheduler().schedule_with_fixed_delay(0.01, 0.01, lambda: ran.append(1))

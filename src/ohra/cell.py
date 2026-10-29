@@ -392,7 +392,7 @@ class ActorCell[T]:
                 if inspect.iscoroutine(awaitable):
                     awaitable.close()
                 elif isinstance(awaitable, asyncio.Future):
-                    awaitable.cancel()
+                    awaitable.cancel()  # a failed one: marks its exception retrieved
 
         task = asyncio.get_running_loop().create_task(run(), name=f"{self.path}/$pipe")
         self._tasks.add(task)
@@ -684,9 +684,16 @@ class ActorCell[T]:
                 sup.attempt += 1
                 self.log.warning("restarting in %.3fs after %r", delay, e)
                 token = sup.token
-                self._timers[token] = self.system.scheduler.schedule_once(
-                    delay, lambda: self._fire_backoff(token)
-                )
+                fired = False
+
+                def fire() -> None:
+                    nonlocal fired
+                    fired = True
+                    self._fire_backoff(token)
+
+                handle = self.system.scheduler.schedule_once(delay, fire)
+                if not fired:  # a scheduler may run a zero delay inside schedule_once
+                    self._timers[token] = handle
                 return sup
             case _:
                 raise e

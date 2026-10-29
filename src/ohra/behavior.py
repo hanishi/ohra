@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .signals import Signal
@@ -74,10 +74,59 @@ class WithTimers[T](Behavior[T]):
 
 @dataclass(frozen=True, eq=False, slots=True)
 class Unstash[T](Behavior[T]):
-    """Returned by StashBuffer.unstash_all: the runtime replays ``messages`` into ``behavior``."""
+    """Returned by StashBuffer.unstash_all: the runtime replays ``messages`` into ``behavior``.
+    Persistence also uses it to hand over what it held during a store call: ``signals`` are
+    delivered first, and ``stop_after`` stops the actor once the replay is done, as an
+    ``after_pending`` stop would have."""
 
     messages: deque[T]
     behavior: Behavior[T]
+    signals: tuple[Signal, ...] = ()
+    stop_after: bool = False
+    held: Held | None = None
+
+
+class StoreAnswer:
+    """Base of the messages a store call sends back to a persisted actor. Only a Holding takes
+    them; one that arrives after its Holding is gone, from an earlier incarnation, is ignored."""
+
+    __slots__ = ()
+
+
+@dataclass(eq=False)
+class Held:
+    """What a Holding keeps until its store call answers: the stashed commands, the signals,
+    whether an ``after_pending`` stop came (Pekko's receivedPoisonPill), whether the recovery
+    itself failed, which supervision treats as a failing start, and the behavior it handed over
+    to once the store answered, as the runtime started it, which a ``resume`` keeps."""
+
+    stash: deque[Any]
+    signals: list[Signal]
+    poisoned: bool = False
+    recovery_failed: bool = False
+    answered: Any = None
+
+
+@dataclass(frozen=True, eq=False, slots=True)
+class Holding[T](Receive[T]):
+    """A Receive waiting on a store: persistence's recovering and persisting states. PostStop and
+    PreRestart go to ``visible``, the behavior the user's code had before the write (Pekko's
+    visibleState), which the runtime fills in; an ``after_pending`` stop is delivered to it as
+    ``POISON_PILL`` instead of stopping the actor, as Pekko's DurableStateBehavior handles a
+    PoisonPill."""
+
+    visible: Behavior[T] | None = None
+    held: Held = field(default_factory=lambda: Held(deque(), []))
+
+
+class _PoisonPill:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "POISON_PILL"
+
+
+POISON_PILL: Any = _PoisonPill()
 
 
 class StashOverflowError(Exception):
@@ -192,13 +241,14 @@ class Behaviors:
         return _SuperviseBuilder(behavior)
 
     @staticmethod
-    def persisted[S](store: Store[S]) -> _Persister[S]:
+    def persisted[S](store: Store[S], stash_capacity: int = 4096) -> _Persister[S]:
         """Make a state-to-behavior factory persisted: ``@Behaviors.persisted(store)`` on ``def
         cart(items)``. Calling the factory writes the state before becoming; ``factory.recover(id,
-        empty)`` starts it."""
+        empty)`` starts it. Commands that arrive while the actor recovers or writes wait in an
+        internal stash of ``stash_capacity``."""
         from .persistence import persisted
 
-        return persisted(store)
+        return persisted(store, stash_capacity)
 
     @staticmethod
     def with_timers[T](

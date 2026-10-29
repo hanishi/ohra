@@ -8,21 +8,33 @@ dependency.
     async def x(system: ActorSystem[Cmd] = actors.depends()) -> ...:
         return await system.ask(..., timeout=1)
 
-An ``AskTimeoutError`` escaping a route becomes a 504. Requires the ``web`` extra.
+An ``AskTimeoutError`` escaping a route becomes a 504. ``actors.websocket`` gives a WebSocket
+route an actor per connection, as Play's ``ActorFlow.actorRef`` does: the route owns the socket and
+the actor only gets ``out``. Requires the ``web`` extra.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from fastapi.responses import JSONResponse
 
-from ..behavior import Behavior
+from ..behavior import Behavior, Behaviors
+from ..context import ActorContext
 from ..patterns import AskTimeoutError
+from ..ref import ActorRef
+from ..signals import Signal, Terminated
+from ..stream import ActorSource, BufferOverflowError, OverflowStrategy
 from ..system import ActorSystem
+
+_log = logging.getLogger(__name__)
 
 
 class Actors[T]:
@@ -54,6 +66,110 @@ class Actors[T]:
         """Default value for a route parameter: ``system: ActorSystem[Cmd] = actors.depends()``."""
         return cast(ActorSystem[T], Depends(lambda: self.system))
 
+    async def websocket[In, Out](
+        self,
+        ws: WebSocket,
+        props: Callable[[ActorRef[Out]], Behavior[In]],
+        decode: Callable[[str], In],
+        buffer_size: int = 16,
+        overflow_strategy: OverflowStrategy = OverflowStrategy.fail,
+    ) -> None:
+        """Run one WebSocket connection through an actor, as Play's ``ActorFlow.actorRef``:
+        accept the socket, spawn ``props(out)``, tell it ``decode(text)`` for every frame that
+        comes in, and send every message it tells ``out`` as JSON. Returns when the connection is
+        over. A closed socket stops the actor after the frames it already has; an actor that
+        stops, or fails, closes the socket after the frames it told ``out``, and so does the
+        system terminating. A client more than ``buffer_size`` frames behind is closed with 1008
+        under ``OverflowStrategy.fail``, and a frame ``decode`` rejects closes it with 1003."""
+        await ws.accept()
+        out: ActorSource[Out | _Done] = ActorSource.actor_ref(
+            completion_matcher=lambda m: m is _DONE,
+            failure_matcher=lambda _: None,
+            buffer_size=buffer_size,
+            overflow_strategy=overflow_strategy,
+        )
+        root = self.system._root  # pyright: ignore[reportPrivateUsage]
+        cell = root.spawn_child(_flow(props, out.ref), None, None)
+        # Play's sink watches the wrapper: however it ends, the frames told so far go out first
+        cell.done.add_done_callback(lambda _: out.ref.tell(_DONE))
+        flow = cell.ref
+
+        async def receive() -> None:
+            with contextlib.suppress(WebSocketDisconnect):
+                while ws.application_state == WebSocketState.CONNECTED:
+                    text = await ws.receive_text()
+                    try:
+                        msg = decode(text)
+                    except Exception:
+                        _log.warning("closing a WebSocket: decode rejected a frame", exc_info=True)
+                        await ws.close(code=1003, reason="unsupported data")
+                        return
+                    flow.tell(msg)
+
+        async def send() -> None:
+            with contextlib.suppress(WebSocketDisconnect):  # the client may be gone already
+                try:
+                    async for frame in out:
+                        await ws.send_json(frame)
+                except BufferOverflowError:
+                    await ws.close(code=1008, reason="too slow")
+                else:  # the actor stopped and its frames are sent
+                    await ws.close()
+
+        receiving = asyncio.create_task(receive())
+        sending = asyncio.create_task(send())
+        try:
+            done, _ = await asyncio.wait({receiving, sending}, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        finally:  # everything before the await: in a cancelled scope (anyio) every await raises
+            flow.tell(_CLOSE)
+            out.cancel()
+            receiving.cancel()
+            sending.cancel()
+            await asyncio.wait({receiving, sending})
+
 
 def _ask_timeout_to_504(_request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": f"actor ask timed out: {exc}"}, status_code=504)
+
+
+class _Done:
+    """Told to the outbox when the connection's wrapper has stopped."""
+
+
+_DONE = _Done()
+
+
+class _Close:
+    """Told to the wrapper when the connection is over, as Play's wrapper gets Status.Success."""
+
+
+_CLOSE = _Close()
+
+
+def _flow[In, Out](
+    props: Callable[[ActorRef[Out]], Behavior[In]], out: ActorRef[Out | _Done]
+) -> Behavior[In | _Close]:
+    """Play's wrapper actor: spawns the connection's actor, forwards frames to it, and stops it
+    behind those frames (Play's PoisonPill) when the connection is over."""
+
+    def setup(ctx: ActorContext[In | _Close]) -> Behavior[In | _Close]:
+        actor = ctx.spawn(props(out), "flowActor")
+        ctx.watch(actor)
+
+        def on_message(msg: In | _Close) -> Behavior[In | _Close]:
+            if isinstance(msg, _Close):
+                ctx.stop(actor, after_pending=True)
+            else:
+                actor.tell(msg)
+            return Behaviors.same
+
+        def on_signal(_ctx: ActorContext[In | _Close], sig: Signal) -> Behavior[In | _Close]:
+            if isinstance(sig, Terminated):
+                return Behaviors.stopped()
+            return Behaviors.unhandled
+
+        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+    return Behaviors.setup(setup)

@@ -84,7 +84,52 @@ async def total(system: ActorSystem[Command] = actors.depends()) -> dict[str, in
 
 A WebSocket route takes the same dependency. What it shouldn't do is hand the socket to an actor. Writing to a socket is an await, and an actor that awaits in its handler is held until the await returns: no other message gets through, not even a stop. One slow client is then enough to wedge its actor.
 
-The route keeps the socket instead and gives the actors an outbox. `ohra.stream.ActorSource.actor_ref` is both at once: actors tell its `ref`, which never waits, and the route sends what comes out of it with `async for`.
+The route keeps the socket instead, and `actors.websocket` gives each connection an actor of its own, as Play Framework's `ActorFlow.actorRef` does:
+
+```python
+from dataclasses import dataclass
+
+from fastapi import FastAPI, WebSocket
+
+from ohra import ActorRef, Behavior, Behaviors
+from ohra.ext.fastapi import Actors
+
+type Frame = dict[str, str]
+
+
+@dataclass(frozen=True)
+class Said:
+    text: str
+
+
+def echo(out: ActorRef[Frame]) -> Behavior[Said]:
+    @Behaviors.receive_message
+    def on_message(msg: Said) -> Behavior[Said]:
+        out.tell({"echo": msg.text})  # a tell: the actor never waits on the socket
+        return Behaviors.same
+
+    return on_message
+
+
+actors = Actors(Behaviors.ignore, "echo")
+app = FastAPI(lifespan=actors.lifespan)
+
+
+@app.websocket("/ws")
+async def chat(ws: WebSocket) -> None:
+    await actors.websocket(ws, echo, Said)  # one actor per connection, for its lifetime
+```
+
+- **One actor per connection.** `actors.websocket(ws, echo, Said)` accepts the socket, spawns `echo(out)`, tells it `Said(text)` for every frame that comes in, and sends every message it tells `out` as JSON. It returns when the connection is over.
+- **The two lives are tied.** A closed socket stops the actor, after the frames it already has. An actor that stops, by returning `Behaviors.stopped()` or by failing, closes the socket once the frames it told `out` are sent, and so does the system shutting down.
+- **`out` holds 16 frames** (`buffer_size`). A client that falls further behind is closed with code 1008 under the default `OverflowStrategy.fail`. The drop strategies drop frames instead.
+- **`decode` is the trust boundary.** A frame it rejects by raising closes the socket with 1003 (unsupported data), logged with its traceback on `ohra.ext.fastapi`, and stops the actor.
+
+`examples/fastapi_chatroom.py` is the full version: a connection actor per socket that joins a room through a lobby, turns the client's frames into posts and room events into frames for `out`, and a room that watches its connection actors to tell the others when someone leaves.
+
+### How it works: an `ActorSource`
+
+`out` is the ref of an `ohra.stream.ActorSource`, which `actors.websocket` builds and iterates. `ActorSource.actor_ref` returns an object that is two things at once: actors tell its `ref`, which never waits, and the route sends what comes out of it with `async for`. A route can wire it by hand, for a connection that doesn't fit one actor:
 
 ```python
 import asyncio
@@ -152,10 +197,9 @@ async def chat(ws: WebSocket, system: ActorSystem[Say] = actors.depends()) -> No
 - **Once the loop has ended,** or the outbox is cancelled with `cancel()` or by cancelling the task that iterates it, tells to `outbox.ref` are dead letters, logged at debug on `ohra.dead_letters`. A `break` doesn't cancel it: a later `async for` takes the rest.
 - **Annotate the outbox,** as `outbox: ActorSource[Frame] = ...`: the frame type comes from the annotation, since the lambdas don't name it.
 
-`examples/fastapi_chatroom.py` is the full version: one connection actor per socket that turns room events into frames for its outbox, rooms created by a lobby, and a room that watches its connection actors to tell the others when someone leaves.
-
 > **Coming from Apache Pekko**
 >
+> - `actors.websocket` follows Play Framework's `ActorFlow.actorRef`, which builds the same thing from Pekko streams: a wrapper actor that spawns yours and watches it, a `Source.actorRef` for `out`, and a `Sink.actorRef` for the frames that come in. Pekko itself has no counterpart.
 > - `ActorSource.actorRef` comes from Pekko's stream-typed module. ohra has no streams, so there's no `Source` and no graph: the object it returns is both the source and its materialized ref. The [appendix B](appendix-deviations.md) entry lists the rest.
 
 ---

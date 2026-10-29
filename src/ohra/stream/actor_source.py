@@ -74,6 +74,7 @@ class ActorSource[T]:
         self._failure: BaseException | None = None
         self._stopped = False
         self._waiter: asyncio.Future[None] | None = None
+        self._on_failure: Callable[[], None] | None = None  # for a consumer stuck outside the loop
         self._ref = _SourceRef(self, f"/temp/$source-{next(_ids)}")
 
     @staticmethod
@@ -197,6 +198,8 @@ class ActorSource[T]:
         self._stopped = True
         self._buffer.clear()
         self._wake()
+        if self._on_failure is not None:
+            self._on_failure()
 
     def _wake(self) -> None:
         waiter, self._waiter = self._waiter, None

@@ -144,6 +144,7 @@ class FakeSocket:
         send_error: BaseException | None = None,
         close_error: BaseException | None = None,
         frame_on_close: str | None = None,
+        sends_block_after: int | None = None,
     ) -> None:
         from starlette.websockets import WebSocketState
 
@@ -151,6 +152,8 @@ class FakeSocket:
         self.send_error = send_error
         self.close_error = close_error
         self.frame_on_close = frame_on_close  # a frame that arrives in the tick the server closes
+        self.sends_block_after = sends_block_after  # a client that stops reading
+        self.blocked = False
         self.sends = 0
         self.sent: list[Any] = []
         self.closed: int | None = None
@@ -160,6 +163,9 @@ class FakeSocket:
         pass
 
     async def send_json(self, data: Any) -> None:
+        if self.sends_block_after is not None and self.sends >= self.sends_block_after:
+            self.blocked = True
+            await asyncio.Event().wait()  # the TCP window is full: the send never returns
         self.sends += 1
         if self.send_error is not None:
             raise self.send_error
@@ -178,6 +184,8 @@ class FakeSocket:
     async def close(self, code: int = 1000, reason: str | None = None) -> None:
         from starlette.websockets import WebSocketState
 
+        if self.application_state != WebSocketState.CONNECTED:  # as Starlette's
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
         self.application_state = WebSocketState.DISCONNECTED
         if self.frame_on_close is not None:
             self.incoming.put_nowait(self.frame_on_close)
@@ -399,3 +407,90 @@ async def test_a_frame_decode_rejects_closes_with_1003_and_stops_the_actor():
         await actors.websocket(ws, lambda out: echo(out, stopped), strict)  # type: ignore[arg-type]
         assert ws.closed == 1003
         await eventually(stopped.is_set)
+
+
+async def test_a_client_that_stops_reading_is_closed_with_1008():
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket(sends_block_after=1)
+        websocket = actors.websocket(ws, echo, Said, buffer_size=1)  # type: ignore[arg-type]
+        connection = asyncio.create_task(websocket)
+        ws.incoming.put_nowait("a")
+        await eventually(lambda: ws.sent == [{"echo": "a"}])
+        ws.incoming.put_nowait("b")
+        await eventually(lambda: ws.blocked)  # the send of "b" never returns
+        ws.incoming.put_nowait("c")  # buffered
+        ws.incoming.put_nowait("d")  # overflows
+        await asyncio.wait_for(connection, 1)
+        assert ws.closed == 1008
+
+
+async def test_a_connection_while_the_system_shuts_down_is_closed_with_1001():
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    def slow_to_stop() -> Behavior[None]:
+        async def on_signal(_ctx: Any, sig: Signal) -> Behavior[None]:
+            if sig is PostStop:
+                started.set()
+                await gate.wait()
+            return Behaviors.same
+
+        return Behaviors.ignore.receive_signal(on_signal)
+
+    @Behaviors.setup
+    def guardian(ctx: Any) -> Behavior[None]:
+        ctx.spawn(slow_to_stop(), "slow")
+        return Behaviors.ignore
+
+    actors = Actors(guardian, "ws")
+    async with actors.lifespan(FastAPI()):
+        actors.system.terminate()
+        await started.wait()  # the guardian is stopping, waiting on its child
+        try:
+            ws = FakeSocket()
+            await actors.websocket(ws, echo, Said)  # type: ignore[arg-type]
+            assert ws.closed == 1001
+        finally:
+            gate.set()
+
+
+async def test_an_overflow_after_the_client_left_is_not_an_error():
+    from starlette.websockets import WebSocketDisconnect, WebSocketState
+
+    class GoneSocket(FakeSocket):
+        """The client is gone: the first send fails as Starlette's does, and in the next tick
+        the actor overflows ``out``."""
+
+        out: ActorRef[Frame] | None = None
+
+        async def send_json(self, data: Any) -> None:
+            self.application_state = WebSocketState.DISCONNECTED
+            out = self.out
+            assert out is not None
+            asyncio.get_running_loop().call_soon(lambda: (out.tell({}), out.tell({})))
+            raise WebSocketDisconnect(1006)
+
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = GoneSocket()
+
+        def props(out: ActorRef[Frame]) -> Behavior[Said]:
+            ws.out = out
+            return echo(out)
+
+        ws.incoming.put_nowait("a")
+        await asyncio.wait_for(actors.websocket(ws, props, Said, buffer_size=1), 1)  # type: ignore[arg-type]
+
+
+async def test_a_rejected_frame_in_the_tick_the_server_closes_is_not_an_error():
+    actors = Actors(Behaviors.ignore, "ws")
+
+    def strict(text: str) -> Said:
+        if not text:
+            raise ValueError("empty frame")
+        return Said(text)
+
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket(frame_on_close="")
+        await actors.websocket(ws, talker({"n": "1"}), strict)  # type: ignore[arg-type]
+        assert ws.closed == 1000

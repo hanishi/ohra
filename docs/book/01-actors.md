@@ -264,7 +264,7 @@ Timers and background tasks are cancelled at the start of the stop, so nothing o
 
 ### Supervision
 
-A failing handler stops the actor unless a supervisor says otherwise. `resume` keeps the state and drops the message. `restart` reruns the supervised behavior from its `setup`, stopping children first. `restart_with_backoff` waits with exponential delay and stashes messages meanwhile, which is the right choice for a `setup` that can fail. An `after_pending` stop that arrives during the wait is stashed behind them, so the restarted actor handles them first, as Pekko's `RestartSupervisor` stashes a `PoisonPill`. Any other stop turns the stash into dead letters.
+A failing handler stops the actor unless a supervisor says otherwise. `resume` keeps the state and drops the message. `restart` reruns the supervised behavior from its `setup`, stopping children first. `restart_with_backoff` waits with exponential delay and stashes messages meanwhile, which is the right choice for a `setup` that can fail. The `Terminated` of a watched actor that stops during the wait is stashed with them, in order. An `after_pending` stop that arrives during the wait is stashed behind them, so the restarted actor handles them first, as Pekko's `RestartSupervisor` stashes a `PoisonPill`. Any other stop turns the stash into dead letters.
 
 ```python
 from ohra import SupervisorStrategy

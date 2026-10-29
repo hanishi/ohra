@@ -538,15 +538,21 @@ class ActorCell[T]:
             if isinstance(b, Stopped):
                 break
             msg = msgs.popleft()
-            b = await (self._poison(b) if msg is _POISON else self._deliver(b, msg))
+            if msg is _POISON:
+                b = await self._poison(b)
+            elif isinstance(msg, Signal):  # a Terminated stashed by a backoff
+                b = await self._signal(b, msg)
+            else:
+                b = await self._deliver(b, msg)
         if isinstance(b, Stopped):
             self._dead_letters(msgs)
         return b
 
     def _dead_letters(self, msgs: deque[Any]) -> None:
-        """Empty ``msgs`` into dead letters. A queued stop is not a message: it goes quietly."""
+        """Empty ``msgs`` into dead letters. A queued stop or signal is not a message: it goes
+        quietly."""
         while msgs:
-            if (msg := msgs.popleft()) is not _POISON:
+            if (msg := msgs.popleft()) is not _POISON and not isinstance(msg, Signal):
                 self.system.dead_letter(msg, self.ref)
 
     async def _deliver(self, b: Behavior[T], msg: Any) -> Behavior[T]:
@@ -582,8 +588,8 @@ class ActorCell[T]:
     async def _supervise(self, sup: _Supervisor[T], item: Any, is_signal: bool) -> Behavior[T]:
         if isinstance(item, _BackoffRestart) and item.token is sup.token:
             return await self._backoff_restart(sup)
-        if sup.inner is None:  # backing off: stash messages, drop signals
-            if not is_signal:
+        if sup.inner is None:  # backing off: stash messages and Terminated, as Pekko does
+            if not is_signal or isinstance(item, Terminated):
                 strategy = cast(Backoff, sup.template.strategy)
                 if sup.stash is not None and len(sup.stash) < strategy.stash_capacity:
                     sup.stash.append(item)
@@ -672,7 +678,8 @@ class ActorCell[T]:
                     sup.stash = deque()
                 if isinstance(held, Holding):  # what came during the failed store call
                     h = held.held
-                    sup.stash.extendleft(reversed([*h.stash, *([_POISON] if h.poisoned else [])]))
+                    held_back = [*h.signals, *h.stash, *([_POISON] if h.poisoned else [])]
+                    sup.stash.extendleft(reversed(held_back))
                 delay = strategy.delay(sup.attempt, random.random())
                 sup.attempt += 1
                 self.log.warning("restarting in %.3fs after %r", delay, e)

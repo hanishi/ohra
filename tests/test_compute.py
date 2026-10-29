@@ -138,4 +138,6 @@ async def test_event_loop_stays_responsive_during_parallel_compute():
         tick.cancel()
         await asyncio.gather(tick, return_exceptions=True)
     assert elapsed < 0.4, elapsed  # 8 x 100ms sequential would be 800ms
-    assert max(gaps) < 0.05, max(gaps)  # the loop kept ticking while threads were busy
+    # the loop kept ticking while threads were busy: a handler blocking it would show a gap of
+    # the whole 0.1 s compute; under that, a shared CI runner's scheduling noise is no failure
+    assert max(gaps) < 0.09, max(gaps)

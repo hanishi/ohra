@@ -172,12 +172,16 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
         def notify(
             keys: Iterable[ServiceKey[Any]], services_were_added_or_removed: bool = True
         ) -> None:
-            for key in keys:
-                for subscriber in subscribers.get(key, ()):
-                    subscriber.tell(listing(key, services_were_added_or_removed))
+            for key in keys:  # one Listing per key, as Pekko's notifySubscribers
+                if subs := subscribers.get(key):
+                    changed = listing(key, services_were_added_or_removed)
+                    for subscriber in subs:
+                        subscriber.tell(changed)
 
         def local_change(keys: Iterable[ServiceKey[Any]]) -> None:
             keys = list(keys)
+            if not keys:  # a service already gone: nothing to tell or publish
+                return
             notify(keys)
             if replication is not None:
                 replication.publish_own_row(registry)
@@ -245,6 +249,8 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                 case _SubscriberTerminated(ref):
                     for key in subscriptions_per_actor.pop(ref, set()):
                         subscribers[key].discard(ref)
+                        if not subscribers[key]:
+                            del subscribers[key]
                 case ReceptionistRow() | ClusterDomainEvent() | _ResendTick() if (
                     replication is not None
                 ):

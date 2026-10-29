@@ -20,6 +20,7 @@ from ohra import (
 )
 from ohra.cluster.core import Cluster, ClusterSettings, Down, Join, Leave
 from ohra.receptionist import (
+    _ServiceTerminated,  # pyright: ignore[reportPrivateUsage]
     Find,
     Listing,
     Receptionist,
@@ -164,6 +165,40 @@ async def test_registrations_on_two_nodes_both_reach_a_third():
         assert {r.path for r in (await find(c)).service_instances} == {svc_a.path, svc_b.path}
 
 
+async def test_a_terminated_service_with_no_bindings_publishes_no_row():
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        versions: list[int] = []
+        remoting = b.remoting
+        assert remoting is not None
+        deliver = remoting._handle  # pyright: ignore[reportPrivateUsage]
+
+        def recording_rows(frame: Json) -> None:
+            message = frame.get("message") if isinstance(frame, dict) else None
+            if isinstance(message, dict) and message.get("$type") == "ReceptionistRow":
+                version = message.get("version")
+                assert isinstance(version, int)
+                versions.append(version)
+            deliver(frame)
+
+        remoting._handle = recording_rows  # pyright: ignore[reportPrivateUsage]
+        try:
+            first = await spawn(a, Behaviors.receive_message(greeter), "first")
+            Receptionist(a).ref.tell(Register(GREETER, first))
+            await eventually_async(lambda: instances_seen_on(b, 1))
+            before = max(versions)
+            unbound = await spawn(a, Behaviors.receive_message(greeter), "unbound")
+            Receptionist(a).ref.tell(_ServiceTerminated(unbound))  # no keys: nothing changed
+            second = await spawn(a, Behaviors.receive_message(greeter), "second")
+            Receptionist(a).ref.tell(Register(GREETER, second))
+            await eventually_async(lambda: instances_seen_on(b, 2))
+        finally:
+            remoting._handle = deliver  # pyright: ignore[reportPrivateUsage]
+        assert max(versions) == before + 1
+
+
 async def test_a_row_from_a_not_yet_member_is_hidden_until_it_joins():
     p1, p2, p3 = free_port(), free_port(), free_port()
     async with AsyncExitStack() as stack:
@@ -173,12 +208,15 @@ async def test_a_row_from_a_not_yet_member_is_hidden_until_it_joins():
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
         # b's receptionist exists and is empty
         assert (await find(b)).all_service_instances == frozenset()
+        seen: list[Listing[SayHello]] = []
+        Receptionist(b).ref.tell(Subscribe(GREETER, await spawn(b, recorder(seen), "seen")))
         svc = await spawn(c, Behaviors.receive_message(greeter), "svc")
         row = ReceptionistRow(Cluster(c).self_unique_address, 5, ((GREETER.id, svc),))
         # over the wire, from c
         c.resolve(f"{Cluster(b).self_address.root}/system/receptionist").tell(row)
         await asyncio.sleep(0.2)
         assert (await find(b)).all_service_instances == frozenset()  # c is not a member: hidden
+        assert seen and all(not listing.all_service_instances for listing in seen)
         Cluster(c).manager.tell(Join(Address("c", "127.0.0.1", p1)))
         await eventually_async(lambda: instances_seen_on(b, 1), timeout=5)
         (ref,) = (await find(b)).service_instances

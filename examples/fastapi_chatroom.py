@@ -1,8 +1,8 @@
-"""The chat room over WebSockets. The route owns the socket: actors tell frames to an outbox,
-an ``ActorSource``, and the route sends what comes out of it. Each connection is an actor that
-turns room events into frames; each room is an actor with one session child per user; rooms
-are created on demand by the lobby. A room watches its clients' connection actors, so when a
-socket closes and its actor stops, the room removes the session and tells the others.
+"""The chat room over WebSockets. ``actors.websocket`` owns each socket and gives it an actor,
+as Play's ``ActorFlow.actorRef`` does: the actor gets the client's frames as messages and tells
+the frames it sends to ``out``. Each room is an actor with one session child per user; rooms are
+created on demand by the lobby. A room watches its clients' connection actors, so when a socket
+closes and its actor stops, the room removes the session and tells the others.
 
     uv run --extra web uvicorn examples.fastapi_chatroom:app --port 8000
 
@@ -19,13 +19,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Signal, Terminated
-from ohra.stream import ActorSource, BufferOverflowError, OverflowStrategy
+from ohra import ActorContext, ActorRef, Behavior, Behaviors, Signal, StashBuffer, Terminated
 from ohra.ext.fastapi import Actors
 
 # --- room protocol (as in examples/chatroom.py, plus join/leave notices) ----------------------
@@ -140,75 +139,82 @@ def session(
     return on_message
 
 
-# --- one actor per WebSocket connection --------------------------------------------------------
+# --- one actor per WebSocket connection, spawned by actors.websocket ---------------------------
 
 
 @dataclass(frozen=True)
-class Joined:
-    handle: ActorRef[PostMessage]
-    connection: ActorRef[SessionEvent]
+class Incoming:
+    """A frame from the client."""
+
+    text: str
 
 
-@dataclass(frozen=True)
-class Denied:
-    reason: str
-
-
-type JoinResult = Joined | Denied
+type ConnectionMsg = Incoming | SessionEvent
 
 type Frame = dict[str, str]
 
 
-def connection(outbox: ActorRef[Frame], reply_to: ActorRef[JoinResult]) -> Behavior[SessionEvent]:
-    """Turns room events into frames for the route's outbox. Telling never waits, so the actor
-    is free for its next message, a stop included, however slow the socket is."""
+def connection(
+    lobby: ActorRef["Join"], room: str, screen_name: str, out: ActorRef[Frame]
+) -> Behavior[ConnectionMsg]:
+    """Joins the room, then turns the client's frames into posts and room events into frames for
+    ``out``. Telling ``out`` never waits, so the actor is free for its next message, a stop
+    included, however slow the socket is. Stopping closes the socket."""
 
-    @Behaviors.receive
-    def on_message(ctx: ActorContext[SessionEvent], msg: SessionEvent) -> Behavior[SessionEvent]:
-        match msg:
-            case SessionGranted(handle):
-                reply_to.tell(Joined(handle, ctx.self))
-            case SessionDenied(reason):
-                reply_to.tell(Denied(reason))
-                return Behaviors.stopped()
-            case MessagePosted(screen_name, message):
-                outbox.tell({"type": "message", "from": screen_name, "text": message})
-            case Notice(text):
-                outbox.tell({"type": "notice", "text": text})
-        return Behaviors.same
+    def with_stash(buffer: StashBuffer[ConnectionMsg]) -> Behavior[ConnectionMsg]:
+        @Behaviors.receive_message
+        def joining(msg: ConnectionMsg) -> Behavior[ConnectionMsg]:
+            match msg:
+                case SessionGranted(handle):
+                    return buffer.unstash_all(joined(handle))
+                case SessionDenied(reason):
+                    out.tell({"type": "denied", "text": reason})
+                    return Behaviors.stopped()
+                case _:  # a frame that came before the room answered
+                    buffer.stash(msg)
+                    return Behaviors.same
 
-    return on_message
+        def joined(handle: ActorRef[PostMessage]) -> Behavior[ConnectionMsg]:
+            @Behaviors.receive_message
+            def on_message(msg: ConnectionMsg) -> Behavior[ConnectionMsg]:
+                match msg:
+                    case Incoming(text):
+                        handle.tell(PostMessage(text))
+                    case MessagePosted(name, message):
+                        out.tell({"type": "message", "from": name, "text": message})
+                    case Notice(text):
+                        out.tell({"type": "notice", "text": text})
+                    case SessionGranted() | SessionDenied():
+                        pass
+                return Behaviors.same
+
+            return on_message
+
+        return joining
+
+    @Behaviors.setup
+    def setup(ctx: ActorContext[ConnectionMsg]) -> Behavior[ConnectionMsg]:
+        lobby.tell(Join(room, screen_name, ctx.self))
+        return Behaviors.with_stash(16, with_stash)
+
+    return setup
 
 
-# --- lobby: rooms by name, connections as children -----------------------------------------------
+# --- lobby: rooms by name ------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Join:
     room: str
     screen_name: str
-    outbox: ActorRef[Frame]
-    reply_to: ActorRef[JoinResult]
+    client: ActorRef[SessionEvent]
 
 
-@dataclass(frozen=True)
-class Leave:
-    connection: ActorRef[SessionEvent]
-
-
-type LobbyCmd = Join | Leave
-
-
-def lobby() -> Behavior[LobbyCmd]:
+def lobby() -> Behavior[Join]:
     @Behaviors.receive
-    def on_message(ctx: ActorContext[LobbyCmd], msg: LobbyCmd) -> Behavior[LobbyCmd]:
-        match msg:
-            case Join(room_name, screen_name, outbox, reply_to):
-                room: ActorRef[RoomCmd] = ctx.child(room_name) or ctx.spawn(chat_room(), room_name)
-                conn = ctx.spawn_anonymous(connection(outbox, reply_to))
-                room.tell(GetSession(screen_name, conn))
-            case Leave(conn):
-                ctx.stop(conn)  # the room is watching it and will drop the session
+    def on_message(ctx: ActorContext[Join], msg: Join) -> Behavior[Join]:
+        room: ActorRef[RoomCmd] = ctx.child(msg.room) or ctx.spawn(chat_room(), msg.room)
+        room.tell(GetSession(msg.screen_name, msg.client))
         return Behaviors.same
 
     return on_message
@@ -222,42 +228,13 @@ app = FastAPI(title="chat", lifespan=actors.lifespan)
 
 
 @app.websocket("/ws/{room}/{screen_name}")
-async def chat(
-    ws: WebSocket, room: str, screen_name: str, system: ActorSystem[LobbyCmd] = actors.depends()
-) -> None:
-    await ws.accept()
-    outbox: ActorSource[Frame] = ActorSource.actor_ref(
-        completion_matcher=lambda _: False,
-        failure_matcher=lambda _: None,
+async def chat(ws: WebSocket, room: str, screen_name: str) -> None:
+    await actors.websocket(
+        ws,
+        lambda out: connection(actors.system, room, screen_name, out),
+        Incoming,
         buffer_size=256,
-        overflow_strategy=OverflowStrategy.fail,
     )
-
-    async def send() -> None:
-        try:
-            async for frame in outbox:
-                await ws.send_json(frame)
-        except BufferOverflowError:  # a client too slow to keep up is let go
-            await ws.close(code=1008, reason="too slow")
-
-    result: JoinResult = await system.ask(
-        lambda r: Join(room, screen_name, outbox.ref, r), timeout=2
-    )
-    match result:
-        case Denied(reason):
-            await ws.send_json({"type": "denied", "text": reason})
-            await ws.close()
-        case Joined(handle, conn):
-            sending = asyncio.create_task(send())
-            try:
-                while True:
-                    handle.tell(PostMessage(await ws.receive_text()))
-            except WebSocketDisconnect:
-                pass
-            finally:
-                system.tell(Leave(conn))
-                sending.cancel()
-                await asyncio.wait([sending])
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>chat</title>

@@ -8,6 +8,7 @@ import dataclasses
 import gc
 import importlib.util
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ httpx = pytest.importorskip("httpx")
 from fastapi import FastAPI  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
-from ohra import ActorRef, ActorSystem, Behavior, Behaviors  # noqa: E402
+from ohra import ActorRef, ActorSystem, Behavior, Behaviors, PostStop, Signal  # noqa: E402
 from ohra.ext.fastapi import Actors  # noqa: E402
 
 from .util import eventually  # noqa: E402
@@ -135,48 +136,266 @@ def test_no_chatroom_actor_holds_the_socket():
 
 
 class FakeSocket:
-    """Just enough of a WebSocket for the chatroom route: frames in from a queue, and a send that
-    fails with ``send_error``."""
+    """Just enough of a WebSocket for a route: frames in from a queue, frames out to ``sent``,
+    or a send that fails with ``send_error``."""
 
-    def __init__(self, send_error: BaseException) -> None:
+    def __init__(
+        self,
+        send_error: BaseException | None = None,
+        close_error: BaseException | None = None,
+        frame_on_close: str | None = None,
+    ) -> None:
+        from starlette.websockets import WebSocketState
+
         self.incoming: asyncio.Queue[str | BaseException] = asyncio.Queue()
         self.send_error = send_error
+        self.close_error = close_error
+        self.frame_on_close = frame_on_close  # a frame that arrives in the tick the server closes
         self.sends = 0
+        self.sent: list[Any] = []
+        self.closed: int | None = None
+        self.application_state = WebSocketState.CONNECTED
 
     async def accept(self) -> None:
         pass
 
     async def send_json(self, data: Any) -> None:
         self.sends += 1
-        raise self.send_error
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(data)
 
     async def receive_text(self) -> str:
+        from starlette.websockets import WebSocketState
+
+        if self.application_state != WebSocketState.CONNECTED:  # as Starlette's
+            raise RuntimeError('WebSocket is not connected. Need to call "accept" first.')
         item = await self.incoming.get()
         if isinstance(item, BaseException):
             raise item
         return item
 
     async def close(self, code: int = 1000, reason: str | None = None) -> None:
-        pass
+        from starlette.websockets import WebSocketState
+
+        self.application_state = WebSocketState.DISCONNECTED
+        if self.frame_on_close is not None:
+            self.incoming.put_nowait(self.frame_on_close)
+        if self.close_error is not None:
+            raise self.close_error
+        self.closed = code
 
 
-async def test_a_chatroom_send_that_fails_leaves_no_unretrieved_exception():
+# --- actors.websocket, after Play's ActorFlow.actorRef -------------------------------------------
+
+
+@dataclass(frozen=True)
+class Said:
+    text: str
+
+
+type Frame = dict[str, str]
+
+
+def echo(out: ActorRef[Frame], stopped: asyncio.Event | None = None) -> Behavior[Said]:
+    @Behaviors.receive_message
+    def on_message(msg: Said) -> Behavior[Said]:
+        out.tell({"echo": msg.text})
+        return Behaviors.same
+
+    def on_signal(_ctx: Any, sig: Signal) -> Behavior[Said]:
+        if sig is PostStop and stopped is not None:
+            stopped.set()
+        return Behaviors.same
+
+    return on_message.receive_signal(on_signal)
+
+
+def talker(*frames: Frame) -> Callable[[ActorRef[Frame]], Behavior[Said]]:
+    """An actor that tells ``frames`` when it starts, then stops."""
+
+    def props(out: ActorRef[Frame]) -> Behavior[Said]:
+        @Behaviors.setup
+        def setup(_ctx: Any) -> Behavior[Said]:
+            for frame in frames:
+                out.tell(frame)
+            return Behaviors.stopped()
+
+        return setup
+
+    return props
+
+
+async def test_websocket_relays_frames_both_ways():
     from fastapi import WebSocketDisconnect
 
-    chatroom = _chatroom()
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        connection = asyncio.create_task(actors.websocket(ws, echo, Said))  # type: ignore[arg-type]
+        ws.incoming.put_nowait("hi")
+        await eventually(lambda: ws.sent == [{"echo": "hi"}])
+        ws.incoming.put_nowait(WebSocketDisconnect(1000))
+        await connection
+
+
+async def test_closing_the_socket_stops_the_actor():
+    from fastapi import WebSocketDisconnect
+
+    actors = Actors(Behaviors.ignore, "ws")
+    stopped = asyncio.Event()
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        connection = asyncio.create_task(
+            actors.websocket(ws, lambda out: echo(out, stopped), Said)  # type: ignore[arg-type]
+        )
+        ws.incoming.put_nowait(WebSocketDisconnect(1000))
+        await connection
+        await eventually(stopped.is_set)
+
+
+async def test_an_actor_that_stops_closes_the_socket_after_its_frames():
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        await actors.websocket(ws, talker({"n": "1"}, {"n": "2"}), Said)  # type: ignore[arg-type]
+        assert ws.sent == [{"n": "1"}, {"n": "2"}]
+        assert ws.closed == 1000
+
+
+async def test_overflow_closes_with_1008():
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        frames = [{"n": str(i)} for i in range(3)]
+        await actors.websocket(ws, talker(*frames), Said, buffer_size=1)  # type: ignore[arg-type]
+        assert ws.closed == 1008
+
+
+async def test_a_send_that_fails_ends_the_connection_and_stops_the_actor():
+    from fastapi import WebSocketDisconnect
+
+    actors = Actors(Behaviors.ignore, "ws")
+    stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     errors: list[str] = []
     loop.set_exception_handler(lambda _, context: errors.append(str(context["message"])))
     try:
-        async with ActorSystem(chatroom.lobby(), "chat") as system:
+        async with actors.lifespan(FastAPI()):
             ws = FakeSocket(WebSocketDisconnect(1006))  # the client's TCP dropped mid-send
-            route = asyncio.create_task(chatroom.chat(ws, "lobby", "alice", system))
-            ws.incoming.put_nowait("hello")  # the room echoes it back to alice
-            await eventually(lambda: ws.sends > 0)
-            ws.incoming.put_nowait(WebSocketDisconnect(1006))
-            await route
-            del route
+            connection = asyncio.create_task(
+                actors.websocket(ws, lambda out: echo(out, stopped), Said)  # type: ignore[arg-type]
+            )
+            ws.incoming.put_nowait("hi")
+            await connection
+            await eventually(stopped.is_set)
+            del connection
             gc.collect()
     finally:
         loop.set_exception_handler(None)
-    assert errors == []
+    assert errors == []  # no task died with an exception nobody retrieved
+
+
+async def test_a_route_cancelled_by_the_server_still_stops_the_actor():
+    import anyio
+
+    actors = Actors(Behaviors.ignore, "ws")
+    stopped = asyncio.Event()
+    scope = anyio.CancelScope()  # how Starlette cancels a route: every later await raises too
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+
+        async def route() -> None:
+            with scope:
+                await actors.websocket(ws, lambda out: echo(out, stopped), Said)  # type: ignore[arg-type]
+
+        connection = asyncio.create_task(route())
+        ws.incoming.put_nowait("hi")
+        await eventually(lambda: ws.sent == [{"echo": "hi"}])
+        scope.cancel()
+        await connection
+        await eventually(stopped.is_set)
+
+
+async def test_frames_the_actor_already_has_are_handled_when_the_client_closes():
+    from fastapi import WebSocketDisconnect
+
+    actors = Actors(Behaviors.ignore, "ws")
+    gate = asyncio.Event()
+    got: list[str] = []
+
+    def slow(_out: ActorRef[Frame]) -> Behavior[Said]:
+        @Behaviors.receive_message
+        async def on_message(msg: Said) -> Behavior[Said]:
+            await gate.wait()
+            got.append(msg.text)
+            return Behaviors.same
+
+        return on_message
+
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        for frame in ("1", "2", "3"):
+            ws.incoming.put_nowait(frame)
+        ws.incoming.put_nowait(WebSocketDisconnect(1000))
+        await actors.websocket(ws, slow, Said)  # type: ignore[arg-type]
+        gate.set()
+        await eventually(lambda: got == ["1", "2", "3"])
+
+
+async def test_terminating_the_system_closes_open_connections():
+    actors = Actors(Behaviors.ignore, "ws")
+    ws = FakeSocket()
+    async with actors.lifespan(FastAPI()):
+        connection = asyncio.create_task(actors.websocket(ws, echo, Said))  # type: ignore[arg-type]
+        ws.incoming.put_nowait("hi")
+        await eventually(lambda: ws.sent == [{"echo": "hi"}])
+    await asyncio.wait_for(connection, 1)
+    assert ws.closed == 1000
+
+
+async def test_an_actor_that_fails_to_start_closes_the_socket():
+    actors = Actors(Behaviors.ignore, "ws")
+
+    def broken(_out: ActorRef[Frame]) -> Behavior[Said]:
+        raise ValueError("no such room")
+
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        await asyncio.wait_for(actors.websocket(ws, broken, Said), 1)  # type: ignore[arg-type]
+        assert ws.closed == 1000
+
+
+async def test_a_close_after_the_client_left_is_not_an_error():
+    from fastapi import WebSocketDisconnect
+
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket(close_error=WebSocketDisconnect(1006))
+        await actors.websocket(ws, talker({"n": "1"}), Said)  # type: ignore[arg-type]
+        assert ws.sent == [{"n": "1"}]
+
+
+async def test_a_frame_in_the_tick_the_server_closes_is_not_an_error():
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket(frame_on_close="late")
+        await actors.websocket(ws, talker({"n": "1"}), Said)  # type: ignore[arg-type]
+        assert ws.closed == 1000
+
+
+async def test_a_frame_decode_rejects_closes_with_1003_and_stops_the_actor():
+    actors = Actors(Behaviors.ignore, "ws")
+    stopped = asyncio.Event()
+
+    def strict(text: str) -> Said:
+        if not text:
+            raise ValueError("empty frame")
+        return Said(text)
+
+    async with actors.lifespan(FastAPI()):
+        ws = FakeSocket()
+        ws.incoming.put_nowait("")
+        await actors.websocket(ws, lambda out: echo(out, stopped), strict)  # type: ignore[arg-type]
+        assert ws.closed == 1003
+        await eventually(stopped.is_set)

@@ -100,6 +100,8 @@ from .stream import (
     DONE,
     NOT_USED,
     AbruptStageTerminationError,
+    ActorFlow,
+    ActorSink,
     ActorSource,
     BufferOverflowError,
     Done,
@@ -116,6 +118,7 @@ from .stream import (
     Source,
     SourceQueue,
     UniqueKillSwitch,
+    WatchedActorTerminatedError,
 )
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
@@ -124,7 +127,9 @@ from .system import ActorSystem
 __all__ = [
     "AbruptStageTerminationError",
     "ActorContext",
+    "ActorFlow",
     "ActorRef",
+    "ActorSink",
     "ActorSource",
     "ActorSystem",
     "ActorSystemTerminateReason",
@@ -261,6 +266,7 @@ __all__ = [
     "UnreachableMember",
     "UnhandledMessage",
     "Unsubscribe",
+    "WatchedActorTerminatedError",
     "ask",
     "batching",
     "remotable",

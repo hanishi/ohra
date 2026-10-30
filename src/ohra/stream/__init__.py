@@ -1,6 +1,8 @@
 """Streams: Apache Pekko Streams' typed ``Source``, ``Flow`` and ``Sink`` over async iterators,
-and Pekko's stream-typed ``ActorSource``."""
+and Pekko's stream-typed ``ActorSource``, ``ActorSink`` and ``ActorFlow``."""
 
+from .actor_flow import ActorFlow, WatchedActorTerminatedError
+from .actor_sink import ActorSink
 from .actor_source import ActorSource, BufferOverflowError, OverflowStrategy
 from .dsl import (
     DONE,
@@ -22,6 +24,8 @@ __all__ = [
     "DONE",
     "NOT_USED",
     "AbruptStageTerminationError",
+    "ActorFlow",
+    "ActorSink",
     "ActorSource",
     "BufferOverflowError",
     "Done",
@@ -38,4 +42,5 @@ __all__ = [
     "Source",
     "SourceQueue",
     "UniqueKillSwitch",
+    "WatchedActorTerminatedError",
 ]

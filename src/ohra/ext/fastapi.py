@@ -31,7 +31,15 @@ from ..context import ActorContext
 from ..patterns import AskTimeoutError
 from ..ref import ActorRef
 from ..signals import Signal, Terminated
-from ..stream import ActorSource, OverflowStrategy
+from ..stream import (
+    AbruptStageTerminationError,
+    ActorSource,
+    BufferOverflowError,
+    Keep,
+    OverflowStrategy,
+    Sink,
+    Source,
+)
 from ..system import ActorSystem
 
 _log = logging.getLogger(__name__)
@@ -82,19 +90,22 @@ class Actors[T]:
         system terminating. A client more than ``buffer_size`` frames behind is closed with 1008
         under ``OverflowStrategy.fail``, and a frame ``decode`` rejects closes it with 1003."""
         await ws.accept()
-        out: ActorSource[Out | _Done] = ActorSource.actor_ref(
+        root = self.system._root  # pyright: ignore[reportPrivateUsage]
+        if root.stopping:  # the system is shutting down
+            await ws.close(code=1001, reason="going away")
+            return
+        source: Source[Out | _Done, ActorRef[Out | _Done]] = ActorSource.actor_ref(
             completion_matcher=lambda m: m is _DONE,
             failure_matcher=lambda _: None,
             buffer_size=buffer_size,
             overflow_strategy=overflow_strategy,
         )
-        root = self.system._root  # pyright: ignore[reportPrivateUsage]
-        if root.stopping:  # the system is shutting down
-            await ws.close(code=1001, reason="going away")
-            return
-        cell = root.spawn_child(_flow(props, out.ref), None, None)
+        (out, terminated), outbox = (
+            source.watch_termination(Keep.both).to_mat(Sink.queue(), Keep.both).run(self.system)
+        )
+        cell = root.spawn_child(_flow(props, out), None, None)
         # Play's sink watches the wrapper: however it ends, the frames told so far go out first
-        cell.done.add_done_callback(lambda _: out.ref.tell(_DONE))
+        cell.done.add_done_callback(lambda _: out.tell(_DONE))
         flow = cell.ref
 
         async def receive() -> None:
@@ -112,24 +123,34 @@ class Actors[T]:
                     flow.tell(msg)
 
         async def send() -> None:
-            with contextlib.suppress(WebSocketDisconnect):  # the client may be gone already
-                async for frame in out:
-                    await ws.send_json(frame)
+            # the client may be gone already; an overflow is handled through ``terminated``
+            with contextlib.suppress(WebSocketDisconnect, BufferOverflowError):
+                try:
+                    async for frame in outbox:
+                        await ws.send_json(frame)
+                except AbruptStageTerminationError:  # the system stopped before the frames went
+                    await ws.close(code=1001, reason="going away")
+                    return
                 await ws.close()  # the actor stopped and its frames are sent
 
         receiving = asyncio.create_task(receive())
         sending = asyncio.create_task(send())
-        overflowed = False
 
-        def overflow() -> None:  # Pekko fails downstream at once, even in the middle of a send
-            nonlocal overflowed
-            overflowed = True
-            sending.cancel()
+        def overflowed() -> bool:
+            return (
+                terminated.done()
+                and not terminated.cancelled()
+                and isinstance(terminated.exception(), BufferOverflowError)
+            )
 
-        out._on_failure = overflow  # pyright: ignore[reportPrivateUsage]
+        def overflow(_: object) -> None:  # Pekko fails downstream at once, even mid-send
+            if overflowed():
+                sending.cancel()
+
+        terminated.add_done_callback(overflow)
         try:
             done, _ = await asyncio.wait({receiving, sending}, return_when=asyncio.FIRST_COMPLETED)
-            if overflowed:
+            if overflowed():
                 if ws.application_state == WebSocketState.CONNECTED:  # else the client is gone
                     with contextlib.suppress(WebSocketDisconnect):
                         await ws.close(code=1008, reason="too slow")
@@ -140,7 +161,7 @@ class Actors[T]:
                     task.result()
         finally:  # everything before the await: in a cancelled scope (anyio) every await raises
             flow.tell(_CLOSE)
-            out.cancel()
+            outbox.cancel()
             receiving.cancel()
             sending.cancel()
             await asyncio.wait({receiving, sending})

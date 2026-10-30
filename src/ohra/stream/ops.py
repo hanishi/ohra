@@ -263,7 +263,8 @@ def recover_with_retries_op[T](
 
 def watch_stage[T](up: AsyncIterator[T], ctx: _Ctx, fut: asyncio.Future[Done]) -> Stage[T]:
     """Settles ``fut`` with ``DONE`` on completion and on downstream cancel, with the upstream
-    exception on failure, and with ``AbruptStageTerminationError`` when the run is aborted
+    exception on failure (at once, unpulled, for an upstream with ``on_failure``:
+    ``ActorSource``), and with ``AbruptStageTerminationError`` when the run is aborted
     (``terminate()``). A ``CancelledError`` passing through is not settled here: it is the
     downstream cancelling a pull (``DONE``, from the close) or the run's abort."""
     from .dsl import DONE, AbruptStageTerminationError
@@ -279,6 +280,9 @@ def watch_stage[T](up: AsyncIterator[T], ctx: _Ctx, fut: asyncio.Future[Done]) -
             fut.set_result(DONE)
 
     ctx.on_abort(lambda: settle(None))
+    on_failure = getattr(up, "on_failure", None)  # a source that fails outside a pull
+    if on_failure is not None:
+        on_failure(settle)
 
     async def run() -> AsyncGenerator[T, None]:
         try:
@@ -301,11 +305,16 @@ def new_done_future() -> asyncio.Future[Done]:
 
 
 def map_async_op[I, O](
-    parallelism: int, f: Callable[[I], Awaitable[O]], ordered: bool
+    parallelism: int,
+    f: Callable[[I], Awaitable[O]],
+    ordered: bool,
+    stop: asyncio.Future[Any] | None = None,
 ) -> Op[I, O]:
     """After Pekko's ``MapAsync`` (``ordered``) and ``MapAsyncUnordered``: pulls upstream only
     while fewer than ``parallelism`` calls are in flight, fails with the first failure, and
-    cancels what is still running when the stage ends for any reason."""
+    cancels what is still running when the stage ends for any reason. A failure of ``stop`` fails
+    the stage at once, as an upstream failure does in Pekko, whether a pull is waiting or not
+    (``ActorFlow.ask``'s watch)."""
     if parallelism < 1:
         raise ValueError("parallelism must be at least 1")
 
@@ -323,10 +332,14 @@ def map_async_op[I, O](
                     waiting: set[asyncio.Future[Any]] = set(pending)
                     if pull is not None:
                         waiting.add(pull)
+                    if stop is not None:
+                        waiting.add(stop)
                     await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
                     for t in pending:
                         if t.done() and not t.cancelled() and t.exception() is not None:
                             raise cast(BaseException, t.exception())
+                    if stop is not None and stop.done():
+                        stop.result()
                     if pull is not None and pull.done():
                         got, pull = pull, None
                         try:

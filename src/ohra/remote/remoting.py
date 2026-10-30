@@ -435,7 +435,8 @@ class Remoting:
         try:
             while (frame := await read_frame(reader)) is not None:
                 self._handle(frame)
-        except (ValueError, OSError) as e:
+        # json.loads raises RecursionError, not ValueError, on a frame nested too deep
+        except (ValueError, RecursionError, OSError) as e:
             _log.warning("closing connection: %s", e)
 
     def _handle(self, frame: Json) -> None:

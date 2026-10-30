@@ -20,7 +20,16 @@ from ohra import (
     TimerScheduler,
     batching,
 )
-from ohra.stream import Flow, Keep, NotUsed, RunnableGraph, Sink, Source
+from ohra.stream import (
+    Flow,
+    Keep,
+    KillSwitches,
+    NotUsed,
+    RunnableGraph,
+    Sink,
+    Source,
+    UniqueKillSwitch,
+)
 
 
 @dataclass(frozen=True)
@@ -177,4 +186,9 @@ def streams_are_typed(system: ActorSystem[Any]) -> None:
     ints: Sink[int, NotUsed] = Sink.cancelled()  # and Sink contravariant
     flow: Flow[bool, object, object] = Flow.of(int)
     wrong: asyncio.Future[str] = Source.single(1).run_with(Sink.head(), system)  # type: ignore[assignment]
-    del g, empty, ints, flow, wrong
+    zipped: Source[tuple[int, str], NotUsed] = Source.single(1).zip(Source.single("a"))
+    Source.single(1).merge(Source.single("a"))  # type: ignore[arg-type]
+    switched: Source[int, UniqueKillSwitch] = Source.single(1).via_mat(
+        KillSwitches.single(), Keep.right
+    )
+    del g, empty, ints, flow, wrong, zipped, switched

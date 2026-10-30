@@ -14,6 +14,7 @@ from .dsl import (
     Sink,
     Source,
 )
+from .kill_switch import KillSwitches, UniqueKillSwitch
 from .materializer import Materializer
 from .queue import QueueOfferResult, SinkQueue, SourceQueue
 
@@ -26,6 +27,7 @@ __all__ = [
     "Done",
     "Flow",
     "Keep",
+    "KillSwitches",
     "Materializer",
     "NotUsed",
     "OverflowStrategy",
@@ -35,4 +37,5 @@ __all__ = [
     "SinkQueue",
     "Source",
     "SourceQueue",
+    "UniqueKillSwitch",
 ]

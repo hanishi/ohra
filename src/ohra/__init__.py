@@ -105,6 +105,7 @@ from .stream import (
     Done,
     Flow,
     Keep,
+    KillSwitches,
     Materializer,
     NotUsed,
     OverflowStrategy,
@@ -114,6 +115,7 @@ from .stream import (
     SinkQueue,
     Source,
     SourceQueue,
+    UniqueKillSwitch,
 )
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
@@ -175,6 +177,7 @@ __all__ = [
     "JoinSeedNodes",
     "JvmExitReason",
     "Keep",
+    "KillSwitches",
     "KubernetesApiServiceDiscovery",
     "KubernetesApiSettings",
     "KeepMajority",
@@ -254,6 +257,7 @@ __all__ = [
     "TimerScheduler",
     "Try",
     "UniqueAddress",
+    "UniqueKillSwitch",
     "UnreachableMember",
     "UnhandledMessage",
     "Unsubscribe",

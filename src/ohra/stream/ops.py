@@ -516,3 +516,114 @@ class TickSource[T]:
 
     async def aclose(self) -> None:
         self.cancel()
+
+
+def merge_op[T](other: Source[T, Any], eager_complete: bool) -> Op[T, T]:
+    """After Pekko's ``Merge`` of two inputs. One pump task per input pulls an element, hands it
+    over and pulls the next only once the merge has taken it, so each input holds at most one
+    element, as Pekko's inlets do. Elements go out in arrival order. Completes when both inputs
+    have completed, or the first time one does with ``eager_complete``; a failure fails it at
+    once. ``other`` is built with the run, its materialized value dropped."""
+
+    def op(upstream: AsyncIterator[T], ctx: _Ctx) -> AsyncIterator[T]:
+        second, _ = other._build(ctx)  # pyright: ignore[reportPrivateUsage]
+
+        async def run() -> AsyncGenerator[T, None]:
+            # an element with the future its pump waits on, a failure, or None for completion
+            arrived: deque[tuple[T, asyncio.Future[None]] | Exception | None] = deque()
+            wake = asyncio.Event()
+
+            async def pump(it: AsyncIterator[T]) -> None:
+                try:
+                    async for x in it:
+                        taken = asyncio.get_running_loop().create_future()
+                        arrived.append((x, taken))
+                        wake.set()
+                        await taken
+                except Exception as e:
+                    arrived.appendleft(e)  # ahead of pending elements: Pekko fails at once
+                else:
+                    arrived.append(None)
+                wake.set()
+
+            async with closing(upstream) as up, closing(second) as other_up:
+                pumps = [asyncio.ensure_future(pump(up)), asyncio.ensure_future(pump(other_up))]
+                try:
+                    running = len(pumps)
+                    while running:
+                        while not arrived:
+                            wake.clear()
+                            await wake.wait()
+                        item = arrived.popleft()
+                        if item is None:
+                            running -= 1
+                            if eager_complete:
+                                return  # elements still pending are dropped, as in Pekko
+                        elif isinstance(item, Exception):
+                            raise item
+                        else:
+                            x, taken = item
+                            taken.set_result(None)
+                            yield x
+                finally:
+                    # before the inputs close: a pump suspended inside one would make its
+                    # aclose() fail with "already running"
+                    for p in pumps:
+                        p.cancel()
+                    await asyncio.gather(*pumps, return_exceptions=True)
+
+        return Stage(run(), second)  # closes ``second`` even if never pulled
+
+    return op
+
+
+def zip_with_op[A, B, R](other: Source[B, Any], f: Callable[[A, B], R]) -> Op[A, R]:
+    """After Pekko's ``ZipWith2``: pulls both inputs for each element and completes as soon as
+    either completes. ``other`` is built with the run, its materialized value dropped."""
+
+    def op(upstream: AsyncIterator[A], ctx: _Ctx) -> AsyncIterator[R]:
+        second, _ = other._build(ctx)  # pyright: ignore[reportPrivateUsage]
+
+        async def run() -> AsyncGenerator[R, None]:
+            async with closing(upstream) as up, closing(second) as other_up:
+                pulls: list[asyncio.Future[Any]] = []
+                try:
+                    while True:
+                        pull_a = asyncio.ensure_future(anext(up))
+                        pull_b = asyncio.ensure_future(anext(other_up))
+                        pulls = [pull_a, pull_b]
+                        try:
+                            a, b = await asyncio.gather(pull_a, pull_b)
+                        except StopAsyncIteration:
+                            return
+                        pulls = []
+                        yield f(a, b)
+                finally:
+                    # before the inputs close: the other pull may still be suspended in one
+                    for p in pulls:
+                        p.cancel()
+                    await asyncio.gather(*pulls, return_exceptions=True)
+
+        return Stage(run(), second)
+
+    return op
+
+
+def concat_op[T](other: Source[T, Any]) -> Op[T, T]:
+    """After Pekko's ``Concat`` of two inputs: ``other`` is built with the run, its materialized
+    value dropped, and first pulled once upstream has completed."""
+
+    def op(upstream: AsyncIterator[T], ctx: _Ctx) -> AsyncIterator[T]:
+        second, _ = other._build(ctx)  # pyright: ignore[reportPrivateUsage]
+
+        async def run() -> AsyncGenerator[T, None]:
+            async with closing(upstream) as up:
+                async for x in up:
+                    yield x
+            async with closing(second) as other_up:
+                async for x in other_up:
+                    yield x
+
+        return Stage(run(), second)  # closes ``second`` when the stream ends before it
+
+    return op

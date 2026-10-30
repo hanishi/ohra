@@ -335,6 +335,27 @@ class Source(Generic[_Out_co, _Mat_co]):
         """Switch to the source ``f`` returns, at most ``attempts`` times (negative: no limit)."""
         return self._via_op(ops.recover_with_retries_op(attempts, f))
 
+    def merge[T, M](
+        self: Source[T, M], other: Source[T, Any], eager_complete: bool = False
+    ) -> Source[T, M]:
+        """Elements of both, as they arrive. Completes when both complete, or when either does
+        with ``eager_complete``. ``self`` typed, as Pekko's ``merge[U >: Out]``."""
+        return self._via_op(ops.merge_op(other, eager_complete))
+
+    def zip[O](self, other: Source[O, Any]) -> Source[tuple[_Out_co, O], _Mat_co]:
+        """Pairs of one element from each; completes when either completes."""
+        return self.zip_with(other, lambda a, b: (a, b))
+
+    def zip_with[O, R](
+        self, other: Source[O, Any], f: Callable[[_Out_co, O], R]
+    ) -> Source[R, _Mat_co]:
+        """``f`` of one element from each; completes when either completes."""
+        return self._via_op(ops.zip_with_op(other, f))
+
+    def concat[T, M](self: Source[T, M], other: Source[T, Any]) -> Source[T, M]:
+        """This source's elements, then ``other``'s, pulled once this one completes."""
+        return self._via_op(ops.concat_op(other))
+
     def watch_termination[M2](
         self, combine: Callable[[_Mat_co, asyncio.Future[Done]], M2]
     ) -> Source[_Out_co, M2]:
@@ -490,6 +511,27 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
     ) -> Flow[I, T, M]:
         """Switch to the source ``f`` returns, at most ``attempts`` times (negative: no limit)."""
         return self._via_op(ops.recover_with_retries_op(attempts, f))
+
+    def merge[I, T, M](
+        self: Flow[I, T, M], other: Source[T, Any], eager_complete: bool = False
+    ) -> Flow[I, T, M]:
+        """Elements of both, as they arrive. Completes when both complete, or when either does
+        with ``eager_complete``. ``self`` typed, as Pekko's ``merge[U >: Out]``."""
+        return self._via_op(ops.merge_op(other, eager_complete))
+
+    def zip[O](self, other: Source[O, Any]) -> Flow[_In_contra, tuple[_Out_co, O], _Mat_co]:
+        """Pairs of one element from each; completes when either completes."""
+        return self.zip_with(other, lambda a, b: (a, b))
+
+    def zip_with[O, R](
+        self, other: Source[O, Any], f: Callable[[_Out_co, O], R]
+    ) -> Flow[_In_contra, R, _Mat_co]:
+        """``f`` of one element from each; completes when either completes."""
+        return self._via_op(ops.zip_with_op(other, f))
+
+    def concat[I, T, M](self: Flow[I, T, M], other: Source[T, Any]) -> Flow[I, T, M]:
+        """This flow's elements, then ``other``'s, pulled once this one completes."""
+        return self._via_op(ops.concat_op(other))
 
     def watch_termination[M2](
         self, combine: Callable[[_Mat_co, asyncio.Future[Done]], M2]

@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from ..scheduler import Cancellable
     from .dsl import Done, Source, _Ctx  # pyright: ignore[reportPrivateUsage]
 
 
@@ -351,3 +352,156 @@ def map_async_op[I, O](
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     return run
+
+
+def _timer(ctx: _Ctx, delay: float) -> tuple[asyncio.Future[None], Cancellable]:
+    """A future the system scheduler resolves after ``delay``, so ``ManualTime`` controls it."""
+    fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def fire() -> None:
+        if not fut.done():
+            fut.set_result(None)
+
+    return fut, ctx.system.scheduler.schedule_once(delay, fire)
+
+
+def throttle_op[T](elements: int, per: float, maximum_burst: int | None) -> Op[T, T]:
+    """After Pekko's ``Throttle`` in shaping mode, with ``NanoTimeTokenBucket`` on the scheduler's
+    clock: an element that finds no token waits for the delay the bucket names."""
+    if elements <= 0:
+        raise ValueError("elements must be > 0")
+    if per <= 0:
+        raise ValueError("per time must be > 0")
+    between = per / elements
+    if maximum_burst is None:  # Pekko's AutomaticMaximumBurst
+        capacity = max(1, int(0.1 / between))
+    elif maximum_burst < 0:
+        raise ValueError("maximum_burst must be >= 0")
+    else:
+        capacity = maximum_burst
+
+    async def run(upstream: AsyncIterator[T], ctx: _Ctx) -> AsyncGenerator[T, None]:
+        scheduler = ctx.system.scheduler
+        available = float(capacity)
+        last_update = scheduler.current_time
+        timer: Cancellable | None = None
+        try:
+            async with closing(upstream) as up:
+                async for x in up:
+                    # TokenBucket.offer(1)
+                    now = scheduler.current_time
+                    arrived = int((now - last_update) / between + 1e-9)
+                    if arrived > 0:
+                        last_update += arrived * between
+                    available = min(available + arrived, float(capacity))
+                    if available >= 1:
+                        available -= 1
+                    else:
+                        delay = (1 - available) * between - (now - last_update)
+                        available = 0
+                        last_update = now + delay
+                        fut, timer = _timer(ctx, delay)
+                        await fut
+                    yield x
+        finally:
+            if timer is not None:
+                timer.cancel()
+
+    return run
+
+
+def grouped_within_op[T](n: int, d: float) -> Op[T, list[T]]:
+    """After Pekko's ``GroupedWeightedWithin`` with every weight 1: a group closes at ``n``
+    elements, or when the timer fires with elements buffered. The timer restarts after each group
+    and runs on while the buffer is empty, so no group is ever empty. Upstream is pulled in a
+    task that races the timer."""
+    if n <= 0:
+        raise ValueError("max number must be > 0")
+    if d <= 0:
+        raise ValueError("interval must be > 0")
+
+    async def run(upstream: AsyncIterator[T], ctx: _Ctx) -> AsyncGenerator[list[T], None]:
+        buf: list[T] = []
+        pull: asyncio.Future[T] | None = None
+        timer, cancellable = _timer(ctx, d)
+        async with closing(upstream) as up:
+            try:
+                while True:
+                    if pull is None:
+                        pull = asyncio.ensure_future(anext(up))
+                    await asyncio.wait((pull, timer), return_when=asyncio.FIRST_COMPLETED)
+                    if pull.done():
+                        got, pull = pull, None
+                        try:
+                            buf.append(got.result())
+                        except StopAsyncIteration:
+                            break
+                        if len(buf) == n:
+                            cancellable.cancel()
+                            group, buf = buf, []
+                            timer, cancellable = _timer(ctx, d)
+                            yield group
+                    else:  # the timer fired
+                        timer, cancellable = _timer(ctx, d)
+                        if buf:
+                            group, buf = buf, []
+                            yield group
+            finally:
+                # before the upstream closes: a pull still suspended inside it would make
+                # its aclose() fail with "already running"
+                cancellable.cancel()
+                if pull is not None:
+                    pull.cancel()
+                    await asyncio.gather(pull, return_exceptions=True)
+            if buf:
+                yield buf
+
+    return run
+
+
+class TickSource[T]:
+    """After Pekko's ``TickSource``: the iterator and the materialized ``Cancellable`` in one.
+    The scheduler job starts when the stream is materialized; a tick that finds no pull waiting
+    is dropped, and cancelling completes the stream."""
+
+    def __init__(self, ctx: _Ctx, initial_delay: float, interval: float, tick: T) -> None:
+        self._tick = tick
+        self._waiter: asyncio.Future[None] | None = None
+        self._stopped = False
+        self._job = ctx.system.scheduler.schedule_at_fixed_rate(
+            initial_delay, interval, self._fire
+        )
+
+    def _fire(self) -> None:
+        if self._waiter is not None and not self._waiter.done():
+            self._waiter.set_result(None)
+
+    def cancel(self) -> bool:
+        if self._stopped:
+            return False
+        self._stopped = True
+        self._job.cancel()
+        self._fire()
+        return True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._stopped
+
+    def __aiter__(self) -> TickSource[T]:
+        return self
+
+    async def __anext__(self) -> T:
+        if self._stopped:
+            raise StopAsyncIteration
+        self._waiter = asyncio.get_running_loop().create_future()
+        try:
+            await self._waiter
+        finally:
+            self._waiter = None
+        if self._stopped:
+            raise StopAsyncIteration
+        return self._tick
+
+    async def aclose(self) -> None:
+        self.cancel()

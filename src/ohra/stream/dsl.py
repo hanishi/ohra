@@ -25,6 +25,7 @@ from . import ops
 from .ops import Stage, filter_op, map_op
 
 if TYPE_CHECKING:
+    from ..scheduler import Cancellable
     from ..system import ActorSystem
     from .actor_source import OverflowStrategy
     from .queue import SinkQueue, SourceQueue
@@ -252,6 +253,14 @@ class Source(Generic[_Out_co, _Mat_co]):
         # self typed, as Pekko's runReduce[U >: Out]: a covariant Out cannot type f's parameters
         return self.run_with(Sink.reduce(f), system)
 
+    @staticmethod
+    def tick[T](initial_delay: float, interval: float, tick: T) -> Source[T, Cancellable]:
+        """Emits ``tick`` every ``interval`` after ``initial_delay``, dropping ticks that find no
+        demand. Cancel the materialized ``Cancellable`` to complete the stream."""
+        if interval <= 0:
+            raise ValueError("interval must be > 0")
+        return Source(lambda ctx: (t := ops.TickSource(ctx, initial_delay, interval, tick), t))
+
     # --- operators -----------------------------------------------------------------------
 
     def map[O](self, f: Callable[[_Out_co], O]) -> Source[O, _Mat_co]:
@@ -298,6 +307,17 @@ class Source(Generic[_Out_co, _Mat_co]):
 
     def grouped(self, n: int) -> Source[list[_Out_co], _Mat_co]:
         return self._via_op(ops.grouped_op(n))
+
+    def grouped_within(self, n: int, d: float) -> Source[list[_Out_co], _Mat_co]:
+        """Groups of up to ``n`` elements, closed after ``d`` seconds if not full; never empty."""
+        return self._via_op(ops.grouped_within_op(n, d))
+
+    def throttle(
+        self, elements: int, per: float, maximum_burst: int | None = None
+    ) -> Source[_Out_co, _Mat_co]:
+        """At most ``elements`` per ``per`` seconds, bursting up to ``maximum_burst`` (default:
+        Pekko's automatic burst). Shaping mode: excess elements wait."""
+        return self._via_op(ops.throttle_op(elements, per, maximum_burst))
 
     def scan[S](self, zero: S, f: Callable[[S, _Out_co], S]) -> Source[S, _Mat_co]:
         return self._via_op(ops.scan_op(zero, f))
@@ -443,6 +463,17 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
 
     def grouped(self, n: int) -> Flow[_In_contra, list[_Out_co], _Mat_co]:
         return self._via_op(ops.grouped_op(n))
+
+    def grouped_within(self, n: int, d: float) -> Flow[_In_contra, list[_Out_co], _Mat_co]:
+        """Groups of up to ``n`` elements, closed after ``d`` seconds if not full; never empty."""
+        return self._via_op(ops.grouped_within_op(n, d))
+
+    def throttle(
+        self, elements: int, per: float, maximum_burst: int | None = None
+    ) -> Flow[_In_contra, _Out_co, _Mat_co]:
+        """At most ``elements`` per ``per`` seconds, bursting up to ``maximum_burst`` (default:
+        Pekko's automatic burst). Shaping mode: excess elements wait."""
+        return self._via_op(ops.throttle_op(elements, per, maximum_burst))
 
     def scan[S](self, zero: S, f: Callable[[S, _Out_co], S]) -> Flow[_In_contra, S, _Mat_co]:
         return self._via_op(ops.scan_op(zero, f))

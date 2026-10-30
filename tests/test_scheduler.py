@@ -142,3 +142,10 @@ async def test_ask_timeout_uses_the_given_scheduler():
         fn()
         with pytest.raises(AskTimeoutError, match="timed out after 0.01s"):
             await task
+
+
+async def test_event_loop_scheduler_current_time_advances():
+    scheduler = EventLoopScheduler()
+    before = scheduler.current_time
+    await asyncio.sleep(0.01)
+    assert scheduler.current_time > before

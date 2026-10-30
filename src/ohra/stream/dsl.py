@@ -223,6 +223,18 @@ class Source(Generic[_Out_co, _Mat_co]):
     def map[O](self, f: Callable[[_Out_co], O]) -> Source[O, _Mat_co]:
         return self._via_op(map_op(f))
 
+    def map_async[O](
+        self, parallelism: int, f: Callable[[_Out_co], Awaitable[O]]
+    ) -> Source[O, _Mat_co]:
+        """At most ``parallelism`` calls of ``f`` in flight; results in input order."""
+        return self._via_op(ops.map_async_op(parallelism, f, True))
+
+    def map_async_unordered[O](
+        self, parallelism: int, f: Callable[[_Out_co], Awaitable[O]]
+    ) -> Source[O, _Mat_co]:
+        """As ``map_async``, emitting results in completion order."""
+        return self._via_op(ops.map_async_op(parallelism, f, False))
+
     def filter(self, p: Callable[[_Out_co], bool]) -> Source[_Out_co, _Mat_co]:
         return self._via_op(filter_op(p))
 
@@ -355,6 +367,18 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
 
     def map[O](self, f: Callable[[_Out_co], O]) -> Flow[_In_contra, O, _Mat_co]:
         return self._via_op(map_op(f))
+
+    def map_async[O](
+        self, parallelism: int, f: Callable[[_Out_co], Awaitable[O]]
+    ) -> Flow[_In_contra, O, _Mat_co]:
+        """At most ``parallelism`` calls of ``f`` in flight; results in input order."""
+        return self._via_op(ops.map_async_op(parallelism, f, True))
+
+    def map_async_unordered[O](
+        self, parallelism: int, f: Callable[[_Out_co], Awaitable[O]]
+    ) -> Flow[_In_contra, O, _Mat_co]:
+        """As ``map_async``, emitting results in completion order."""
+        return self._via_op(ops.map_async_op(parallelism, f, False))
 
     def filter(self, p: Callable[[_Out_co], bool]) -> Flow[_In_contra, _Out_co, _Mat_co]:
         return self._via_op(filter_op(p))

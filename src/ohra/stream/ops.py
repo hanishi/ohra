@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import asyncio
+from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -270,3 +271,55 @@ def new_done_future() -> asyncio.Future[Done]:
     # a failure nobody retrieved must not log "exception was never retrieved"
     fut.add_done_callback(lambda f: f.cancelled() or f.exception())
     return fut
+
+
+def map_async_op[I, O](
+    parallelism: int, f: Callable[[I], Awaitable[O]], ordered: bool
+) -> Op[I, O]:
+    """After Pekko's ``MapAsync`` (``ordered``) and ``MapAsyncUnordered``: pulls upstream only
+    while fewer than ``parallelism`` calls are in flight, fails with the first failure, and
+    cancels what is still running when the stage ends for any reason."""
+    if parallelism < 1:
+        raise ValueError("parallelism must be at least 1")
+
+    async def run(upstream: AsyncIterator[I], _ctx: _Ctx) -> AsyncGenerator[O, None]:
+        pending: deque[asyncio.Future[O]] = deque()
+        pull: asyncio.Future[I] | None = None
+        done = False
+        try:
+            async with closing(upstream) as up:
+                while True:
+                    if not done and pull is None and len(pending) < parallelism:
+                        pull = asyncio.ensure_future(anext(up))
+                    if pull is None and not pending:
+                        return
+                    waiting: set[asyncio.Future[Any]] = set(pending)
+                    if pull is not None:
+                        waiting.add(pull)
+                    await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                    for t in pending:
+                        if t.done() and not t.cancelled() and t.exception() is not None:
+                            raise cast(BaseException, t.exception())
+                    if pull is not None and pull.done():
+                        got, pull = pull, None
+                        try:
+                            pending.append(asyncio.ensure_future(f(got.result())))
+                        except StopAsyncIteration:
+                            done = True
+                        continue
+                    if ordered:
+                        while pending and pending[0].done():
+                            yield pending.popleft().result()
+                    else:
+                        for t in [t for t in pending if t.done()]:
+                            pending.remove(t)
+                            yield t.result()
+        finally:
+            tasks: list[asyncio.Future[Any]] = [*pending]
+            if pull is not None:
+                tasks.append(pull)
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    return run

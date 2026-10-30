@@ -20,7 +20,7 @@ from collections.abc import (
     Iterable,
 )
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Never, final
+from typing import TYPE_CHECKING, Any, Final, Generic, Never, TypeVar, final
 
 from .ops import Stage, closing, filter_op, map_op
 
@@ -69,6 +69,13 @@ class _Ctx:
     system: ActorSystem[Any]
 
 
+# Declared, not inferred, against the 3.12 generics rule: PEP 695 auto-variance across these
+# mutually referencing classes depends on pyright's evaluation order. Pekko declares them so:
+# Source[+Out, +Mat], Flow[-In, +Out, +Mat], Sink[-In, +Mat], RunnableGraph[+Mat].
+_Out_co = TypeVar("_Out_co", covariant=True)
+_In_contra = TypeVar("_In_contra", contravariant=True)
+_Mat_co = TypeVar("_Mat_co", covariant=True)
+
 type _SourceBuild[Out, Mat] = Callable[[_Ctx], tuple[AsyncIterator[Out], Mat]]
 type _FlowBuild[In, Out, Mat] = Callable[[AsyncIterator[In], _Ctx], tuple[AsyncIterator[Out], Mat]]
 type _SinkBuild[In, Mat] = Callable[
@@ -97,10 +104,10 @@ class Keep:
         return NOT_USED
 
 
-class Source[Out, Mat]:
+class Source(Generic[_Out_co, _Mat_co]):
     """A stage with one output: Pekko's ``Source[Out, Mat]``."""
 
-    def __init__(self, build: _SourceBuild[Out, Mat]) -> None:
+    def __init__(self, build: _SourceBuild[_Out_co, _Mat_co]) -> None:
         self._build: Final = build
 
     # --- factories ---------------------------------------------------------------------
@@ -141,22 +148,22 @@ class Source[Out, Mat]:
     # --- combining -----------------------------------------------------------------------
 
     def _via_op[O](
-        self, op: Callable[[AsyncIterator[Out], _Ctx], AsyncIterator[O]]
-    ) -> Source[O, Mat]:
+        self, op: Callable[[AsyncIterator[_Out_co], _Ctx], AsyncIterator[O]]
+    ) -> Source[O, _Mat_co]:
         """The stage every operator method delegates to."""
         build = self._build
 
-        def via(ctx: _Ctx) -> tuple[AsyncIterator[O], Mat]:
+        def via(ctx: _Ctx) -> tuple[AsyncIterator[O], _Mat_co]:
             up, mat = build(ctx)
             return Stage(op(up, ctx), up), mat
 
         return Source(via)
 
-    def via[O](self, flow: Flow[Out, O, Any]) -> Source[O, Mat]:
+    def via[O](self, flow: Flow[_Out_co, O, Any]) -> Source[O, _Mat_co]:
         return self.via_mat(flow, Keep.left)
 
     def via_mat[O, M2, M3](
-        self, flow: Flow[Out, O, M2], combine: Callable[[Mat, M2], M3]
+        self, flow: Flow[_Out_co, O, M2], combine: Callable[[_Mat_co, M2], M3]
     ) -> Source[O, M3]:
         build, flow_build = self._build, flow._build  # pyright: ignore[reportPrivateUsage]
 
@@ -167,11 +174,11 @@ class Source[Out, Mat]:
 
         return Source(via)
 
-    def to(self, sink: Sink[Out, Any]) -> RunnableGraph[Mat]:
+    def to(self, sink: Sink[_Out_co, Any]) -> RunnableGraph[_Mat_co]:
         return self.to_mat(sink, Keep.left)
 
     def to_mat[M2, M3](
-        self, sink: Sink[Out, M2], combine: Callable[[Mat, M2], M3]
+        self, sink: Sink[_Out_co, M2], combine: Callable[[_Mat_co, M2], M3]
     ) -> RunnableGraph[M3]:
         build, sink_build = self._build, sink._build  # pyright: ignore[reportPrivateUsage]
 
@@ -182,47 +189,47 @@ class Source[Out, Mat]:
 
         return RunnableGraph(graph)
 
-    def map_materialized_value[M2](self, f: Callable[[Mat], M2]) -> Source[Out, M2]:
+    def map_materialized_value[M2](self, f: Callable[[_Mat_co], M2]) -> Source[_Out_co, M2]:
         build = self._build
 
-        def mapped(ctx: _Ctx) -> tuple[AsyncIterator[Out], M2]:
+        def mapped(ctx: _Ctx) -> tuple[AsyncIterator[_Out_co], M2]:
             out, mat = build(ctx)
             return out, f(mat)
 
         return Source(mapped)
 
-    def run_with[M2](self, sink: Sink[Out, M2], system: ActorSystem[Any]) -> M2:
+    def run_with[M2](self, sink: Sink[_Out_co, M2], system: ActorSystem[Any]) -> M2:
         return self.to_mat(sink, Keep.right).run(system)
 
     def run_foreach(
-        self, f: Callable[[Out], None], system: ActorSystem[Any]
+        self, f: Callable[[_Out_co], None], system: ActorSystem[Any]
     ) -> asyncio.Future[Done]:
         return self.run_with(Sink.foreach(f), system)
 
     def run_fold[S](
-        self, zero: S, f: Callable[[S, Out], S], system: ActorSystem[Any]
+        self, zero: S, f: Callable[[S, _Out_co], S], system: ActorSystem[Any]
     ) -> asyncio.Future[S]:
         return self.run_with(Sink.fold(zero, f), system)
 
     def run_reduce[T](
         self: Source[T, Any], f: Callable[[T, T], T], system: ActorSystem[Any]
     ) -> asyncio.Future[T]:
-        # self typed, not Out: Pekko's runReduce[U >: Out], which keeps Source covariant
+        # self typed, as Pekko's runReduce[U >: Out]: a covariant Out cannot type f's parameters
         return self.run_with(Sink.reduce(f), system)
 
     # --- operators -----------------------------------------------------------------------
 
-    def map[O](self, f: Callable[[Out], O]) -> Source[O, Mat]:
+    def map[O](self, f: Callable[[_Out_co], O]) -> Source[O, _Mat_co]:
         return self._via_op(map_op(f))
 
-    def filter(self, p: Callable[[Out], bool]) -> Source[Out, Mat]:
+    def filter(self, p: Callable[[_Out_co], bool]) -> Source[_Out_co, _Mat_co]:
         return self._via_op(filter_op(p))
 
 
-class Flow[In, Out, Mat]:
+class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
     """A stage with one input and one output: Pekko's ``Flow[In, Out, Mat]``."""
 
-    def __init__(self, build: _FlowBuild[In, Out, Mat]) -> None:
+    def __init__(self, build: _FlowBuild[_In_contra, _Out_co, _Mat_co]) -> None:
         self._build: Final = build
 
     @staticmethod
@@ -232,72 +239,78 @@ class Flow[In, Out, Mat]:
         return Flow[T, T, NotUsed](lambda up, _: (up, NOT_USED))
 
     def _via_op[O](
-        self, op: Callable[[AsyncIterator[Out], _Ctx], AsyncIterator[O]]
-    ) -> Flow[In, O, Mat]:
+        self, op: Callable[[AsyncIterator[_Out_co], _Ctx], AsyncIterator[O]]
+    ) -> Flow[_In_contra, O, _Mat_co]:
         """The stage every operator method delegates to."""
         build = self._build
 
-        def via(upstream: AsyncIterator[In], ctx: _Ctx) -> tuple[AsyncIterator[O], Mat]:
+        def via(
+            upstream: AsyncIterator[_In_contra], ctx: _Ctx
+        ) -> tuple[AsyncIterator[O], _Mat_co]:
             up, mat = build(upstream, ctx)
             return Stage(op(up, ctx), up), mat
 
         return Flow(via)
 
-    # self is typed with M for Out: a Flow[Out, ...] parameter would make pyright infer Flow
-    # invariant in Out
-    def via[M, O](self: Flow[In, M, Mat], flow: Flow[M, O, Any]) -> Flow[In, O, Mat]:
+    def via[O](self, flow: Flow[_Out_co, O, Any]) -> Flow[_In_contra, O, _Mat_co]:
         return self.via_mat(flow, Keep.left)
 
-    def via_mat[M, O, M2, M3](
-        self: Flow[In, M, Mat], flow: Flow[M, O, M2], combine: Callable[[Mat, M2], M3]
-    ) -> Flow[In, O, M3]:
+    def via_mat[O, M2, M3](
+        self, flow: Flow[_Out_co, O, M2], combine: Callable[[_Mat_co, M2], M3]
+    ) -> Flow[_In_contra, O, M3]:
         build, flow_build = self._build, flow._build
 
-        def via(upstream: AsyncIterator[In], ctx: _Ctx) -> tuple[AsyncIterator[O], M3]:
+        def via(upstream: AsyncIterator[_In_contra], ctx: _Ctx) -> tuple[AsyncIterator[O], M3]:
             up, mat = build(upstream, ctx)
             out, flow_mat = flow_build(up, ctx)
             return out, combine(mat, flow_mat)
 
         return Flow(via)
 
-    def to(self, sink: Sink[Out, Any]) -> Sink[In, Mat]:
+    def to(self, sink: Sink[_Out_co, Any]) -> Sink[_In_contra, _Mat_co]:
         return self.to_mat(sink, Keep.left)
 
     def to_mat[M2, M3](
-        self, sink: Sink[Out, M2], combine: Callable[[Mat, M2], M3]
-    ) -> Sink[In, M3]:
+        self, sink: Sink[_Out_co, M2], combine: Callable[[_Mat_co, M2], M3]
+    ) -> Sink[_In_contra, M3]:
         build, sink_build = self._build, sink._build  # pyright: ignore[reportPrivateUsage]
 
-        def to(upstream: AsyncIterator[In], ctx: _Ctx) -> tuple[Coroutine[Any, Any, None], M3]:
+        def to(
+            upstream: AsyncIterator[_In_contra], ctx: _Ctx
+        ) -> tuple[Coroutine[Any, Any, None], M3]:
             up, mat = build(upstream, ctx)
             drive, sink_mat = sink_build(up, ctx)
             return drive, combine(mat, sink_mat)
 
         return Sink(to)
 
-    def map_materialized_value[M2](self, f: Callable[[Mat], M2]) -> Flow[In, Out, M2]:
+    def map_materialized_value[M2](
+        self, f: Callable[[_Mat_co], M2]
+    ) -> Flow[_In_contra, _Out_co, M2]:
         build = self._build
 
-        def mapped(upstream: AsyncIterator[In], ctx: _Ctx) -> tuple[AsyncIterator[Out], M2]:
+        def mapped(
+            upstream: AsyncIterator[_In_contra], ctx: _Ctx
+        ) -> tuple[AsyncIterator[_Out_co], M2]:
             out, mat = build(upstream, ctx)
             return out, f(mat)
 
         return Flow(mapped)
 
-    def map[O](self, f: Callable[[Out], O]) -> Flow[In, O, Mat]:
+    def map[O](self, f: Callable[[_Out_co], O]) -> Flow[_In_contra, O, _Mat_co]:
         return self._via_op(map_op(f))
 
-    def filter(self, p: Callable[[Out], bool]) -> Flow[In, Out, Mat]:
+    def filter(self, p: Callable[[_Out_co], bool]) -> Flow[_In_contra, _Out_co, _Mat_co]:
         return self._via_op(filter_op(p))
 
 
-class Sink[In, Mat]:
+class Sink(Generic[_In_contra, _Mat_co]):
     """A stage with one input: Pekko's ``Sink[In, Mat]``. Its build returns the coroutine that
     drives the stream by pulling, and settles the materialized value itself. On cancellation
     (the stream's actor stopped) it fails what it has not settled with
     ``AbruptStageTerminationError``."""
 
-    def __init__(self, build: _SinkBuild[In, Mat]) -> None:
+    def __init__(self, build: _SinkBuild[_In_contra, _Mat_co]) -> None:
         self._build: Final = build
 
     @staticmethod
@@ -410,13 +423,13 @@ class Sink[In, Mat]:
         return Sink(build)
 
 
-class RunnableGraph[Mat]:
+class RunnableGraph(Generic[_Mat_co]):
     """A source connected to a sink: Pekko's ``RunnableGraph[Mat]``."""
 
-    def __init__(self, build: _GraphBuild[Mat]) -> None:
+    def __init__(self, build: _GraphBuild[_Mat_co]) -> None:
         self._build: Final = build
 
-    def run(self, system: ActorSystem[Any]) -> Mat:
+    def run(self, system: ActorSystem[Any]) -> _Mat_co:
         """Start the stream as a child of the system's stream supervisor; return its
         materialized value."""
         from .materializer import Materializer

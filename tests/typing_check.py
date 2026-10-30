@@ -167,7 +167,8 @@ async def probes_are_typed() -> None:
 
 
 def streams_are_typed(system: ActorSystem[Any]) -> None:
-    # Flow.of(str) alone is an identity Flow[int | str, ...] here; a flow using str is not
+    # Flow.of(str) alone is accepted here: type[T] is covariant, so pyright solves T = int | str,
+    # and an identity flow of int | str does take ints. A flow that uses str is rejected.
     Source.from_iterable([1]).via(Flow.of(str).map(str.upper))  # type: ignore[arg-type]
     g: RunnableGraph[tuple[NotUsed, asyncio.Future[list[int]]]] = Source.from_iterable([1]).to_mat(
         Sink.seq(), Keep.both

@@ -132,9 +132,9 @@ def test_map_async_rejects_bad_parallelism():
 def _awaiting_upstream(log: list[str]):
     async def gen() -> AsyncGenerator[int, None]:
         try:
-            for i in range(100):
-                await asyncio.sleep(0.01)  # awaits before each yield, as ActorSource does
-                yield i
+            yield 0
+            await asyncio.Event().wait()  # suspended mid-pull, as ActorSource is when idle
+            yield 1
         finally:
             log.append("closed")
 
@@ -146,7 +146,6 @@ async def test_map_async_downstream_cancel_with_awaiting_upstream(unordered: boo
     log: list[str] = []
 
     async def f(x: int) -> int:
-        await asyncio.sleep(0.001)
         return x
 
     src = _awaiting_upstream(log)

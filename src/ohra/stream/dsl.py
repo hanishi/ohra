@@ -27,6 +27,8 @@ from .ops import Stage, closing, filter_op, map_op
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
+    from .actor_source import OverflowStrategy
+    from .queue import SinkQueue, SourceQueue
 
 
 @final
@@ -145,6 +147,17 @@ class Source(Generic[_Out_co, _Mat_co]):
     @staticmethod
     def repeat[T](element: T) -> Source[T, NotUsed]:
         return Source.from_iterable(itertools.repeat(element))
+
+    @staticmethod
+    def queue[T](
+        buffer_size: int, overflow_strategy: OverflowStrategy
+    ) -> Source[T, SourceQueue[T]]:
+        """A source fed from outside: offer elements to the materialized ``SourceQueue``."""
+        from .queue import source_queue_build
+
+        if buffer_size < 0:
+            raise ValueError("Buffer size must be greater than or equal to 0")
+        return Source(lambda _: source_queue_build(buffer_size, overflow_strategy))
 
     # --- combining -----------------------------------------------------------------------
 
@@ -534,6 +547,14 @@ class Sink(Generic[_In_contra, _Mat_co]):
             return last
 
         return _future_sink(consume)
+
+    @staticmethod
+    def queue[T]() -> Sink[T, SinkQueue[T]]:
+        """Pull the stream's elements from outside, on demand, from the materialized
+        ``SinkQueue``."""
+        from .queue import sink_queue_build
+
+        return Sink(lambda up, _: sink_queue_build(up))
 
     @staticmethod
     def ignore() -> Sink[Any, asyncio.Future[Done]]:

@@ -108,9 +108,12 @@ from .stream import (
     Materializer,
     NotUsed,
     OverflowStrategy,
+    QueueOfferResult,
     RunnableGraph,
     Sink,
+    SinkQueue,
     Source,
+    SourceQueue,
 )
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
@@ -219,6 +222,7 @@ __all__ = [
     "RevisionConflictError",
     "RotatingKeysSSLEngineProvider",
     "Routers",
+    "QueueOfferResult",
     "RunnableGraph",
     "Scheduler",
     "SelfRemoved",
@@ -233,7 +237,9 @@ __all__ = [
     "Signal",
     "SingletonActor",
     "Sink",
+    "SinkQueue",
     "Source",
+    "SourceQueue",
     "SplitBrainResolverSettings",
     "StaticQuorum",
     "SpawnProtocol",

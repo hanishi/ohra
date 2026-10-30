@@ -15,6 +15,7 @@ from .dsl import (
     Source,
 )
 from .materializer import Materializer
+from .queue import QueueOfferResult, SinkQueue, SourceQueue
 
 __all__ = [
     "DONE",
@@ -28,7 +29,10 @@ __all__ = [
     "Materializer",
     "NotUsed",
     "OverflowStrategy",
+    "QueueOfferResult",
     "RunnableGraph",
     "Sink",
+    "SinkQueue",
     "Source",
+    "SourceQueue",
 ]

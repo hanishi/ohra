@@ -102,3 +102,16 @@ async def test_throttle_cancel_while_waiting_cancels_upstream_and_timer():
         q.cancel()
         await eventually(lambda: log == ["upstream closed"])
         assert not kit.system.scheduler._scheduled  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage, reportUnknownMemberType]
+
+
+async def test_throttle_keeps_pace_at_a_rate_that_is_not_decimal():
+    # ManualTime rounds its clock to nanoseconds; the bucket counts in whole nanoseconds too,
+    # so three per second stepped by a third of a second neither drifts nor loses an element
+    async with ActorTestKit(manual_time=True) as kit:
+        time = ManualTime(kit.system)
+        q = Source.from_iterable(range(6)).throttle(3, 1.0, 1).run_with(Sink.queue(), kit.system)
+        assert await asyncio.wait_for(q.pull(), 1) == 0
+        for i in range(1, 6):
+            await _not_yet(q)
+            await time.time_passes(1 / 3)
+            assert await asyncio.wait_for(q.pull(), 1) == i

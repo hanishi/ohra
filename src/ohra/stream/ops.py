@@ -372,9 +372,12 @@ def throttle_op[T](elements: int, per: float, maximum_burst: int | None) -> Op[T
         raise ValueError("elements must be > 0")
     if per <= 0:
         raise ValueError("per time must be > 0")
-    between = per / elements
+    per_ns = round(per * 1e9)
+    if per_ns < elements:
+        raise ValueError("Rates larger than 1 unit / nanosecond are not supported")
+    between = per_ns // elements  # nanosBetweenTokens
     if maximum_burst is None:  # Pekko's AutomaticMaximumBurst
-        capacity = max(1, int(0.1 / between))
+        capacity = max(1, 100_000_000 // between)
     elif maximum_burst < 0:
         raise ValueError("maximum_burst must be >= 0")
     else:
@@ -382,25 +385,33 @@ def throttle_op[T](elements: int, per: float, maximum_burst: int | None) -> Op[T
 
     async def run(upstream: AsyncIterator[T], ctx: _Ctx) -> AsyncGenerator[T, None]:
         scheduler = ctx.system.scheduler
-        available = float(capacity)
-        last_update = scheduler.current_time
+
+        def now_ns() -> int:
+            return round(scheduler.current_time * 1e9)
+
+        # Pekko's TokenBucket, in integer nanoseconds: init()
+        available = capacity
+        last_update = now_ns()
         timer: Cancellable | None = None
         try:
             async with closing(upstream) as up:
                 async for x in up:
                     # TokenBucket.offer(1)
-                    now = scheduler.current_time
-                    arrived = int((now - last_update) / between + 1e-9)
-                    if arrived > 0:
+                    now = now_ns()
+                    elapsed = now - last_update
+                    arrived = 0
+                    if elapsed >= between:
+                        arrived = elapsed // between
                         last_update += arrived * between
-                    available = min(available + arrived, float(capacity))
+                    available = min(available + arrived, capacity)
                     if available >= 1:
                         available -= 1
                     else:
-                        delay = (1 - available) * between - (now - last_update)
+                        remaining = 1 - available
+                        delay = remaining * between - (now - last_update)
                         available = 0
                         last_update = now + delay
-                        fut, timer = _timer(ctx, delay)
+                        fut, timer = _timer(ctx, delay / 1e9)
                         await fut
                     yield x
         finally:
@@ -461,14 +472,14 @@ def grouped_within_op[T](n: int, d: float) -> Op[T, list[T]]:
 
 class TickSource[T]:
     """After Pekko's ``TickSource``: the iterator and the materialized ``Cancellable`` in one.
-    The scheduler job starts when the stream is materialized; a tick that finds no pull waiting
-    is dropped, and cancelling completes the stream."""
+    The fixed-delay scheduler job starts when the stream is materialized; a tick that finds no
+    pull waiting is dropped, and cancelling completes the stream."""
 
     def __init__(self, ctx: _Ctx, initial_delay: float, interval: float, tick: T) -> None:
         self._tick = tick
         self._waiter: asyncio.Future[None] | None = None
         self._stopped = False
-        self._job = ctx.system.scheduler.schedule_at_fixed_rate(
+        self._job = ctx.system.scheduler.schedule_with_fixed_delay(
             initial_delay, interval, self._fire
         )
 

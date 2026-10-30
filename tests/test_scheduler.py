@@ -93,6 +93,10 @@ class FakeScheduler:
         default_factory=lambda: list[tuple[float, Callable[[], None]]]()
     )
 
+    @property
+    def current_time(self) -> float:
+        return 0.0
+
     def schedule_once(self, delay: float, fn: Callable[[], None]) -> Cancellable:
         self.once.append((delay, fn))
         return _Handle()

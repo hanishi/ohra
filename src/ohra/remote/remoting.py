@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import secrets
+import ssl
 import struct
 import weakref
 from collections import deque
@@ -24,10 +25,17 @@ from typing import TYPE_CHECKING, Any
 
 from ..ref import ActorRef, LocalRef
 from .serialization import Json, Serialization, SerializationError, remotable
+from .tls import RotatingKeysSSLEngineProvider
 
 _log = logging.getLogger("ohra.remote")
 MAX_FRAME = 16 * 2**20
 QUEUE_BOUND = 1000  # frames held for a peer while its connection is being opened
+# how long closing a TLS connection waits for the peer's close_notify, as Pekko's
+# shutdown-flush-timeout: a frozen or partitioned peer must not hold up termination
+TLS_SHUTDOWN_TIMEOUT = 1.0
+# how long a TLS handshake may take, as Pekko's tcp.connection-timeout: a peer that connects and
+# says nothing must not hold a socket and a task
+TLS_HANDSHAKE_TIMEOUT = 5.0
 
 if TYPE_CHECKING:
     from ..cell import ActorCell
@@ -219,11 +227,28 @@ class _Association:
                 await self.writer.drain()
 
     async def _run(self) -> None:
+        tls = self.remoting.tls
         try:
-            reader, writer = await asyncio.open_connection(self.host, self.port)
+            if tls is None:
+                reader, writer = await asyncio.open_connection(self.host, self.port)
+            else:
+                reader, writer = await asyncio.open_connection(
+                    self.host,
+                    self.port,
+                    ssl=tls.client_context(),
+                    server_hostname=self.host,
+                    ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT,
+                    ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT,
+                )
+                if (reason := tls.verify_session(writer.get_extra_info("peercert"))) is not None:
+                    await _close(writer)
+                    raise ssl.SSLCertVerificationError(None, reason)
         except OSError as e:
-            # every tick to a dead peer: keep it quiet
-            _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)
+            if isinstance(e, ssl.SSLError):
+                _log.warning("TLS connection to %s:%s failed: %s", self.host, self.port, e)
+            else:
+                # every tick to a dead peer: keep it quiet
+                _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)
             for path, msg, _ in self.pending:
                 self.remoting.system.dead_letter(msg, RemoteRef(path, self.remoting))
             self.pending.clear()
@@ -249,6 +274,10 @@ class _Association:
             await _close(writer)
 
 
+def _reject(writer: asyncio.StreamWriter, reason: str) -> None:
+    _log.warning("rejecting TLS connection from %s: %s", writer.get_extra_info("peername"), reason)
+
+
 async def _close(writer: asyncio.StreamWriter) -> None:
     writer.close()
     with contextlib.suppress(OSError, asyncio.CancelledError):
@@ -258,9 +287,16 @@ async def _close(writer: asyncio.StreamWriter) -> None:
 class Remoting:
     """One per system with an address. Owns the temp table, the listener and the connections."""
 
-    def __init__(self, system: ActorSystem[Any], address: UniqueAddress) -> None:
+    def __init__(
+        self,
+        system: ActorSystem[Any],
+        address: UniqueAddress,
+        tls: RotatingKeysSSLEngineProvider | None = None,
+    ) -> None:
         self.system = system
         self.address = address
+        self.tls = tls
+        """Set when connections run over TLS, both ways."""
         self.temp = TempRefs(address.root)
         self._associations: dict[tuple[str, int], _Association] = {}
         self._peers: dict[tuple[str, int], int] = {}  # last uid seen per peer address
@@ -356,6 +392,8 @@ class Remoting:
 
     async def listen(self) -> None:
         try:
+            if self.tls is not None:
+                self.tls.server_context()  # bad files fail startup, not the first connection
             if self._server is None:
                 self._server = await asyncio.start_server(
                     self._accept, self.address.host, self.address.port
@@ -365,8 +403,30 @@ class Remoting:
 
     async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._track(asyncio.current_task())
-        writer.write(self.hello())
+        if self.tls is not None:
+            # per connection, with the current context, so rotated files reach new connections
+            try:
+                await writer.start_tls(
+                    self.tls.server_context(),
+                    ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT,
+                    ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT,
+                )
+            except BaseException as e:
+                # start_tls gave the socket to an SSL protocol that never tells this stream it
+                # closed, so wait_closed would wait forever: drop the socket instead
+                writer.transport.abort()
+                if not isinstance(e, OSError):  # cancelled by close()
+                    raise
+                # a failed handshake, or files that do not load mid-rotation
+                _reject(writer, str(e))
+                return
         try:
+            if self.tls is not None:
+                reason = self.tls.verify_session(writer.get_extra_info("peercert"))
+                if reason is not None:
+                    _reject(writer, reason)
+                    return
+            writer.write(self.hello())
             await self.read_loop(reader)
         finally:
             await _close(writer)

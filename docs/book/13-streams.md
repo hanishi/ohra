@@ -107,7 +107,7 @@ async def test_keep_both_hands_back_both_values(testkit: ActorTestKit):
 
 `graph` is a `RunnableGraph[tuple[Future[Done], Future[int]]]`, and pyright knows it. `watch_termination` adds a future that completes with `DONE` when the stream ends, or fails with its exception; `map_materialized_value(f)` changes a materialized value.
 
-`run` returns as soon as the stream has started. The `Materializer` spawns one actor per run under `/system/Materializers/StreamSupervisor`, which drives the sink and stops when the stream ends. The stages run fused, in the one task that actor starts, and a stage that pulls in parallel (`map_async`, `merge`, `zip`, `grouped_within`, the kill switch, `Sink.queue`) puts each pull in a task of its own. A source that never suspends, such as `Source.repeat`, lets the event loop run every 1000 elements, so even an endless stream can be stopped.
+`run` returns at once, and the stream starts on the next loop steps. The `Materializer` spawns one actor per run under `/system/Materializers/StreamSupervisor`, which drives the sink and stops when the stream ends. The stages run fused, in the one task that actor starts, and a stage that races its upstream against something else (`map_async` and `ActorFlow.ask`, `merge`, `zip`, `grouped_within`, the kill switch, `Sink.queue`, `ActorSink`) puts each pull in a task of its own. A source that never suspends, such as `Source.repeat`, lets the event loop run every 1000 elements, so even an endless stream can be stopped.
 
 A flow's input type is checked where it is attached. One that uses its input as the wrong type is a pyright error: `Source.from_iterable([1]).via(Flow.of(str).map(str.upper))` is rejected. A bare `Flow.of(str)` after a source of ints is accepted, since pyright widens its type to `int | str`, and an identity flow of `int | str` does take ints.
 
@@ -186,14 +186,14 @@ async def test_a_stream_between_two_queues(testkit: ActorTestKit):
     assert await outbox.pull() is None  # the stream has completed
 ```
 
-- **`offer`** answers once the element is in the buffer: `Enqueued`, `Dropped` (a drop strategy dropped it), `QueueClosed` (the stream is over) or `QueueOfferResult.Failure(cause)`. Under `OverflowStrategy.backpressure` it waits while the buffer is full. Only one offer may wait at a time; a second raises `RuntimeError`, as in Pekko.
+- **`offer`** answers once the element is in the buffer: `Enqueued` (with a buffer, a drop strategy makes room by dropping another element), `Dropped` (with `buffer_size=0` under a drop strategy, or while the queue is completing), `QueueClosed` (the stream is over) or `QueueOfferResult.Failure(cause)`. Under `OverflowStrategy.backpressure` it waits while the buffer is full. Only one offer may wait at a time; a second raises `RuntimeError`, as in Pekko.
 - **`complete()`** ends the stream once the buffer is drained, `fail(exc)` fails it, and `watch_completion()` is a future of the end.
 - **`pull()`** returns the next element, `None` at the end, or raises the stream's failure. `Sink.queue` pulls upstream only when `pull` is called, and a `SinkQueue` is also an async iterator, so `async for x in outbox` reads it to the end. `cancel()` cancels the stream.
 - **Annotate the source,** as `orders: Source[str, SourceQueue[str]] = ...`, since nothing in `Source.queue(...)` names the element type.
 
 ### Time
 
-`Source.tick`, `throttle` and `grouped_within` wait on the system's scheduler, so `ManualTime` from [chapter 12](12-testing.md#a-third-example-a-timer-with-manual-time) controls them:
+`Source.tick`, `throttle` and `grouped_within` wait on the system's scheduler, so they run on the clock of `ManualTime` from [chapter 12](12-testing.md#a-third-example-a-timer-with-manual-time):
 
 - **`Source.tick(initial_delay, interval, tick)`** emits `tick` on a fixed delay, and drops a tick that finds no pull waiting. Its materialized value is a `Cancellable`; cancelling it completes the stream.
 - **`throttle(elements, per, maximum_burst)`** lets at most `elements` through every `per` seconds, with bursts of up to `maximum_burst`. An element that comes too soon waits, which is Pekko's shaping mode.
@@ -226,6 +226,8 @@ async def test_throttle_lets_one_element_through_per_second(
 ```
 
 `run_foreach(probe.ref.tell, ...)` tells the probe every element, so the test waits on messages, never on real time.
+
+Only `throttle` can be tested this way today. `run` returns before the stream has pulled, and `time_passes` waits for the actors to settle, not for the stream's task. So a `time_passes` right after `run` can move the clock before the stream's first pull. `Source.tick` then drops the tick, since no pull is waiting, and `grouped_within` arms its first timer only after the clock has moved. `throttle` escapes this because its timer's due time is fixed when an element arrives, whenever that is, and here element 1 has arrived before the test goes on. A test of `tick` or `grouped_within` has to let the stream reach its first pull before it moves the clock, and no probe can see that point. ohra's own tests wait a few milliseconds of real time there, which is a known limitation.
 
 ### Fan-in and kill switches
 

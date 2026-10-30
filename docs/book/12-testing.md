@@ -512,7 +512,7 @@ On a slow CI machine, raise `timefactor` instead of every timeout: `TestKitSetti
 
 The system's scheduler runs everything an actor schedules: its timers, the delay before a backoff restart, and the timeouts of `system.ask` and `ctx.ask`. By default it is the event loop's clock. `manual_time=True` replaces it with an `ExplicitlyTriggeredScheduler`, Pekko's, whose clock starts at 0 and moves only in `time_passes`.
 
-`time_passes(amount)` lets the actors settle, runs the first job due by the target time at that job's time, lets the actors settle again, and repeats until no job is due; then it sets the clock to the target. A timer that makes an actor start another inside the same window fires too, at its own time. Letting the actors settle means waiting until every actor has an empty mailbox and is waiting for its next message, or for 100 ms of real time if one stays busy.
+`time_passes(amount)` lets the actors settle, runs the first job due by the target time at that job's time, lets the actors settle again, and repeats until no job is due; then it sets the clock to the target. A timer that makes an actor start another inside the same window fires too, at its own time. Letting the actors settle means waiting until every actor has an empty mailbox and is waiting for its next message, and every other task, such as a stream's ([chapter 13](13-streams.md#time)), is waiting on something; or for 100 ms of real time if one stays busy.
 
 ```mermaid
 sequenceDiagram

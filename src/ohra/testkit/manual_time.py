@@ -156,15 +156,30 @@ class ManualTime:
             await p.expect_no_message(0)
 
     async def _settle(self) -> None:
-        # Pekko sleeps 100 ms once, to let the dispatchers clear
+        # Pekko sleeps 100 ms once, to let the dispatchers clear. Here the loop is settled when
+        # every mailbox is empty and every other task waits on a future, so a stream's drive
+        # has reached its pull (a tick's waiter, grouped_within's timer) before time moves.
+        # ponytail: a task that never blocks (a busy loop of sleep(0)) never settles; the
+        # 100 ms deadline is the fallback for it, as Pekko's fixed sleep is.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 0.1
         roots: list[ActorCell[Any]] = [self.system._root, self.system._system_root]  # pyright: ignore[reportPrivateUsage]
+        me = asyncio.current_task()
         while True:
             await asyncio.sleep(0)
-            if all(_idle(c) for c in roots) or loop.time() >= deadline:
+            settled = all(_idle(c) for c in roots) and all(
+                _blocked(t) for t in asyncio.all_tasks() if t is not me
+            )
+            if settled or loop.time() >= deadline:
                 return
 
 
 def _idle(cell: ActorCell[Any]) -> bool:
     return cell.is_idle and all(_idle(c) for c in list(cell.children.values()))
+
+
+def _blocked(task: asyncio.Task[Any]) -> bool:
+    # ``_fut_waiter`` is CPython's private record of the future a task is suspended on; a task
+    # that is runnable (or about to be woken) has none, or one that is already done
+    waiter = getattr(task, "_fut_waiter", None)
+    return waiter is not None and not waiter.done()

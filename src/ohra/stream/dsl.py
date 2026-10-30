@@ -79,9 +79,9 @@ class _Ctx:
     def __init__(self, system: ActorSystem[Any]) -> None:
         self.system = system
         self.aborted = False
-        self._callbacks: list[Callable[[], None]] = []
+        self._callbacks: list[Callable[[], object]] = []
 
-    def on_abort(self, callback: Callable[[], None]) -> None:
+    def on_abort(self, callback: Callable[[], object]) -> None:
         if self.aborted:  # registered late: the run is already aborted
             callback()
         else:
@@ -143,7 +143,8 @@ class Source(Generic[_Out_co, _Mat_co]):
 
     @staticmethod
     def from_iterable[T](iterable: Iterable[T]) -> Source[T, NotUsed]:
-        """Iterates ``iterable`` afresh on each run, as Pekko's ``Source(iterable)``."""
+        """Iterates ``iterable`` on each run, as Pekko's ``Source(iterable)``: a collection runs
+        afresh every time, while a one-shot iterator is consumed by the first run."""
         return Source(lambda _: (_iterate(iterable), NOT_USED))
 
     @staticmethod
@@ -221,7 +222,11 @@ class Source(Generic[_Out_co, _Mat_co]):
         def graph(ctx: _Ctx) -> tuple[Coroutine[Any, Any, None], M3]:
             up, mat = build(ctx)
             drive, sink_mat = sink_build(up, ctx)
-            return drive, combine(mat, sink_mat)
+            try:
+                return drive, combine(mat, sink_mat)
+            except BaseException:
+                drive.close()  # never started: it must not warn "never awaited"
+                raise
 
         return RunnableGraph(graph)
 
@@ -423,7 +428,11 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
         ) -> tuple[Coroutine[Any, Any, None], M3]:
             up, mat = build(upstream, ctx)
             drive, sink_mat = sink_build(up, ctx)
-            return drive, combine(mat, sink_mat)
+            try:
+                return drive, combine(mat, sink_mat)
+            except BaseException:
+                drive.close()  # never started: it must not warn "never awaited"
+                raise
 
         return Sink(to)
 
@@ -713,9 +722,6 @@ def _future_sink[T, R](
         async def drive() -> None:
             try:
                 result = await ops.run_drive(ctx, upstream, consume)
-            except asyncio.CancelledError:
-                ctx.abort()
-                raise
             except Exception as e:
                 if not fut.done():
                     fut.set_exception(e)

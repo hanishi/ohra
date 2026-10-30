@@ -74,7 +74,7 @@ if __name__ == "__main__":
 
 ### Blueprints and materialized values
 
-A `Source`, `Flow`, `Sink` or `RunnableGraph` holds a build function and nothing else. `run(system)` calls it, so every run gets fresh stages, a fresh iterator from `from_iterable`, a fresh future from `Sink.seq`. `Flow.of(int)` starts a flow from nothing, as Pekko's `Flow[Int]` does:
+A `Source`, `Flow`, `Sink` or `RunnableGraph` holds a build function and nothing else. `run(system)` calls it, so every run gets fresh stages, a fresh future from `Sink.seq`, and a fresh pass over the collection given to `from_iterable` (a one-shot iterator, such as a generator, is used up by the first run). `Flow.of(int)` starts a flow from nothing, as Pekko's `Flow[Int]` does:
 
 ```python
 from ohra.stream import Flow, Sink, Source
@@ -137,7 +137,7 @@ A stage pulls as much as it needs to produce one element, and no more: `grouped(
 
 ### Cancel: the end goes up
 
-A stage that needs no more elements closes its upstream with `aclose()`. `take(n)` does so after `n` elements, `Sink.head()` after the first, a kill switch when it is thrown. Each stage holds its upstream in `contextlib.aclosing`, so the close goes up stage by stage, and each one runs its `finally` blocks, cancels its tasks and cancels its timers on the way:
+A stage that needs no more elements closes its upstream with `aclose()`. `take(n)` does so on its `n`th element, before passing it on; `Sink.head()` after the first; a kill switch when it is thrown. Each stage holds its upstream in `contextlib.aclosing`, so the close goes up stage by stage, and each one runs its `finally` blocks, cancels its tasks and cancels its timers on the way:
 
 ```mermaid
 sequenceDiagram
@@ -227,7 +227,22 @@ async def test_throttle_lets_one_element_through_per_second(
 
 `run_foreach(probe.ref.tell, ...)` tells the probe every element, so the test waits on messages, never on real time.
 
-Only `throttle` can be tested this way today. `run` returns before the stream has pulled, and `time_passes` waits for the actors to settle, not for the stream's task. So a `time_passes` right after `run` can move the clock before the stream's first pull. `Source.tick` then drops the tick, since no pull is waiting, and `grouped_within` arms its first timer only after the clock has moved. `throttle` escapes this because its timer's due time is fixed when an element arrives, whenever that is, and here element 1 has arrived before the test goes on. A test of `tick` or `grouped_within` has to let the stream reach its first pull before it moves the clock, and no probe can see that point. ohra's own tests wait a few milliseconds of real time there, which is a known limitation.
+`time_passes` waits for the stream's task to reach its next pull before it moves the clock, as it waits for the actors, so a test of `tick` or `grouped_within` can move the clock right after `run`:
+
+```python
+@pytest.mark.manual_time
+async def test_tick_emits_once_a_second(testkit: ActorTestKit, manual_time: ManualTime):
+    probe: TestProbe[str] = testkit.create_test_probe()
+    done = Source.tick(1.0, 1.0, "tick").take(2).run_foreach(probe.ref.tell, testkit.system)
+    await manual_time.expect_no_message_for(0.9, probe)
+    await manual_time.time_passes(0.1)
+    await probe.expect_message("tick")
+    await manual_time.time_passes(1.0)
+    await probe.expect_message("tick")
+    await done
+```
+
+`take(2)` cancels the tick source with the second tick, so `done` completes.
 
 ### Fan-in and kill switches
 

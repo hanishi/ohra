@@ -74,6 +74,18 @@ async def test_throttle_lets_one_element_through_per_second(
     await done
 
 
+@pytest.mark.manual_time
+async def test_tick_emits_once_a_second(testkit: ActorTestKit, manual_time: ManualTime):
+    probe: TestProbe[str] = testkit.create_test_probe()
+    done = Source.tick(1.0, 1.0, "tick").take(2).run_foreach(probe.ref.tell, testkit.system)
+    await manual_time.expect_no_message_for(0.9, probe)
+    await manual_time.time_passes(0.1)
+    await probe.expect_message("tick")
+    await manual_time.time_passes(1.0)
+    await probe.expect_message("tick")
+    await done
+
+
 async def test_zip_pairs_two_sources(testkit: ActorTestKit):
     letters = Source.from_iterable("ab").concat(Source.single("c"))
     pairs = Source.from_iterable([1, 2, 3]).zip(letters).run_with(Sink.seq(), testkit.system)

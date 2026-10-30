@@ -46,7 +46,11 @@ class Materializer:
             raise RuntimeError("stream materializer has been shut down")
         root = system._system_root  # pyright: ignore[reportPrivateUsage]
         ctx = _Ctx(system)
-        drive, mat = graph._build(ctx)  # pyright: ignore[reportPrivateUsage]
+        try:
+            drive, mat = graph._build(ctx)  # pyright: ignore[reportPrivateUsage]
+        except BaseException:
+            ctx.abort()  # stages built before the failure (a tick's job) release what they hold
+            raise
         started = False
 
         async def start() -> None:

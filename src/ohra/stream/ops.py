@@ -159,11 +159,15 @@ def take_op[T](n: int) -> Op[T, T]:
             if n <= 0:
                 return
             count = 0
+            nth: list[T] = []
             async for x in up:
-                yield x
                 count += 1
                 if count >= n:
-                    return  # without pulling again; aclosing cancels upstream
+                    nth.append(x)
+                    break  # as Pekko's Take, which completes with the nth push: close upstream
+                yield x
+        for x in nth:  # upstream is closed before the nth element goes down
+            yield x
 
     return run
 
@@ -209,6 +213,9 @@ def drop_while_op[T](p: Callable[[T], bool]) -> Op[T, T]:
 
 
 def grouped_op[T](n: int) -> Op[T, list[T]]:
+    if n <= 0:
+        raise ValueError("n must be greater than 0")
+
     async def run(upstream: AsyncIterator[T], _ctx: _Ctx) -> AsyncGenerator[list[T], None]:
         async with closing(upstream) as up:
             buf: list[T] = []
@@ -524,6 +531,7 @@ class TickSource[T]:
         self._job = ctx.system.scheduler.schedule_with_fixed_delay(
             initial_delay, interval, self._fire
         )
+        ctx.on_abort(self.cancel)
 
     def _fire(self) -> None:
         if self._waiter is not None and not self._waiter.done():

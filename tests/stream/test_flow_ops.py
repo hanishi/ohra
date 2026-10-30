@@ -4,10 +4,13 @@ FlowFoldSpec."""
 
 from __future__ import annotations
 
+import asyncio
 import operator
 from collections.abc import AsyncGenerator
 
-from ohra.stream import Flow, Sink, Source
+import pytest
+
+from ohra.stream import Flow, Keep, OverflowStrategy, QueueOfferResult, Sink, Source
 from ohra.testkit import ActorTestKit
 
 
@@ -72,6 +75,21 @@ async def test_take_zero_emits_nothing_and_never_pulls_upstream():
     assert log == []  # upstream was cancelled before it started: the iterator never existed
 
 
+async def test_take_cancels_upstream_with_the_nth_element_before_another_pull():
+    async with ActorTestKit() as kit:
+        src, out = (
+            Source.queue(4, OverflowStrategy.backpressure)
+            .take(1)
+            .to_mat(Sink.queue(), Keep.both)
+            .run(kit.system)
+        )
+        assert await src.offer(1) is QueueOfferResult.Enqueued
+        assert await out.pull() == 1
+        assert src.watch_completion().done()  # upstream was cancelled before 1 came out
+        assert await src.offer(2) is QueueOfferResult.QueueClosed
+        assert await out.pull() is None
+
+
 async def test_take_while():
     assert await run(Source.from_iterable([1, 2, 3, 1]).take_while(lambda x: x < 3)) == [1, 2]
 
@@ -99,6 +117,13 @@ async def test_grouped_emits_remainder():
 
 async def test_grouped_of_empty_stream_emits_nothing():
     assert await run(Source.empty().grouped(3)) == []
+
+
+def test_grouped_rejects_a_size_below_one():
+    with pytest.raises(ValueError):
+        Source.single(1).grouped(0)
+    with pytest.raises(ValueError):
+        Flow.of(int).grouped(-1)
 
 
 async def test_scan_emits_zero_first():

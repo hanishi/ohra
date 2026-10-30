@@ -239,31 +239,34 @@ def recover_with_retries_op[T](
 
 def watch_stage[T](up: AsyncIterator[T], ctx: _Ctx, fut: asyncio.Future[Done]) -> Stage[T]:
     """Settles ``fut`` with ``DONE`` on completion and on downstream cancel, with the upstream
-    exception on failure, and with ``AbruptStageTerminationError`` when the stream's task is
-    cancelled (``terminate()``)."""
+    exception on failure, and with ``AbruptStageTerminationError`` when the run is aborted
+    (``terminate()``). A ``CancelledError`` passing through is not settled here: it is the
+    downstream cancelling a pull (``DONE``, from the close) or the run's abort."""
     from .dsl import DONE, AbruptStageTerminationError
+
+    def settle(error: BaseException | None) -> None:
+        if fut.done():
+            return
+        if error is not None:
+            fut.set_exception(error)
+        elif ctx.aborted:
+            fut.set_exception(AbruptStageTerminationError("stream terminated abruptly"))
+        else:
+            fut.set_result(DONE)
+
+    ctx.on_abort(lambda: settle(None))
 
     async def run() -> AsyncGenerator[T, None]:
         try:
             async with closing(up) as u:
                 async for x in u:
                     yield x
-        except asyncio.CancelledError:
-            if not fut.done():
-                fut.set_exception(AbruptStageTerminationError("stream terminated abruptly"))
-            raise
         except Exception as e:
-            if not fut.done():
-                fut.set_exception(e)
+            settle(e)
             raise
-        if not fut.done():
-            fut.set_result(DONE)
+        settle(None)
 
-    def cancelled() -> None:  # downstream cancel, even before the first pull
-        if not fut.done():
-            fut.set_result(DONE)
-
-    return Stage(run(), up, cancelled)
+    return Stage(run(), up, lambda: settle(None))  # the close: downstream cancel, even unstarted
 
 
 def new_done_future() -> asyncio.Future[Done]:

@@ -102,11 +102,13 @@ async def test_sink_queue_cancel_cancels_upstream():
 
 async def test_sink_queue_cancel_with_suspended_upstream():
     log: list[str] = []
+    suspended = asyncio.Event()
 
     async def gen() -> AsyncGenerator[int, None]:
         try:
             yield 0
-            await asyncio.Event().wait()  # suspended mid-pull
+            suspended.set()
+            await asyncio.Event().wait()  # never set: suspended mid-pull
             yield 1
         finally:
             log.append("closed")
@@ -114,8 +116,8 @@ async def test_sink_queue_cancel_with_suspended_upstream():
     async with ActorTestKit() as kit:
         q = Source.from_async_iterable(gen).run_with(Sink.queue(), kit.system)
         assert await q.pull() == 0
-        pending = asyncio.ensure_future(q.pull())  # upstream is now suspended
-        await asyncio.sleep(0)
+        pending = asyncio.ensure_future(q.pull())
+        await suspended.wait()  # the drive's pull task is inside the generator's __anext__
         q.cancel()
         await eventually(lambda: log == ["closed"])
         assert await pending is None
@@ -158,17 +160,25 @@ async def test_cancelled_pull_does_not_lose_the_element():
 
 
 async def test_terminate_while_pull_is_pending():
+    suspended = asyncio.Event()
+    log: list[str] = []
+
     async def gen() -> AsyncGenerator[int, None]:
-        await asyncio.Event().wait()
-        yield 1
+        try:
+            suspended.set()
+            await asyncio.Event().wait()
+            yield 1
+        finally:
+            log.append("closed")
 
     async with ActorTestKit() as kit:
         q = Source.from_async_iterable(gen).run_with(Sink.queue(), kit.system)
         pending = asyncio.ensure_future(q.pull())
-        await asyncio.sleep(0)
+        await suspended.wait()
         kit.system.terminate()
         await kit.system.when_terminated()
     with pytest.raises(AbruptStageTerminationError):
         await asyncio.wait_for(pending, 1)
     with pytest.raises(AbruptStageTerminationError):
         await q.pull()
+    assert log == ["closed"]

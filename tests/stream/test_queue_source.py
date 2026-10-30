@@ -228,6 +228,40 @@ async def test_downstream_cancel_closes_the_queue_and_pending_offers():
         assert await q.watch_completion() is DONE
 
 
+async def test_graceful_cancel_through_an_operator_completes_with_done():
+    async with ActorTestKit() as kit:
+        q, sq = (
+            Source.queue(1, OverflowStrategy.backpressure)
+            .map(lambda x: x)
+            .to_mat(Sink.queue(), Keep.both)
+            .run(kit.system)
+        )
+        pending = asyncio.ensure_future(sq.pull())
+        await eventually(lambda: q._waiter is not None)  # pyright: ignore[reportPrivateUsage]
+        sq.cancel()
+        assert await pending is None
+        assert await asyncio.wait_for(q.watch_completion(), 1) is DONE
+        assert await q.offer(1) == QueueClosed
+
+
+async def test_terminate_through_an_operator_fails_completion():
+    async with ActorTestKit() as kit:
+        q, sq = (
+            Source.queue(1, OverflowStrategy.backpressure)
+            .map(lambda x: x)
+            .to_mat(Sink.queue(), Keep.both)
+            .run(kit.system)
+        )
+        pending = asyncio.ensure_future(sq.pull())
+        await eventually(lambda: q._waiter is not None)  # pyright: ignore[reportPrivateUsage]
+        kit.system.terminate()
+        await kit.system.when_terminated()
+    with pytest.raises(AbruptStageTerminationError):
+        await asyncio.wait_for(pending, 1)
+    with pytest.raises(AbruptStageTerminationError):
+        await asyncio.wait_for(q.watch_completion(), 1)
+
+
 async def test_cancelled_before_the_first_pull_closes_the_queue():
     async with ActorTestKit() as kit:
         q = Source.queue(1, OverflowStrategy.fail).to(Sink.cancelled()).run(kit.system)

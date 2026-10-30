@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 
 import pytest
 
@@ -68,3 +69,49 @@ async def test_watch_termination_on_flow():
             .run(kit.system)
         )
         assert await done is DONE
+
+
+def _suspended_upstream(suspended: asyncio.Event):
+    async def gen() -> AsyncGenerator[int, None]:
+        suspended.set()
+        await asyncio.Event().wait()  # never set
+        yield 1
+
+    return Source.from_async_iterable(gen)
+
+
+async def test_watch_termination_is_done_when_downstream_cancels_through_an_operator():
+    suspended = asyncio.Event()
+    async with ActorTestKit() as kit:
+        done, sq = (
+            _suspended_upstream(suspended)
+            .watch_termination(Keep.right)
+            .map(lambda x: x)
+            .to_mat(Sink.queue(), Keep.both)
+            .run(kit.system)
+        )
+        pending = asyncio.ensure_future(sq.pull())
+        await suspended.wait()  # the drive's pull task is suspended inside the upstream
+        sq.cancel()
+        assert await pending is None
+        assert await asyncio.wait_for(done, 1) is DONE
+
+
+async def test_watch_termination_fails_when_terminated_through_an_operator():
+    suspended = asyncio.Event()
+    async with ActorTestKit() as kit:
+        done, sq = (
+            _suspended_upstream(suspended)
+            .watch_termination(Keep.right)
+            .map(lambda x: x)
+            .to_mat(Sink.queue(), Keep.both)
+            .run(kit.system)
+        )
+        pending = asyncio.ensure_future(sq.pull())
+        await suspended.wait()
+        kit.system.terminate()
+        await kit.system.when_terminated()
+    with pytest.raises(AbruptStageTerminationError):
+        await asyncio.wait_for(done, 1)
+    with pytest.raises(AbruptStageTerminationError):
+        await asyncio.wait_for(pending, 1)

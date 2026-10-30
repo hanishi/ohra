@@ -18,7 +18,7 @@ from .actor_source import BufferOverflowError, OverflowStrategy
 from .ops import closing, new_done_future
 
 if TYPE_CHECKING:
-    from .dsl import Done
+    from .dsl import Done, _Ctx  # pyright: ignore[reportPrivateUsage]
 
 _log = logging.getLogger(__name__)
 
@@ -72,7 +72,9 @@ _MAX_CONCURRENT_OFFERS = 1  # Pekko's default; not configurable here
 class SourceQueue[T]:
     """Pekko's ``SourceQueueWithComplete``: feed a stream from outside with ``offer``."""
 
-    def __init__(self, buffer_size: int, overflow_strategy: OverflowStrategy) -> None:
+    def __init__(self, buffer_size: int, overflow_strategy: OverflowStrategy, ctx: _Ctx) -> None:
+        self._ctx = ctx
+        ctx.on_abort(self._abort)
         self._max = buffer_size
         self._strategy = overflow_strategy
         self._buffer: deque[T] = deque()
@@ -257,12 +259,15 @@ class SourceQueue[T]:
             if got is not None:
                 return got[0]
 
+    def _abort(self) -> None:
+        if not self._finished:
+            self._finish(None, abrupt=True)
+
     async def _detach(self) -> None:
         """Downstream finished: pending offers see ``QueueClosed``, completion is ``DONE``, or
-        fails if the stream's task is being cancelled (``terminate()``)."""
+        fails if the run was aborted (``terminate()``)."""
         if not self._finished:
-            task = asyncio.current_task()
-            self._finish(None, abrupt=task is not None and task.cancelling() > 0)
+            self._finish(None, abrupt=self._ctx.aborted)
 
 
 class _SourceQueueIterator[T]:
@@ -291,9 +296,9 @@ def _too_many_offers() -> RuntimeError:
 
 
 def source_queue_build[T](
-    buffer_size: int, overflow_strategy: OverflowStrategy
+    buffer_size: int, overflow_strategy: OverflowStrategy, ctx: _Ctx
 ) -> tuple[AsyncIterator[T], SourceQueue[T]]:
-    queue = SourceQueue[T](buffer_size, overflow_strategy)
+    queue = SourceQueue[T](buffer_size, overflow_strategy, ctx)
     return _SourceQueueIterator(queue), queue
 
 
@@ -304,7 +309,9 @@ class SinkQueue[T]:
     """Pekko's ``SinkQueueWithCancel``: pull the stream's elements from outside, one ``pull``
     per element. Upstream is pulled only on demand."""
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: _Ctx) -> None:
+        self._ctx = ctx
+        ctx.on_abort(self._abort)
         self._sig: asyncio.Future[None] | None = None  # what the drive sleeps on
         self._want = False  # a pull is waiting
         self._cancelled = False
@@ -354,6 +361,8 @@ class SinkQueue[T]:
         """Deliver an element, or the end of the stream, to the pending pull."""
         waiter = self._waiter
         if outcome is _END:
+            if self._over:
+                return
             self._over = True
             self._end = exc
         if waiter is None or waiter.done():
@@ -364,6 +373,11 @@ class SinkQueue[T]:
         else:
             waiter.set_result(outcome)
         self._waiter = None
+
+    def _abort(self) -> None:
+        from .dsl import AbruptStageTerminationError
+
+        self._settle(_END, AbruptStageTerminationError("stream terminated abruptly"))
 
     def _poke(self) -> None:
         sig = self._sig
@@ -400,15 +414,16 @@ class SinkQueue[T]:
                             self._settle(_END, e)
                             break
                         pulling = None
+                except asyncio.CancelledError:
+                    self._ctx.abort()  # before upstream unwinds
+                    raise
                 finally:
                     # upstream is closed only once no task is suspended inside its __anext__
                     if pulling is not None and not pulling.done():
                         pulling.cancel()
                         await asyncio.gather(pulling, return_exceptions=True)
         except asyncio.CancelledError:
-            from .dsl import AbruptStageTerminationError
-
-            self._settle(_END, AbruptStageTerminationError("stream terminated abruptly"))
+            self._ctx.abort()
             raise
         else:
             if not self._over:
@@ -416,7 +431,7 @@ class SinkQueue[T]:
 
 
 def sink_queue_build[T](
-    upstream: AsyncIterator[T],
+    upstream: AsyncIterator[T], ctx: _Ctx
 ) -> tuple[Coroutine[Any, Any, None], SinkQueue[T]]:
-    queue = SinkQueue[T]()
+    queue = SinkQueue[T](ctx)
     return queue.drive(upstream), queue

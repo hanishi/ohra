@@ -19,7 +19,6 @@ from collections.abc import (
     Coroutine,
     Iterable,
 )
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Generic, Never, TypeVar, final
 
 from . import ops
@@ -65,11 +64,30 @@ class AbruptStageTerminationError(Exception):
 _SYNC_PROCESSING_LIMIT = 1000
 
 
-@dataclass(frozen=True)
 class _Ctx:
-    """One per run: what a stage may need while it is built."""
+    """One per run: what a stage may need while it is built, and whether the run was aborted.
 
-    system: ActorSystem[Any]
+    A run is aborted when the stream's actor stops under it (``terminate()``), as opposed to a
+    stage cancelling upstream. The sink drive calls ``abort()`` when it is cancelled; the
+    materializer calls it when the drive ends without ever having started. Stages that own
+    materialized state (queues, futures) register a callback with ``on_abort`` at build time that
+    settles it. Callbacks run once and must be idempotent with the stage's normal settling."""
+
+    __slots__ = ("_callbacks", "aborted", "system")
+
+    def __init__(self, system: ActorSystem[Any]) -> None:
+        self.system = system
+        self.aborted = False
+        self._callbacks: list[Callable[[], None]] = []
+
+    def on_abort(self, callback: Callable[[], None]) -> None:
+        self._callbacks.append(callback)
+
+    def abort(self) -> None:
+        self.aborted = True
+        callbacks, self._callbacks = self._callbacks, []
+        for callback in callbacks:
+            callback()
 
 
 # Declared, not inferred, against the 3.12 generics rule: PEP 695 auto-variance across these
@@ -157,7 +175,7 @@ class Source(Generic[_Out_co, _Mat_co]):
 
         if buffer_size < 0:
             raise ValueError("Buffer size must be greater than or equal to 0")
-        return Source(lambda _: source_queue_build(buffer_size, overflow_strategy))
+        return Source(lambda ctx: source_queue_build(buffer_size, overflow_strategy, ctx))
 
     # --- combining -----------------------------------------------------------------------
 
@@ -554,7 +572,7 @@ class Sink(Generic[_In_contra, _Mat_co]):
         ``SinkQueue``."""
         from .queue import sink_queue_build
 
-        return Sink(lambda up, _: sink_queue_build(up))
+        return Sink(lambda up, ctx: sink_queue_build(up, ctx))
 
     @staticmethod
     def ignore() -> Sink[Any, asyncio.Future[Done]]:
@@ -570,11 +588,15 @@ class Sink(Generic[_In_contra, _Mat_co]):
         """Cancels upstream at once, pulling nothing."""
 
         def build(
-            upstream: AsyncIterator[Any], _: _Ctx
+            upstream: AsyncIterator[Any], ctx: _Ctx
         ) -> tuple[Coroutine[Any, Any, None], NotUsed]:
             async def drive() -> None:
-                async with closing(upstream):
-                    pass
+                try:
+                    async with closing(upstream):
+                        pass
+                except asyncio.CancelledError:
+                    ctx.abort()
+                    raise
 
             return drive(), NOT_USED
 
@@ -602,19 +624,28 @@ def _future_sink[T, R](
     ``consume`` returns early."""
 
     def build(
-        upstream: AsyncIterator[T], _: _Ctx
+        upstream: AsyncIterator[T], ctx: _Ctx
     ) -> tuple[Coroutine[Any, Any, None], asyncio.Future[R]]:
         fut: asyncio.Future[R] = asyncio.get_running_loop().create_future()
         # a failed future that Keep dropped must not log "exception was never retrieved"
         fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
+        def abort() -> None:
+            if not fut.done():
+                fut.set_exception(AbruptStageTerminationError("stream terminated abruptly"))
+
+        ctx.on_abort(abort)
+
         async def drive() -> None:
             try:
                 async with closing(upstream) as up:
-                    result = await consume(up)
+                    try:
+                        result = await consume(up)
+                    except asyncio.CancelledError:
+                        ctx.abort()  # before upstream unwinds, so stages see the run aborted
+                        raise
             except asyncio.CancelledError:
-                if not fut.done():
-                    fut.set_exception(AbruptStageTerminationError("stream terminated abruptly"))
+                ctx.abort()
                 raise
             except Exception as e:
                 if not fut.done():

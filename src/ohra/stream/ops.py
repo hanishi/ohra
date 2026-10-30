@@ -286,8 +286,8 @@ def map_async_op[I, O](
         pending: deque[asyncio.Future[O]] = deque()
         pull: asyncio.Future[I] | None = None
         done = False
-        try:
-            async with closing(upstream) as up:
+        async with closing(upstream) as up:
+            try:
                 while True:
                     if not done and pull is None and len(pending) < parallelism:
                         pull = asyncio.ensure_future(anext(up))
@@ -314,12 +314,14 @@ def map_async_op[I, O](
                         for t in [t for t in pending if t.done()]:
                             pending.remove(t)
                             yield t.result()
-        finally:
-            tasks: list[asyncio.Future[Any]] = [*pending]
-            if pull is not None:
-                tasks.append(pull)
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                # before the upstream closes: a pull still suspended inside it would make
+                # its aclose() fail with "already running"
+                tasks: list[asyncio.Future[Any]] = [*pending]
+                if pull is not None:
+                    tasks.append(pull)
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     return run

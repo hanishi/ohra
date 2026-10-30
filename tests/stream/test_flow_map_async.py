@@ -127,3 +127,45 @@ def test_map_async_rejects_bad_parallelism():
         Source.from_iterable([1]).map_async(0, lambda x: asyncio.sleep(0, x))
     with pytest.raises(ValueError):
         Source.from_iterable([1]).map_async_unordered(0, lambda x: asyncio.sleep(0, x))
+
+
+def _awaiting_upstream(log: list[str]):
+    async def gen() -> AsyncGenerator[int, None]:
+        try:
+            for i in range(100):
+                await asyncio.sleep(0.01)  # awaits before each yield, as ActorSource does
+                yield i
+        finally:
+            log.append("closed")
+
+    return Source.from_async_iterable(gen)
+
+
+@pytest.mark.parametrize("unordered", [False, True])
+async def test_map_async_downstream_cancel_with_awaiting_upstream(unordered: bool):
+    log: list[str] = []
+
+    async def f(x: int) -> int:
+        await asyncio.sleep(0.001)
+        return x
+
+    src = _awaiting_upstream(log)
+    mapped = src.map_async_unordered(2, f) if unordered else src.map_async(2, f)
+    async with ActorTestKit() as kit:
+        assert await mapped.take(1).run_with(Sink.seq(), kit.system) == [0]
+        await eventually(lambda: log == ["closed"])
+
+
+@pytest.mark.parametrize("unordered", [False, True])
+async def test_map_async_failure_with_awaiting_upstream(unordered: bool):
+    async def f(x: int) -> int:
+        if x == 0:
+            raise ValueError("boom")
+        await asyncio.Event().wait()
+        return x
+
+    src = _awaiting_upstream([])
+    mapped = src.map_async_unordered(4, f) if unordered else src.map_async(4, f)
+    async with ActorTestKit() as kit:
+        with pytest.raises(ValueError, match="boom"):
+            await mapped.run_with(Sink.seq(), kit.system)

@@ -187,8 +187,19 @@ def streams_are_typed(system: ActorSystem[Any]) -> None:
     flow: Flow[bool, object, object] = Flow.of(int)
     wrong: asyncio.Future[str] = Source.single(1).run_with(Sink.head(), system)  # type: ignore[assignment]
     zipped: Source[tuple[int, str], NotUsed] = Source.single(1).zip(Source.single("a"))
-    Source.single(1).merge(Source.single("a"))  # type: ignore[arg-type]
+    # merge and concat widen to the union, as Pekko's merge[U >: Out]
+    nums = Source.from_iterable([1, 2])
+    bools = Source.single(True)
+    strs = Source.single("a")
+    from_empty: Source[int, NotUsed] = Source.empty().merge(nums)
+    merged: Source[int, NotUsed] = nums.merge(bools)
+    concat_empty: Source[int, NotUsed] = Source.empty().concat(nums)
+    concatenated: Source[int, NotUsed] = nums.concat(bools)
+    either: Source[int | str, NotUsed] = nums.merge(strs)
+    flow_merged: Flow[int, int, NotUsed] = Flow.of(int).merge(bools)
+    not_ints: Source[int, NotUsed] = nums.merge(strs)  # type: ignore[assignment]
     switched: Source[int, UniqueKillSwitch] = Source.single(1).via_mat(
         KillSwitches.single(), Keep.right
     )
-    del g, empty, ints, flow, wrong, zipped, switched
+    del g, empty, ints, flow, wrong, zipped, switched, from_empty, merged, concat_empty
+    del concatenated, either, flow_merged, not_ints

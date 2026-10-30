@@ -335,11 +335,11 @@ class Source(Generic[_Out_co, _Mat_co]):
         """Switch to the source ``f`` returns, at most ``attempts`` times (negative: no limit)."""
         return self._via_op(ops.recover_with_retries_op(attempts, f))
 
-    def merge[T, M](
-        self: Source[T, M], other: Source[T, Any], eager_complete: bool = False
-    ) -> Source[T, M]:
+    def merge[U](
+        self, other: Source[U, Any], eager_complete: bool = False
+    ) -> Source[_Out_co | U, _Mat_co]:
         """Elements of both, as they arrive. Completes when both complete, or when either does
-        with ``eager_complete``. ``self`` typed, as Pekko's ``merge[U >: Out]``."""
+        with ``eager_complete``. The union is Pekko's ``merge[U >: Out]``."""
         return self._via_op(ops.merge_op(other, eager_complete))
 
     def zip[O](self, other: Source[O, Any]) -> Source[tuple[_Out_co, O], _Mat_co]:
@@ -352,7 +352,7 @@ class Source(Generic[_Out_co, _Mat_co]):
         """``f`` of one element from each; completes when either completes."""
         return self._via_op(ops.zip_with_op(other, f))
 
-    def concat[T, M](self: Source[T, M], other: Source[T, Any]) -> Source[T, M]:
+    def concat[U](self, other: Source[U, Any]) -> Source[_Out_co | U, _Mat_co]:
         """This source's elements, then ``other``'s, pulled once this one completes."""
         return self._via_op(ops.concat_op(other))
 
@@ -512,11 +512,11 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
         """Switch to the source ``f`` returns, at most ``attempts`` times (negative: no limit)."""
         return self._via_op(ops.recover_with_retries_op(attempts, f))
 
-    def merge[I, T, M](
-        self: Flow[I, T, M], other: Source[T, Any], eager_complete: bool = False
-    ) -> Flow[I, T, M]:
+    def merge[U](
+        self, other: Source[U, Any], eager_complete: bool = False
+    ) -> Flow[_In_contra, _Out_co | U, _Mat_co]:
         """Elements of both, as they arrive. Completes when both complete, or when either does
-        with ``eager_complete``. ``self`` typed, as Pekko's ``merge[U >: Out]``."""
+        with ``eager_complete``. The union is Pekko's ``merge[U >: Out]``."""
         return self._via_op(ops.merge_op(other, eager_complete))
 
     def zip[O](self, other: Source[O, Any]) -> Flow[_In_contra, tuple[_Out_co, O], _Mat_co]:
@@ -529,7 +529,7 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
         """``f`` of one element from each; completes when either completes."""
         return self._via_op(ops.zip_with_op(other, f))
 
-    def concat[I, T, M](self: Flow[I, T, M], other: Source[T, Any]) -> Flow[I, T, M]:
+    def concat[U](self, other: Source[U, Any]) -> Flow[_In_contra, _Out_co | U, _Mat_co]:
         """This flow's elements, then ``other``'s, pulled once this one completes."""
         return self._via_op(ops.concat_op(other))
 

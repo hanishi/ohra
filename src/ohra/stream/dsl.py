@@ -22,6 +22,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Generic, Never, TypeVar, final
 
+from . import ops
 from .ops import Stage, closing, filter_op, map_op
 
 if TYPE_CHECKING:
@@ -225,6 +226,61 @@ class Source(Generic[_Out_co, _Mat_co]):
     def filter(self, p: Callable[[_Out_co], bool]) -> Source[_Out_co, _Mat_co]:
         return self._via_op(filter_op(p))
 
+    def filter_not(self, p: Callable[[_Out_co], bool]) -> Source[_Out_co, _Mat_co]:
+        return self._via_op(ops.filter_not_op(p))
+
+    def collect[O](self, pf: Callable[[_Out_co], O | None]) -> Source[O, _Mat_co]:
+        """Python's stand-in for a partial function: ``None`` skips the element."""
+        return self._via_op(ops.collect_op(pf))
+
+    def map_concat[O](self, f: Callable[[_Out_co], Iterable[O]]) -> Source[O, _Mat_co]:
+        return self._via_op(ops.map_concat_op(f))
+
+    def take(self, n: int) -> Source[_Out_co, _Mat_co]:
+        return self._via_op(ops.take_op(n))
+
+    def take_while(
+        self, p: Callable[[_Out_co], bool], inclusive: bool = False
+    ) -> Source[_Out_co, _Mat_co]:
+        return self._via_op(ops.take_while_op(p, inclusive))
+
+    def drop(self, n: int) -> Source[_Out_co, _Mat_co]:
+        return self._via_op(ops.drop_op(n))
+
+    def drop_while(self, p: Callable[[_Out_co], bool]) -> Source[_Out_co, _Mat_co]:
+        return self._via_op(ops.drop_while_op(p))
+
+    def grouped(self, n: int) -> Source[list[_Out_co], _Mat_co]:
+        return self._via_op(ops.grouped_op(n))
+
+    def scan[S](self, zero: S, f: Callable[[S, _Out_co], S]) -> Source[S, _Mat_co]:
+        return self._via_op(ops.scan_op(zero, f))
+
+    def fold[S](self, zero: S, f: Callable[[S, _Out_co], S]) -> Source[S, _Mat_co]:
+        return self._via_op(ops.fold_op(zero, f))
+
+    def recover[T, M](self: Source[T, M], f: Callable[[Exception], T | None]) -> Source[T, M]:
+        """``None`` rethrows, as Pekko's unmatched partial function."""
+        return self._via_op(ops.recover_op(f))
+
+    def recover_with_retries[T, M](
+        self: Source[T, M], attempts: int, f: Callable[[Exception], Source[T, Any] | None]
+    ) -> Source[T, M]:
+        """Switch to the source ``f`` returns, at most ``attempts`` times (negative: no limit)."""
+        return self._via_op(ops.recover_with_retries_op(attempts, f))
+
+    def watch_termination[M2](
+        self, combine: Callable[[_Mat_co, asyncio.Future[Done]], M2]
+    ) -> Source[_Out_co, M2]:
+        build = self._build
+
+        def watch(ctx: _Ctx) -> tuple[AsyncIterator[_Out_co], M2]:
+            up, mat = build(ctx)
+            fut = ops.new_done_future()
+            return ops.watch_stage(up, ctx, fut), combine(mat, fut)
+
+        return Source(watch)
+
 
 class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
     """A stage with one input and one output: Pekko's ``Flow[In, Out, Mat]``."""
@@ -302,6 +358,63 @@ class Flow(Generic[_In_contra, _Out_co, _Mat_co]):
 
     def filter(self, p: Callable[[_Out_co], bool]) -> Flow[_In_contra, _Out_co, _Mat_co]:
         return self._via_op(filter_op(p))
+
+    def filter_not(self, p: Callable[[_Out_co], bool]) -> Flow[_In_contra, _Out_co, _Mat_co]:
+        return self._via_op(ops.filter_not_op(p))
+
+    def collect[O](self, pf: Callable[[_Out_co], O | None]) -> Flow[_In_contra, O, _Mat_co]:
+        """Python's stand-in for a partial function: ``None`` skips the element."""
+        return self._via_op(ops.collect_op(pf))
+
+    def map_concat[O](self, f: Callable[[_Out_co], Iterable[O]]) -> Flow[_In_contra, O, _Mat_co]:
+        return self._via_op(ops.map_concat_op(f))
+
+    def take(self, n: int) -> Flow[_In_contra, _Out_co, _Mat_co]:
+        return self._via_op(ops.take_op(n))
+
+    def take_while(
+        self, p: Callable[[_Out_co], bool], inclusive: bool = False
+    ) -> Flow[_In_contra, _Out_co, _Mat_co]:
+        return self._via_op(ops.take_while_op(p, inclusive))
+
+    def drop(self, n: int) -> Flow[_In_contra, _Out_co, _Mat_co]:
+        return self._via_op(ops.drop_op(n))
+
+    def drop_while(self, p: Callable[[_Out_co], bool]) -> Flow[_In_contra, _Out_co, _Mat_co]:
+        return self._via_op(ops.drop_while_op(p))
+
+    def grouped(self, n: int) -> Flow[_In_contra, list[_Out_co], _Mat_co]:
+        return self._via_op(ops.grouped_op(n))
+
+    def scan[S](self, zero: S, f: Callable[[S, _Out_co], S]) -> Flow[_In_contra, S, _Mat_co]:
+        return self._via_op(ops.scan_op(zero, f))
+
+    def fold[S](self, zero: S, f: Callable[[S, _Out_co], S]) -> Flow[_In_contra, S, _Mat_co]:
+        return self._via_op(ops.fold_op(zero, f))
+
+    def recover[I, T, M](self: Flow[I, T, M], f: Callable[[Exception], T | None]) -> Flow[I, T, M]:
+        """``None`` rethrows, as Pekko's unmatched partial function."""
+        return self._via_op(ops.recover_op(f))
+
+    def recover_with_retries[I, T, M](
+        self: Flow[I, T, M], attempts: int, f: Callable[[Exception], Source[T, Any] | None]
+    ) -> Flow[I, T, M]:
+        """Switch to the source ``f`` returns, at most ``attempts`` times (negative: no limit)."""
+        return self._via_op(ops.recover_with_retries_op(attempts, f))
+
+    def watch_termination[M2](
+        self, combine: Callable[[_Mat_co, asyncio.Future[Done]], M2]
+    ) -> Flow[_In_contra, _Out_co, M2]:
+        build = self._build
+
+        def watch(
+            upstream: AsyncIterator[_In_contra], ctx: _Ctx
+        ) -> tuple[AsyncIterator[_Out_co], M2]:
+            up, mat = build(upstream, ctx)
+            fut = ops.new_done_future()
+            return ops.watch_stage(up, ctx, fut), combine(mat, fut)
+
+        return Flow(watch)
 
 
 class Sink(Generic[_In_contra, _Mat_co]):

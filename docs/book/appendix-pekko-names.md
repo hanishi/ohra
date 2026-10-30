@@ -60,8 +60,28 @@
 | `system.scheduler.scheduleOnce / scheduleWithFixedDelay / scheduleAtFixedRate`, `Cancellable` | `system.scheduler.schedule_once / schedule_with_fixed_delay / schedule_at_fixed_rate`, `Cancellable`; delays in seconds; `ActorSystem(..., scheduler=...)` in place of `pekko.scheduler.implementation` |
 | `system.eventStream ! EventStream.Subscribe[E](ref)`, `Unsubscribe(ref)`, `Publish(event)` | `system.event_stream.tell(EventStream.Subscribe(E, ref))`, `EventStream.Unsubscribe(ref)`, `EventStream.Publish(event)`; the class is passed, since Python has no class tag |
 | `DeadLetter`, `UnhandledMessage`, `Dropped`, `AllDeadLetters` | same, without `sender`: `DeadLetter(message, recipient)`, `UnhandledMessage(message, recipient)`, `Dropped(message, reason, recipient)` |
-| `ActorSource.actorRef[T](completionMatcher, failureMatcher, bufferSize, overflowStrategy)` | `ohra.stream.ActorSource.actor_ref(completion_matcher, failure_matcher, buffer_size, overflow_strategy)`: the result is both the source and its ref; iterate it with `async for`, tell its `.ref` |
-| `OverflowStrategy.dropHead / dropTail / dropBuffer / fail`, `BufferOverflowException` | `OverflowStrategy.drop_head / drop_tail / drop_buffer / fail`, `BufferOverflowError` |
+| `Source[+Out, +Mat]`, `Flow[-In, +Out, +Mat]`, `Sink[-In, +Mat]`, `RunnableGraph[+Mat]` | `ohra.stream.Source`, `Flow`, `Sink`, `RunnableGraph`, with the same variance |
+| `NotUsed`, `Done` | `NotUsed`, `Done`; the values are `NOT_USED`, `DONE` |
+| `Keep.left / right / both / none` | same |
+| `via / viaMat / to / toMat / run / runWith / mapMaterializedValue` | `via / via_mat / to / to_mat / run(system) / run_with(sink, system) / map_materialized_value` |
+| implicit `Materializer`, `SystemMaterializer` | the system passed to `run`; `Materializer(system)` |
+| `Flow[Int]` | `Flow.of(int)` |
+| `Source.single / apply(iterable) / fromIterator / future / repeat / empty / failed / tick` | `Source.single / from_iterable / from_async_iterable / future / repeat / empty / failed / tick` |
+| `Sink.seq / foreach / fold / reduce / head / headOption / last / lastOption / ignore / cancelled` | `Sink.seq / foreach / fold / reduce / head / head_option / last / last_option / ignore / cancelled` |
+| `runForeach / runFold / runReduce` | `run_foreach / run_fold / run_reduce`, each taking the system last |
+| `map / mapAsync / mapAsyncUnordered / filter / filterNot / collect / mapConcat` | `map / map_async / map_async_unordered / filter / filter_not / collect / map_concat`; `collect` takes a function that returns `None` to skip |
+| `take / takeWhile / drop / dropWhile / grouped / groupedWithin / throttle / scan / fold` | `take / take_while / drop / drop_while / grouped / grouped_within / throttle / scan / fold`; `throttle(elements, per, maximum_burst)` |
+| `recover / recoverWithRetries / watchTermination` | `recover / recover_with_retries / watch_termination`; `recover` takes a function that returns `None` to rethrow |
+| `merge / zip / zipWith / concatLazy` | `merge / zip / zip_with / concat` |
+| `KillSwitches.single`, `UniqueKillSwitch.shutdown / abort` | `KillSwitches.single()`, `UniqueKillSwitch.shutdown() / abort(exc)` |
+| `Source.queue(bufferSize, overflowStrategy)`, `SourceQueueWithComplete.offer / complete / fail / watchCompletion` | `Source.queue(buffer_size, overflow_strategy)`, `SourceQueue.offer / complete / fail / watch_completion`; `offer` is awaited |
+| `QueueOfferResult.Enqueued / Dropped / QueueClosed / Failure(cause)` | the same, as attributes of `QueueOfferResult` |
+| `Sink.queue()`, `SinkQueueWithCancel.pull / cancel` | `Sink.queue()`, `SinkQueue.pull / cancel`; `pull` returns `None` at the end, and `SinkQueue` is an async iterator |
+| `AbruptStageTerminationException`, `WatchedActorTerminatedException` | `AbruptStageTerminationError`, `WatchedActorTerminatedError` |
+| `ActorSource.actorRef[T](completionMatcher, failureMatcher, bufferSize, overflowStrategy)` | `ActorSource.actor_ref(completion_matcher, failure_matcher, buffer_size, overflow_strategy)`: a `Source[T, ActorRef[T]]` |
+| `ActorSink.actorRef(ref, onCompleteMessage, onFailureMessage)`, `ActorSink.actorRefWithBackpressure(ref, messageAdapter, onInitMessage, ackMessage, onCompleteMessage, onFailureMessage)` | `ActorSink.actor_ref(ref, on_complete_message, on_failure_message)`, `ActorSink.actor_ref_with_backpressure(ref, message_adapter, on_init_message, ack_message, on_complete_message, on_failure_message)` |
+| `ActorFlow.ask(parallelism)(ref)(makeMessage)` with an implicit timeout | `ActorFlow.ask(ref, make_message, timeout, parallelism=2)` |
+| `OverflowStrategy.dropHead / dropTail / dropBuffer / fail / backpressure`, `BufferOverflowException` | `OverflowStrategy.drop_head / drop_tail / drop_buffer / fail / backpressure`, `BufferOverflowError` |
 | `createDeadLetterProbe`, `createUnhandledMessageProbe`, `createDroppedMessageProbe` | `create_dead_letter_probe()`, `create_unhandled_message_probe()`, `create_dropped_message_probe()` |
 | `ActorTestKit()`, `spawn`, `stop`, `createTestProbe`, `shutdownTestKit` | `async with ActorTestKit() as testkit:`, `spawn`, `await stop`, `create_test_probe`; the shutdown is the end of the block; from `ohra.testkit` |
 | `TestProbe.expectMessage / expectNoMessage / expectMessageType / receiveMessage / receiveMessages / fishForMessage / expectTerminated / awaitAssert / within / remaining / remainingOrDefault / remainingOr / stop` | same, snake_case, every wait awaited; `within` is `async with probe.within(max, min=0)` |
@@ -77,4 +97,4 @@
 
 ---
 
-[← Testing](12-testing.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)
+[← Streams](13-streams.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)

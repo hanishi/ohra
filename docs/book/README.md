@@ -12,7 +12,7 @@ Every chapter opens the same way: **the problem** it solves, **the idea** in pla
 
 ## At a glance
 
-Each layer is a set of actors and uses only the layers under it. The core runtime knows nothing about the network. Remoting makes a ref point at another process. The cluster, the singleton and sharding are actors that talk to their peers through remoting. Persistence and management sit beside them, used by whoever needs them. An arrow reads "uses".
+Each layer is a set of actors and uses only the layers under it. The core runtime knows nothing about the network. Remoting makes a ref point at another process. The cluster, the singleton and sharding are actors that talk to their peers through remoting. Persistence, streams and management sit beside them, used by whoever needs them. An arrow reads "uses".
 
 ```mermaid
 flowchart TB
@@ -22,6 +22,7 @@ flowchart TB
   membership["<b>Cluster membership</b><br/>gossip, failure detector, leader, split-brain resolver"]
   remoting["<b>Remoting</b><br/>RemoteRef, @remotable JSON frames, TCP"]
   persistence["<b>Persistence</b><br/>latest state, write then install"]
+  streams["<b>Streams</b><br/>Source, Flow, Sink, actor stages"]
   runtime["<b>Actor runtime</b><br/>cells, behaviors, supervision, timers, receptionist, coordinated shutdown"]
   mgmt --> membership
   sharding -- coordinator runs as --> singleton
@@ -31,6 +32,7 @@ flowchart TB
   membership --> remoting
   remoting --> runtime
   persistence --> runtime
+  streams --> runtime
 ```
 
 | Layer | Package | Apache Pekko module |
@@ -42,6 +44,7 @@ flowchart TB
 | Sharding | `cluster/sharding/` | cluster-sharding-typed |
 | Persistence | `persistence.py` | persistence-typed (durable state) |
 | Management, bootstrap, discovery | `management/`, `discovery.py` | pekko-management |
+| Streams | `stream/` | stream, stream-typed |
 
 ## Contents
 
@@ -57,6 +60,7 @@ flowchart TB
 10. [numpy and shared memory](10-numpy-and-shared-memory.md)
 11. [Putting it together: one cart request](11-putting-it-together.md)
 12. [Testing](12-testing.md)
+13. [Streams](13-streams.md)
 
 Appendices
 

@@ -537,4 +537,4 @@ The plain `ask(ref, make, timeout)` function runs its timeout on the event loop,
 
 ---
 
-[← Putting it together](11-putting-it-together.md) · [Contents](README.md) · [Appendix A: Apache Pekko names →](appendix-pekko-names.md)
+[← Putting it together](11-putting-it-together.md) · [Contents](README.md) · [Streams →](13-streams.md)

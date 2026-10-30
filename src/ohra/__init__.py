@@ -96,12 +96,28 @@ from .remote.serialization import Serialization, SerializationError, remotable
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
 from .scheduler import Cancellable, Scheduler
-from .stream import ActorSource, BufferOverflowError, OverflowStrategy
+from .stream import (
+    DONE,
+    NOT_USED,
+    AbruptStageTerminationError,
+    ActorSource,
+    BufferOverflowError,
+    Done,
+    Flow,
+    Keep,
+    Materializer,
+    NotUsed,
+    OverflowStrategy,
+    RunnableGraph,
+    Sink,
+    Source,
+)
 from .signals import ChildFailed, DeathPactError, PostStop, PreRestart, Signal, Terminated
 from .supervision import SupervisorStrategy
 from .system import ActorSystem
 
 __all__ = [
+    "AbruptStageTerminationError",
     "ActorContext",
     "ActorRef",
     "ActorSource",
@@ -131,10 +147,12 @@ __all__ = [
     "CoordinatedShutdownSettings",
     "CurrentClusterState",
     "CurrentShardRegionState",
+    "DONE",
     "DeadLetter",
     "DeathPactError",
     "Deregister",
     "Deregistered",
+    "Done",
     "Down",
     "DownAll",
     "Dropped",
@@ -145,6 +163,7 @@ __all__ = [
     "EventStream",
     "Failure",
     "Find",
+    "Flow",
     "GetCurrentState",
     "GetShardRegionState",
     "HealthCheckSettings",
@@ -152,6 +171,7 @@ __all__ = [
     "Join",
     "JoinSeedNodes",
     "JvmExitReason",
+    "Keep",
     "KubernetesApiServiceDiscovery",
     "KubernetesApiSettings",
     "KeepMajority",
@@ -162,6 +182,7 @@ __all__ = [
     "Lookup",
     "MailboxOverflowError",
     "MailboxSelector",
+    "Materializer",
     "Member",
     "MemberDowned",
     "MemberEvent",
@@ -171,6 +192,8 @@ __all__ = [
     "MemberRemoved",
     "MemberUp",
     "MemberWeaklyUp",
+    "NOT_USED",
+    "NotUsed",
     "OverflowStrategy",
     "Passivate",
     "Management",
@@ -196,6 +219,7 @@ __all__ = [
     "RevisionConflictError",
     "RotatingKeysSSLEngineProvider",
     "Routers",
+    "RunnableGraph",
     "Scheduler",
     "SelfRemoved",
     "SelfUp",
@@ -208,6 +232,8 @@ __all__ = [
     "ShardingEnvelope",
     "Signal",
     "SingletonActor",
+    "Sink",
+    "Source",
     "SplitBrainResolverSettings",
     "StaticQuorum",
     "SpawnProtocol",

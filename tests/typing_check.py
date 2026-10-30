@@ -1,7 +1,9 @@
 """Checked by pyright, never run. Each `type: ignore` must be needed,
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
 
+import asyncio
 from dataclasses import dataclass
+from typing import Any
 
 from ohra import (
     ActorContext,
@@ -18,6 +20,7 @@ from ohra import (
     TimerScheduler,
     batching,
 )
+from ohra.stream import Flow, Keep, NotUsed, RunnableGraph, Sink, Source
 
 
 @dataclass(frozen=True)
@@ -161,3 +164,16 @@ async def probes_are_typed() -> None:
         s: Greeting = await probe2.expect_message_type(Greeting)
         wrong: Bye = await probe2.expect_message_type(Greeting)  # type: ignore[assignment]
         del x, s, wrong
+
+
+def streams_are_typed(system: ActorSystem[Any]) -> None:
+    # Flow.of(str) alone is an identity Flow[int | str, ...] here; a flow using str is not
+    Source.from_iterable([1]).via(Flow.of(str).map(str.upper))  # type: ignore[arg-type]
+    g: RunnableGraph[tuple[NotUsed, asyncio.Future[list[int]]]] = Source.from_iterable([1]).to_mat(
+        Sink.seq(), Keep.both
+    )
+    empty: Source[int, NotUsed] = Source.empty()  # Source is covariant in its elements
+    ints: Sink[int, NotUsed] = Sink.cancelled()  # and Sink contravariant
+    flow: Flow[bool, object, object] = Flow.of(int)
+    wrong: asyncio.Future[str] = Source.single(1).run_with(Sink.head(), system)  # type: ignore[assignment]
+    del g, empty, ints, flow, wrong

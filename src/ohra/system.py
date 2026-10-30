@@ -23,6 +23,7 @@ from .patterns import Replyable, ask
 from .ref import ActorRef, FunctionRef
 from .scheduler import EventLoopScheduler, Scheduler
 from .remote.remoting import Remoting, UniqueAddress, resolve_local, unique_address
+from .remote.tls import RotatingKeysSSLEngineProvider
 
 if TYPE_CHECKING:
     from .cluster.core import Cluster, ClusterSettings
@@ -49,6 +50,7 @@ class ActorSystem[T](ActorRef[T]):
         shutdown: CoordinatedShutdownSettings | None = None,
         management: ManagementSettings | None = None,
         scheduler: Scheduler | None = None,
+        ssl: RotatingKeysSSLEngineProvider | None = None,
     ) -> None:
         self.name = name
         self.scheduler: Scheduler = scheduler or EventLoopScheduler()
@@ -58,6 +60,8 @@ class ActorSystem[T](ActorRef[T]):
         self._dead_letters = logging.getLogger("ohra.dead_letters")
         if cluster is not None and address is None:
             raise ValueError("a cluster node needs an address=(host, port)")
+        if ssl is not None and address is None:
+            raise ValueError("TLS needs an address=(host, port)")
         if management is not None and management.bootstrap is not None and cluster is None:
             raise ValueError(
                 "cluster bootstrap needs a cluster node: pass cluster=ClusterSettings(...)"
@@ -65,7 +69,9 @@ class ActorSystem[T](ActorRef[T]):
         self.address: UniqueAddress | None = unique_address(*address, name) if address else None
         """Set when the system is reachable from other nodes; paths then read
         ohra://name@host:port/..."""
-        self.remoting: Remoting | None = Remoting(self, self.address) if self.address else None
+        self.remoting: Remoting | None = (
+            Remoting(self, self.address, ssl) if self.address else None
+        )
         self._shutdown: asyncio.Task[None] | None = None
         # set by _final_terminate; a guardian stopping on its own leaves it False
         self._stop_requested = False

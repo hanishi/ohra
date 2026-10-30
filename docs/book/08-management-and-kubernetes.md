@@ -167,6 +167,19 @@ async def main() -> None:
 
 On Kubernetes: give the pods the label `app=myapp`; bind a Role with `get` and `list` on `pods` to their service account; declare container ports for remoting and a port named `management` on 7626; point the readiness probe at `/ready` and the liveness probe at `/alive` on 7626; the namespace comes from `KUBERNETES_NAMESPACE` or the mounted service-account file; if the cluster's DNS does not resolve pod names (`10-1-0-5.ns.pod.cluster.local`), set `KubernetesApiSettings(use_raw_ip=True)` so the contact points are the pod IPs. Once a cluster exists, `new_cluster_enabled=False` forbids a partitioned minority from ever starting a second one. Locally, `examples/cluster/node.py one 2551 --bootstrap 2551 2552 2553` in three terminals forms a cluster with no seeds; its management runs on port + 1000.
 
+To run remoting over TLS ([chapter 4](04-remoting.md#tls)), issue the pods a certificate with cert-manager, one DNS name shared by all of them, and mount its secret where `RotatingKeysSSLEngineProvider` looks by default; cert-manager renews it in place, the kubelet updates the mounted files after its sync delay (up to a minute or two), and the provider reads them for new connections once `ssl_context_cache_ttl` has passed:
+
+```yaml
+volumeMounts:
+  - name: ohra-tls
+    mountPath: /var/run/secrets/ohra-tls/rotating-keys-engine
+    readOnly: true
+volumes:
+  - name: ohra-tls
+    secret:
+      secretName: myapp-remoting-tls  # a cert-manager Certificate's secretName
+```
+
 #### Running on Docker Desktop Kubernetes
 
 `examples/k8s/` is a complete deployment: `node.py` spreads a simulated calculation over the pods with sharding (each pod submits one task a second, and whichever pod owns the task's shard computes it and names itself in the result), `Dockerfile` builds the image from this checkout, and `cluster.yaml` holds the service account that may list pods, its Role and RoleBinding, and a three-replica Deployment with the pod IP and name from the downward API and the health checks as probes. Enable Kubernetes in Docker Desktop's settings (`kubectl config current-context` prints `docker-desktop`), then from the repository root, with your Docker Hub user for `YOU`:

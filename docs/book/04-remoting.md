@@ -106,7 +106,25 @@ async def client() -> None:
         print(await ask(greeter, lambda r: Greet("pekko", r), timeout=3))
 ```
 
-A `tell` to a node that is down never blocks or raises; once the connection attempt fails the message is a dead letter, as in Pekko. Sending an unregistered type, or a message over 16 MiB, raises `SerializationError` at `tell`. A message for a path nobody owns, or one that fails to decode, is a dead letter on the receiving node and the connection stays up. Replies travel on the replying node's own connection back, so the asking side must be listening too (`async with` does that) and `address=` must be a host its peers can reach: it is both the bind and the advertised address, and `127.0.0.1` and `localhost` are different authorities. Message adapters are kept for the actor's lifetime, so create them in `setup` rather than per message. Remoting alone has no membership and no remote `watch`, and a peer that restarts is served rather than quarantined; membership is the [next chapter](05-cluster.md). The listener accepts any peer, so run it on a private network or behind a tunnel; TLS is out of scope, as it is for Apache Pekko's Artery without TLS configured.
+A `tell` to a node that is down never blocks or raises; once the connection attempt fails the message is a dead letter, as in Pekko. Sending an unregistered type, or a message over 16 MiB, raises `SerializationError` at `tell`. A message for a path nobody owns, or one that fails to decode, is a dead letter on the receiving node and the connection stays up. Replies travel on the replying node's own connection back, so the asking side must be listening too (`async with` does that) and `address=` must be a host its peers can reach: it is both the bind and the advertised address, and `127.0.0.1` and `localhost` are different authorities. Message adapters are kept for the actor's lifetime, so create them in `setup` rather than per message. Remoting alone has no membership and no remote `watch`, and a peer that restarts is served rather than quarantined; membership is the [next chapter](05-cluster.md). Without TLS the listener accepts any peer, so run it on a private network or turn on TLS, below.
+
+### TLS
+
+Plain remoting trusts the network: any host that reaches the port can send any `@remotable` message to any actor, join a cluster, or send gossip in a member's name. `ssl=RotatingKeysSSLEngineProvider()` closes that. It is Apache Pekko's `RotatingKeysSSLEngineProvider`: both sides of every connection present a certificate, both certificates must chain to the cluster's CA, and the peer's certificate must share a subject name (its common name or a DNS alternative name) with this node's own. The connection runs TLS 1.3.
+
+```python
+from ohra import ActorSystem, Behaviors, RotatingKeysSSLEngineProvider
+
+
+async def node() -> None:
+    tls = RotatingKeysSSLEngineProvider()  # /var/run/secrets/ohra-tls/rotating-keys-engine
+    async with ActorSystem(Behaviors.ignore, "a", address=("10.0.0.1", 2552), ssl=tls):
+        ...
+```
+
+The provider reads three PEM files under `secret_mount_point`: `tls.key`, `tls.crt` and `ca.crt`, the names a Kubernetes TLS secret mounts (`key_file`, `cert_file` and `ca_cert_file` override them one by one). Give every node a certificate from one CA carrying one shared name, such as the service's DNS name. The files are read again for new connections once `ssl_context_cache_ttl` (five minutes) has passed, so rotated certificates take effect without a restart; open connections keep the context they started with. A key, certificate or CA that does not load fails `async with ActorSystem(...)` at startup.
+
+A peer that fails the handshake or the name check is closed before it receives anything, and the node logs a warning naming it. When the sender is the one that refuses, or the handshake fails, the sender's connection fails like any other: its messages become dead letters, with a warning. When only the receiver refuses, as can happen while a new CA reaches the nodes one by one, TLS 1.3 lets the sender finish its side of the handshake first, so what it sent is lost without a dead letter, and the receiver's warning is the one to watch. TLS covers remoting and so the cluster, sharding and singletons on top of it; the management endpoint of [chapter 8](08-management-and-kubernetes.md) stays plain HTTP.
 
 ---
 

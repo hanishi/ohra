@@ -91,7 +91,7 @@ from .persistence import (
     Store,
 )
 from .ref import ActorRef
-from .remote import Address, RemoteRef, UniqueAddress
+from .remote import Address, RemoteRef, RotatingKeysSSLEngineProvider, UniqueAddress
 from .remote.serialization import Serialization, SerializationError, remotable
 from .result import Failure, Success, Try
 from .routers import PoolRouter, Routers
@@ -194,6 +194,7 @@ __all__ = [
     "ResolvedTarget",
     "RecoveryTimedOutError",
     "RevisionConflictError",
+    "RotatingKeysSSLEngineProvider",
     "Routers",
     "Scheduler",
     "SelfRemoved",

@@ -8,9 +8,10 @@ import contextlib
 import asyncio
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 if TYPE_CHECKING:
+    from ..ref import ActorRef
     from ..scheduler import Cancellable
     from .dsl import Done, Source, _Ctx  # pyright: ignore[reportPrivateUsage]
 
@@ -43,6 +44,33 @@ async def run_drive[I, R](
                 child.cancel()
                 await asyncio.gather(child, return_exceptions=True)
         return child.result()
+
+
+@runtime_checkable
+class FailsEagerly(Protocol):
+    """A source that can fail outside a pull (``ActorSource``): it calls each listener with the
+    failure at once, so the stage right below can settle without waiting for the next pull."""
+
+    def on_failure(self, listener: Callable[[BaseException], None]) -> None: ...
+
+
+def watch_ref(ref: ActorRef[Any], on_terminated: Callable[[], None]) -> Callable[[], None]:
+    """Run ``on_terminated`` once when the local actor ``ref`` stops (on the next loop step if it
+    already has); return the unwatch. A ref that cannot be watched (a remote one) is not."""
+    from ..cell import _cell_of, is_local_actor  # pyright: ignore[reportPrivateUsage]
+
+    if not is_local_actor(ref):
+        return lambda: None
+    done = _cell_of(ref).done
+
+    def notify(_: object) -> None:
+        on_terminated()
+
+    def unwatch() -> None:
+        done.remove_done_callback(notify)
+
+    done.add_done_callback(notify)
+    return unwatch
 
 
 class Stage[T]:
@@ -280,9 +308,8 @@ def watch_stage[T](up: AsyncIterator[T], ctx: _Ctx, fut: asyncio.Future[Done]) -
             fut.set_result(DONE)
 
     ctx.on_abort(lambda: settle(None))
-    on_failure = getattr(up, "on_failure", None)  # a source that fails outside a pull
-    if on_failure is not None:
-        on_failure(settle)
+    if isinstance(up, FailsEagerly):
+        up.on_failure(settle)
 
     async def run() -> AsyncGenerator[T, None]:
         try:
@@ -314,7 +341,8 @@ def map_async_op[I, O](
     while fewer than ``parallelism`` calls are in flight, fails with the first failure, and
     cancels what is still running when the stage ends for any reason. A failure of ``stop`` fails
     the stage at once, as an upstream failure does in Pekko, whether a pull is waiting or not
-    (``ActorFlow.ask``'s watch)."""
+    (``ActorFlow.ask``'s watch). ``stop`` may only fail: done, it stays in the wait set, so a
+    result would make the stage spin; that raises ``RuntimeError`` instead."""
     if parallelism < 1:
         raise ValueError("parallelism must be at least 1")
 
@@ -339,7 +367,8 @@ def map_async_op[I, O](
                         if t.done() and not t.cancelled() and t.exception() is not None:
                             raise cast(BaseException, t.exception())
                     if stop is not None and stop.done():
-                        stop.result()
+                        stop.result()  # raises its failure; a result is a caller's bug:
+                        raise RuntimeError("map_async's stop future completed without failing")
                     if pull is not None and pull.done():
                         got, pull = pull, None
                         try:

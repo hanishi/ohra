@@ -9,9 +9,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..patterns import Replyable, start_ask
 from ..ref import ActorRef
-from .actor_sink import watch_ref
 from .dsl import NOT_USED, Flow, NotUsed
-from .ops import Stage, closing, map_async_op
+from .ops import Stage, closing, map_async_op, watch_ref
 
 if TYPE_CHECKING:
     from .dsl import _Ctx  # pyright: ignore[reportPrivateUsage]

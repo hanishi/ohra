@@ -14,10 +14,9 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
-from ..cell import _cell_of, is_local_actor  # pyright: ignore[reportPrivateUsage]
 from ..ref import ActorRef, FunctionRef
 from .dsl import NOT_USED, AbruptStageTerminationError, NotUsed, Sink
-from .ops import run_drive
+from .ops import run_drive, watch_ref
 
 if TYPE_CHECKING:
     from .dsl import _Ctx  # pyright: ignore[reportPrivateUsage]
@@ -26,23 +25,6 @@ _ids = itertools.count()
 
 # Pekko's default InputBuffer max, which ActorRefBackpressureSinkStage buffers up to
 _MAX_BUFFER = 16
-
-
-def watch_ref(ref: ActorRef[Any], on_terminated: Callable[[], None]) -> Callable[[], None]:
-    """Run ``on_terminated`` once when the local actor ``ref`` stops (on the next loop step if it
-    already has); return the unwatch. A ref that cannot be watched (a remote one) is not."""
-    if not is_local_actor(ref):
-        return lambda: None
-    done = _cell_of(ref).done
-
-    def notify(_: object) -> None:
-        on_terminated()
-
-    def unwatch() -> None:
-        done.remove_done_callback(notify)
-
-    done.add_done_callback(notify)
-    return unwatch
 
 
 class _Stopped:

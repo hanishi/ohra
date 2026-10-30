@@ -90,6 +90,7 @@ async def test_system_without_address_cannot_resolve_remote_paths():
 
 import logging  # noqa: E402
 import socket  # noqa: E402
+import struct  # noqa: E402
 
 from ohra import (  # noqa: E402
     Entity,
@@ -406,6 +407,20 @@ async def test_bad_inbound_message_does_not_close_the_connection(caplog: pytest.
         remote.tell(Greet("after", b.ignore_ref))
         await eventually(lambda: log == ["after"])
         assert any("Positive" in r.getMessage() for r in caplog.records)
+
+
+async def test_deeply_nested_frame_closes_the_connection(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="ohra.remote")
+    port = free_port()
+    async with node(Behaviors.ignore, "a", port):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(struct.pack(">I", 100_000) + b"[" * 100_000)
+        await writer.drain()
+        while await reader.read(65536):  # the hello, then EOF once the node closes it
+            pass
+        writer.close()
+        await writer.wait_closed()
+        assert any("closing connection" in r.getMessage() for r in caplog.records)
 
 
 async def test_oversize_message_raises_at_tell():

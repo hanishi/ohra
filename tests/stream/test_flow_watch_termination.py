@@ -115,3 +115,22 @@ async def test_watch_termination_fails_when_terminated_through_an_operator():
         await asyncio.wait_for(done, 1)
     with pytest.raises(AbruptStageTerminationError):
         await asyncio.wait_for(pending, 1)
+
+
+async def test_watch_termination_fails_when_terminated_through_an_operator_into_a_future_sink():
+    suspended = asyncio.Event()
+    async with ActorTestKit() as kit:
+        done, out = (
+            _suspended_upstream(suspended)
+            .watch_termination(Keep.right)
+            .map(lambda x: x)
+            .to_mat(Sink.ignore(), Keep.both)
+            .run(kit.system)
+        )
+        await suspended.wait()
+        kit.system.terminate()
+        await kit.system.when_terminated()
+    with pytest.raises(AbruptStageTerminationError):
+        await asyncio.wait_for(done, 1)
+    with pytest.raises(AbruptStageTerminationError):
+        await asyncio.wait_for(out, 1)

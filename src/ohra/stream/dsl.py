@@ -22,7 +22,7 @@ from collections.abc import (
 from typing import TYPE_CHECKING, Any, Final, Generic, Never, TypeVar, final
 
 from . import ops
-from .ops import Stage, closing, filter_op, map_op
+from .ops import Stage, filter_op, map_op
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
@@ -81,7 +81,10 @@ class _Ctx:
         self._callbacks: list[Callable[[], None]] = []
 
     def on_abort(self, callback: Callable[[], None]) -> None:
-        self._callbacks.append(callback)
+        if self.aborted:  # registered late: the run is already aborted
+            callback()
+        else:
+            self._callbacks.append(callback)
 
     def abort(self) -> None:
         self.aborted = True
@@ -590,13 +593,11 @@ class Sink(Generic[_In_contra, _Mat_co]):
         def build(
             upstream: AsyncIterator[Any], ctx: _Ctx
         ) -> tuple[Coroutine[Any, Any, None], NotUsed]:
+            async def nothing(_: AsyncIterator[Any]) -> None:
+                pass
+
             async def drive() -> None:
-                try:
-                    async with closing(upstream):
-                        pass
-                except asyncio.CancelledError:
-                    ctx.abort()
-                    raise
+                await ops.run_drive(ctx, upstream, nothing)
 
             return drive(), NOT_USED
 
@@ -638,12 +639,7 @@ def _future_sink[T, R](
 
         async def drive() -> None:
             try:
-                async with closing(upstream) as up:
-                    try:
-                        result = await consume(up)
-                    except asyncio.CancelledError:
-                        ctx.abort()  # before upstream unwinds, so stages see the run aborted
-                        raise
+                result = await ops.run_drive(ctx, upstream, consume)
             except asyncio.CancelledError:
                 ctx.abort()
                 raise

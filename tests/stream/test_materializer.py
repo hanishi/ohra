@@ -95,3 +95,15 @@ async def test_run_stopped_before_the_drive_starts_is_aborted():
         assert await asyncio.wait_for(q2.offer(1), 1) == QueueOfferResult.QueueClosed
         with pytest.raises(AbruptStageTerminationError):
             await asyncio.wait_for(q2.watch_completion(), 1)
+
+
+async def test_callback_registered_after_abort_runs_at_once():
+    from ohra.stream.dsl import _Ctx  # pyright: ignore[reportPrivateUsage]
+
+    async with ActorTestKit() as kit:
+        ctx = _Ctx(kit.system)
+        calls: list[str] = []
+        ctx.on_abort(lambda: calls.append("early"))
+        ctx.abort()
+        ctx.on_abort(lambda: calls.append("late"))
+        assert calls == ["early", "late"]

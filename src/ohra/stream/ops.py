@@ -21,6 +21,29 @@ def closing[I: AsyncIterator[Any]](it: I) -> contextlib.AbstractAsyncContextMana
     return contextlib.aclosing(cast(Any, it))
 
 
+async def run_drive[I, R](
+    ctx: _Ctx, upstream: AsyncIterator[I], body: Callable[[AsyncIterator[I]], Awaitable[R]]
+) -> R:
+    """The shared shape of every sink drive: ``body`` pulls ``upstream`` in a child task, and the
+    drive waits for it inside ``closing(upstream)``. When the drive task is cancelled (the run's
+    actor stopped) it calls ``ctx.abort()`` first, so that the stages unwinding under the cancel
+    see the run aborted, and only then cancels the child and waits for it, so that upstream is
+    closed with no task suspended inside it. Waiting with ``asyncio.wait`` keeps the cancel from
+    reaching the child before the abort."""
+    async with closing(upstream) as up:
+        child = asyncio.ensure_future(body(up))
+        try:
+            await asyncio.wait((child,))
+        except asyncio.CancelledError:
+            ctx.abort()
+            raise
+        finally:
+            if not child.done():
+                child.cancel()
+                await asyncio.gather(child, return_exceptions=True)
+        return child.result()
+
+
 class Stage[T]:
     """An operator's iterator, as ``_via_op`` hands it downstream. Closing it closes the
     operator, then its upstream: an async generator closed before its first pull never enters

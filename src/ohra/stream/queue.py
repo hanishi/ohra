@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Self, final
 
 from .actor_source import BufferOverflowError, OverflowStrategy
-from .ops import closing, new_done_future
+from .ops import new_done_future, run_drive
 
 if TYPE_CHECKING:
     from .dsl import Done, _Ctx  # pyright: ignore[reportPrivateUsage]
@@ -389,45 +389,39 @@ class SinkQueue[T]:
         await sig
 
     async def drive(self, upstream: AsyncIterator[T]) -> None:
+        await run_drive(self._ctx, upstream, self._loop)
+        if not self._over:
+            self._settle(_END, None)
+
+    async def _loop(self, up: AsyncIterator[T]) -> None:
+        pulling: asyncio.Future[T] | None = None
         try:
-            async with closing(upstream) as up:
-                pulling: asyncio.Future[T] | None = None
+            while True:
+                while not self._want and not self._cancelled:
+                    await self._sleep()
+                if self._cancelled:
+                    break
+                pulling = asyncio.ensure_future(anext(up))
+                pulling.add_done_callback(lambda _: self._poke())
+                while not pulling.done() and not self._cancelled:
+                    await self._sleep()
+                if not pulling.done():
+                    break
+                self._want = False
                 try:
-                    while True:
-                        while not self._want and not self._cancelled:
-                            await self._sleep()
-                        if self._cancelled:
-                            break
-                        pulling = asyncio.ensure_future(anext(up))
-                        pulling.add_done_callback(lambda _: self._poke())
-                        while not pulling.done() and not self._cancelled:
-                            await self._sleep()
-                        if not pulling.done():
-                            break
-                        self._want = False
-                        try:
-                            self._settle(pulling.result(), None)
-                        except StopAsyncIteration:
-                            self._settle(_END, None)
-                            break
-                        except Exception as e:
-                            self._settle(_END, e)
-                            break
-                        pulling = None
-                except asyncio.CancelledError:
-                    self._ctx.abort()  # before upstream unwinds
-                    raise
-                finally:
-                    # upstream is closed only once no task is suspended inside its __anext__
-                    if pulling is not None and not pulling.done():
-                        pulling.cancel()
-                        await asyncio.gather(pulling, return_exceptions=True)
-        except asyncio.CancelledError:
-            self._ctx.abort()
-            raise
-        else:
-            if not self._over:
-                self._settle(_END, None)
+                    self._settle(pulling.result(), None)
+                except StopAsyncIteration:
+                    self._settle(_END, None)
+                    break
+                except Exception as e:
+                    self._settle(_END, e)
+                    break
+                pulling = None
+        finally:
+            # upstream is closed only once no task is suspended inside its __anext__
+            if pulling is not None and not pulling.done():
+                pulling.cancel()
+                await asyncio.gather(pulling, return_exceptions=True)
 
 
 def sink_queue_build[T](

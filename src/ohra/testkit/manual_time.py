@@ -123,8 +123,9 @@ class ManualTime:
     """``ManualTime(testkit.system)`` on a test kit made with ``manual_time=True``: timers,
     backoff delays and asks on the system scheduler wait for ``time_passes``.
 
-    Before each due job the actors settle: every actor's mailbox is empty and it waits for its
-    next message, or 100 ms of real time have passed. Amounts are not dilated.
+    Before each due job the loop settles: every actor's mailbox is empty and every other task
+    waits on a future (a stream has reached its pull), or 100 ms of real time have passed.
+    Amounts are not dilated.
     """
 
     def __init__(self, system: ActorSystem[Any]) -> None:

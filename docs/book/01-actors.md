@@ -229,7 +229,7 @@ The `make` argument is anything that turns a reply ref into the request: a lambd
 
 ### Children, stopping, and DeathWatch
 
-`ctx.spawn(behavior, name)` and `ctx.spawn_anonymous(behavior)` create children. `ctx.stop(child)` stops one. Stopping a parent stops its subtree first, then delivers `PostStop`. `ctx.watch(ref)` delivers a `Terminated` signal when that actor stops, or `ChildFailed` if it was a child that failed. Leaving `Terminated` unhandled fails the watcher with `DeathPactError`, as in Pekko.
+`ctx.spawn(behavior, name)` and `ctx.spawn_anonymous(behavior)` create children. `ctx.stop(child)` stops one, and does nothing if that child has already stopped. Stopping a parent stops its subtree first, then delivers `PostStop`. `ctx.watch(ref)` delivers a `Terminated` signal when that actor stops, or `ChildFailed` if it was a child that failed. Leaving `Terminated` unhandled fails the watcher with `DeathPactError`, as in Pekko. `ctx.watch_with(ref, msg)` delivers `msg` as an ordinary message instead. Watching a ref that is already watched does nothing when the message is the same, and raises `RuntimeError` when it differs, `watch` after `watch_with` included, as Pekko raises `IllegalStateException`: `ctx.unwatch(ref)` first to change it.
 
 ```python
 from ohra import Signal, Terminated
@@ -260,7 +260,7 @@ The stop order is fixed, and nothing awaits after the third step:
 4. Turn the pending user messages into dead letters.
 5. Notify every watcher and the parent with `Terminated`, or `ChildFailed` if it failed.
 
-Timers and background tasks are cancelled at the start of the stop, so nothing outlives the actor. The test suite fails any test that leaves an asyncio task behind.
+Timers and background tasks are cancelled at the start of the stop, so nothing outlives the actor. A timer started from `PostStop` is never started, and `pipe_to_self` there closes its work at once. The test suite fails any test that leaves an asyncio task behind.
 
 ### Supervision
 
@@ -275,6 +275,10 @@ resilient = Behaviors.supervise(counter()).on_failure(
 ```
 
 `PreRestart` is signalled before a restart. Both restart strategies cancel the actor's timers first, so timers started in the supervised `setup` come back and timers started from a handler do not.
+
+The backoff delay doubles with each failure, from `min_backoff` up to `max_backoff`. The count goes back to zero once a restarted actor has run `reset_after` seconds without failing. Set it with `with_reset_after`; the default is `(min_backoff + max_backoff) / 2`, as Pekko's `resetBackoffAfter`. The wait for a restart is not counted, so a `setup` that fails at once keeps doubling the delay.
+
+A handler may return `Behaviors.supervise(...)`, so a state function can wrap itself on every message: `def counter(n)` returning `Behaviors.supervise(...).on_failure(...)` for `counter(n + 1)`. When the returned behavior has a supervisor for the same `exc_type`, it replaces the current one, with fresh restart counts, so supervisors never pile up. Pekko deduplicates them the same way. The same rule applies when one supervisor wraps another directly: of two for the same `exc_type`, only the inner one stays.
 
 ### Timers and stash
 

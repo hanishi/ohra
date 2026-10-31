@@ -215,3 +215,55 @@ async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
                 await ask(rec, lambda r: Find(GREETER, r), timeout=1)
             ).service_instances == frozenset({svc})
         assert not [r for r in caplog.records if actor.path in r.getMessage()]
+
+
+async def test_two_subscriptions_through_adapters_of_one_actor_both_end_with_it(
+    caplog: pytest.LogCaptureFixture,
+):
+    def subscribing(ctx: ActorContext[Any]) -> Behavior[Any]:
+        rec = Receptionist(ctx.system).ref
+        rec.tell(Subscribe(GREETER, ctx.message_adapter(lambda listing: ("greeter", listing))))
+        rec.tell(Subscribe(OTHER, ctx.message_adapter(lambda listing: ("other", listing))))
+        return Behaviors.receive_message(
+            lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
+        )
+
+    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+        svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
+        actor = await ask(
+            system, lambda r: Spawn(Behaviors.setup(subscribing), "subscriber", r), timeout=1
+        )
+        rec = Receptionist(system).ref
+        # both subscriptions are in: the receptionist handles messages in order
+        await ask(rec, lambda r: Find(OTHER, r), timeout=1)
+        actor.tell("stop")
+        await eventually(lambda: gone(system, actor.path))
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
+            rec.tell(Register(GREETER, svc))
+            rec.tell(Register(OTHER, svc))
+            assert (
+                await ask(rec, lambda r: Find(OTHER, r), timeout=1)
+            ).service_instances == frozenset({svc})
+        assert not [r for r in caplog.records if actor.path in r.getMessage()]
+
+
+async def test_a_service_that_subscribes_too_leaves_its_keys_when_it_stops():
+    def registering(ctx: ActorContext[Any]) -> Behavior[Any]:
+        rec = Receptionist(ctx.system).ref
+        rec.tell(Register(GREETER, ctx.self))
+        rec.tell(Subscribe(OTHER, ctx.message_adapter(lambda listing: ("other", listing))))
+        return Behaviors.receive_message(
+            lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
+        )
+
+    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+        listings: list[Listing[str]] = []
+        watcher = await ask(system, lambda r: Spawn(recorder(listings), "watcher", r), timeout=1)
+        actor = await ask(
+            system, lambda r: Spawn(Behaviors.setup(registering), "both", r), timeout=1
+        )
+        rec = Receptionist(system).ref
+        rec.tell(Subscribe(GREETER, watcher))
+        await eventually(lambda: listings[-1:] != [] and actor in listings[-1].service_instances)
+        actor.tell("stop")
+        await eventually(lambda: listings[-1].service_instances == frozenset())

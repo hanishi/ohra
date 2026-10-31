@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..behavior import Behavior, Behaviors
 from ..context import ActorContext
-from ..cell import ActorCell, is_local_actor
+from ..cell import ActorCell, watched_ref
 from ..coordinated_shutdown import ClusterDowningReason, ClusterLeavingReason, CoordinatedShutdown
 from ..ref import ActorRef, FunctionRef
 from ..remote import Address, UniqueAddress
@@ -905,10 +905,11 @@ class _CoreDaemon:
             if not self.cluster.self_exiting.done():
                 # a stopped daemon never blocks the cluster-exiting phase
                 self.cluster.self_exiting.set_result(None)
-        elif isinstance(signal, Terminated) and self.is_downing_provider(signal.ref):
-            # refs compare by identity
-            for ref in [r for r in self.subscribers if r.path == signal.ref.path]:
+        elif isinstance(signal, Terminated):
+            for ref in [r for r in self.subscribers if watched_ref(r) == signal.ref]:
                 del self.subscribers[ref]
+            if not self.is_downing_provider(signal.ref):
+                return Behaviors.same
             # The downing provider is vital to a working cluster: its failure, or its stop before
             # this member is Removed or Down, ends the daemon and with it the node. Its stop on
             # self Removed is the normal exit.
@@ -1639,11 +1640,11 @@ class _CoreDaemon:
     def subscription(self, msg: ClusterStateSubscription) -> None:
         match msg:
             case Subscribe(subscriber, event_class):
-                if is_local_actor(subscriber) and not self.is_downing_provider(subscriber):
-                    # A stopped subscriber drops out, as from Pekko's event stream. The downing
-                    # provider keeps its plain watch from become_initialized, so its death arrives
-                    # as a signal, not as an Unsubscribe.
-                    self.ctx.watch_with(subscriber, Unsubscribe(subscriber))
+                if (actor := watched_ref(subscriber)) is not None:
+                    # A stopped subscriber drops out, as from Pekko's event stream. One plain
+                    # watch per actor, so the actor's message adapters, and the downing provider
+                    # watched in become_initialized, share it; _on_signal drops them all.
+                    self.ctx.watch(actor)
                 self.subscribers.setdefault(subscriber, set()).add(event_class)
                 publish_diff(
                     self.empty_state,

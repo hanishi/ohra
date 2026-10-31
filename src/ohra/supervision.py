@@ -58,7 +58,12 @@ class Restart(SupervisorStrategy):
 
 @dataclass(frozen=True, slots=True)
 class Backoff(SupervisorStrategy):
-    """Restart after an exponentially growing delay; messages are stashed meanwhile."""
+    """Restart after an exponentially growing delay; messages are stashed meanwhile.
+
+    The delay grows from ``min_backoff`` once per failure. Its count resets once a restarted
+    actor has run ``reset_after`` seconds without failing; None means Pekko's default,
+    ``(min_backoff + max_backoff) / 2``.
+    """
 
     min_backoff: float
     max_backoff: float
@@ -69,6 +74,13 @@ class Backoff(SupervisorStrategy):
 
     def with_reset_after(self, seconds: float) -> Backoff:
         return replace(self, reset_after=seconds)
+
+    @property
+    def reset_backoff_after(self) -> float:
+        """Pekko's resetBackoffAfter: ``reset_after``, or its default."""
+        if self.reset_after is None:
+            return (self.min_backoff + self.max_backoff) / 2
+        return self.reset_after
 
     def with_stash_capacity(self, capacity: int) -> Backoff:
         return replace(self, stash_capacity=capacity)

@@ -20,7 +20,7 @@ from ohra import (
 )
 from ohra.cluster.core import Cluster, ClusterSettings, Down, Join, Leave
 from ohra.receptionist import (
-    _ServiceTerminated,  # pyright: ignore[reportPrivateUsage]
+    _ActorTerminated,  # pyright: ignore[reportPrivateUsage]
     Find,
     Listing,
     Receptionist,
@@ -190,7 +190,7 @@ async def test_a_terminated_service_with_no_bindings_publishes_no_row():
             await eventually_async(lambda: instances_seen_on(b, 1))
             before = max(versions)
             unbound = await spawn(a, Behaviors.receive_message(greeter), "unbound")
-            Receptionist(a).ref.tell(_ServiceTerminated(unbound))  # no keys: nothing changed
+            Receptionist(a).ref.tell(_ActorTerminated(unbound))  # no keys: nothing changed
             second = await spawn(a, Behaviors.receive_message(greeter), "second")
             Receptionist(a).ref.tell(Register(GREETER, second))
             await eventually_async(lambda: instances_seen_on(b, 2))

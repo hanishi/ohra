@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Any
+
+import pytest
 
 from ohra import (
     ActorContext,
@@ -17,6 +20,7 @@ from ohra import (
     SpawnProtocol,
     Terminated,
 )
+from ohra.testkit import ActorTestKit, TestProbe
 
 from .util import eventually
 
@@ -174,3 +178,126 @@ async def test_spawn_protocol_spawns_on_request_with_unique_names():
             "ohra://t/user/$0",
         ]
     assert sorted(events) == ["stopped a", "stopped b", "stopped c"]
+
+
+async def test_stopping_an_already_stopped_child_does_nothing():
+    """Pekko's ActorContextSpec, "not have problems stopping already stopped child"."""
+    async with ActorTestKit() as testkit:
+        acks: TestProbe[str] = testkit.create_test_probe()
+
+        def parent(ctx: ActorContext[str]) -> Behavior[str]:
+            child = ctx.spawn(Behaviors.ignore, "child")
+            ctx.watch(child)
+
+            def on_message(_msg: str) -> Behavior[str]:
+                ctx.stop(child)
+                acks.ref.tell("stopped")
+                return Behaviors.same
+
+            def on_signal(_ctx: ActorContext[str], sig: Signal) -> Behavior[str]:
+                if isinstance(sig, Terminated):
+                    acks.ref.tell("terminated")
+                return Behaviors.same
+
+            return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+        ref = testkit.spawn(Behaviors.setup(parent))
+        ref.tell("stop")
+        await acks.expect_message("stopped")
+        await acks.expect_message("terminated")
+        ref.tell("stop again")
+        await acks.expect_message("stopped")
+
+
+async def test_stopping_an_actor_that_is_not_a_child_raises():
+    async with ActorTestKit() as testkit:
+        outcomes: TestProbe[str] = testkit.create_test_probe()
+        stranger = testkit.spawn(Behaviors.ignore)
+
+        def on_message(ctx: ActorContext[ActorRef[Any]], ref: ActorRef[Any]) -> Behavior[Any]:
+            try:
+                ctx.stop(ref)
+            except ValueError:
+                outcomes.ref.tell("ValueError")
+            return Behaviors.same
+
+        ref: ActorRef[ActorRef[Any]] = testkit.spawn(Behaviors.receive(on_message))
+        ref.tell(stranger)
+        await outcomes.expect_message("ValueError")
+        ref.tell(ref)
+        await outcomes.expect_message("ValueError")
+
+
+async def test_watch_with_the_same_message_twice_is_one_watch():
+    """Pekko's WatchSpec, "allow idempotent invocations of watchWith with matching msgs"."""
+    async with ActorTestKit() as testkit:
+        got: TestProbe[str] = testkit.create_test_probe()
+
+        def watcher(ctx: ActorContext[str]) -> Behavior[str]:
+            child = ctx.spawn(Behaviors.ignore, "child")
+            ctx.watch_with(child, "gone")
+            ctx.watch_with(child, "gone")
+            ctx.stop(child)
+
+            def on_message(msg: str) -> Behavior[str]:
+                got.ref.tell(msg)
+                return Behaviors.same
+
+            return Behaviors.receive_message(on_message)
+
+        testkit.spawn(Behaviors.setup(watcher))
+        await got.expect_message("gone")
+        await got.expect_no_message(0.05)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("gone", "other"), (None, "gone"), ("gone", None)],
+    ids=["watch_with-then-watch_with", "watch-then-watch_with", "watch_with-then-watch"],
+)
+async def test_watching_again_with_another_message_fails_the_watcher(
+    first: str | None, second: str | None
+):
+    """Pekko's WatchSpec, "fail when watchWitch is used after watchWith with different
+    termination message", and the two cases with a plain watch: unwatch first to change it."""
+
+    def watch(ctx: ActorContext[str], ref: ActorRef[Any], msg: str | None) -> None:
+        if msg is None:
+            ctx.watch(ref)
+        else:
+            ctx.watch_with(ref, msg)
+
+    async with ActorTestKit() as testkit:
+        target = testkit.spawn(Behaviors.ignore)
+
+        def on_message(ctx: ActorContext[str], _msg: str) -> Behavior[str]:
+            watch(ctx, target, first)
+            watch(ctx, target, second)
+            return Behaviors.same
+
+        ref = testkit.spawn(Behaviors.receive(on_message))
+        probe: TestProbe[str] = testkit.create_test_probe()
+        ref.tell("watch twice")
+        await probe.expect_terminated(ref)
+
+
+async def test_unwatch_then_watch_with_another_message():
+    """Pekko's WatchSpec, "allow watch message definition after watch using unwatch"."""
+    async with ActorTestKit() as testkit:
+        got: TestProbe[str] = testkit.create_test_probe()
+
+        def watcher(ctx: ActorContext[str]) -> Behavior[str]:
+            child = ctx.spawn(Behaviors.ignore, "child")
+            ctx.watch_with(child, "first")
+            ctx.unwatch(child)
+            ctx.watch_with(child, "second")
+            ctx.stop(child)
+
+            def on_message(msg: str) -> Behavior[str]:
+                got.ref.tell(msg)
+                return Behaviors.same
+
+            return Behaviors.receive_message(on_message)
+
+        testkit.spawn(Behaviors.setup(watcher))
+        await got.expect_message("second")

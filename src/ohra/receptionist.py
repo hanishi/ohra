@@ -19,7 +19,7 @@ from .cluster.core import (
     UnreachableMember,
 )
 from .cluster.core import Subscribe as ClusterSubscribe
-from .cell import is_local_actor
+from .cell import watched_ref
 from .context import ActorContext
 from .ref import ActorRef, LocalRef
 from .remote import Address, RemoteRef, UniqueAddress
@@ -112,12 +112,10 @@ class ReceptionistRow:
 
 
 @dataclass(frozen=True)
-class _ServiceTerminated:
-    ref: ActorRef[Any]
+class _ActorTerminated:
+    """A watched actor stopped: it ends its registrations and every subscription made through it
+    or its message adapters. One watch per actor, as watch_with keeps one message per target."""
 
-
-@dataclass(frozen=True)
-class _SubscriberTerminated:
     ref: ActorRef[Any]
 
 
@@ -125,14 +123,7 @@ class _SubscriberTerminated:
 class _ResendTick: ...
 
 
-type _Msg = (
-    Command
-    | _ServiceTerminated
-    | _SubscriberTerminated
-    | ReceptionistRow
-    | ClusterDomainEvent
-    | _ResendTick
-)
+type _Msg = Command | _ActorTerminated | ReceptionistRow | ClusterDomainEvent | _ResendTick
 
 
 class Receptionist:
@@ -198,6 +189,11 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                 if not instances:
                     del registry[key]
 
+        def in_use(actor: ActorRef[Any]) -> bool:
+            return actor in services_per_actor or any(
+                watched_ref(s) == actor for s in subscriptions_per_actor
+            )
+
         def on_message(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
                 case Register(key, service, reply_to):
@@ -209,8 +205,7 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                             key.id,
                         )
                         return Behaviors.same
-                    if service not in services_per_actor:
-                        ctx.watch_with(service, _ServiceTerminated(service))
+                    ctx.watch_with(service, _ActorTerminated(service))  # once per actor
                     if reply_to is not None:
                         reply_to.tell(Registered(key, service))
                     services_per_actor.setdefault(service, set()).add(key)
@@ -219,11 +214,11 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                 case Deregister(key, service, reply_to):
                     keys = services_per_actor.get(service)
                     if keys:
-                        if keys == {key}:
-                            ctx.unwatch(service)
                         if reply_to is not None:
                             reply_to.tell(Deregistered(key, service))
                         remove_binding(key, service)
+                        if not in_use(service):
+                            ctx.unwatch(service)
                         local_change([key])
                 case Find(key, reply_to):
                     reply_to.tell(listing(key))
@@ -236,21 +231,23 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                             key.id,
                         )
                         return Behaviors.same
-                    if subscriber not in subscriptions_per_actor and is_local_actor(subscriber):
-                        ctx.watch_with(subscriber, _SubscriberTerminated(subscriber))
+                    if (actor := watched_ref(subscriber)) is not None:
+                        ctx.watch_with(actor, _ActorTerminated(actor))  # once per actor
                     subscriber.tell(listing(key))
                     subscriptions_per_actor.setdefault(subscriber, set()).add(key)
                     subscribers.setdefault(key, set()).add(subscriber)
-                case _ServiceTerminated(ref):
+                case _ActorTerminated(ref):
+                    for subscriber in [
+                        s for s in subscriptions_per_actor if watched_ref(s) == ref
+                    ]:
+                        for key in subscriptions_per_actor.pop(subscriber):
+                            subscribers[key].discard(subscriber)
+                            if not subscribers[key]:
+                                del subscribers[key]
                     keys = services_per_actor.pop(ref, set())
                     for key in keys:
                         remove_binding(key, ref)
                     local_change(keys)
-                case _SubscriberTerminated(ref):
-                    for key in subscriptions_per_actor.pop(ref, set()):
-                        subscribers[key].discard(ref)
-                        if not subscribers[key]:
-                            del subscribers[key]
                 case ReceptionistRow() | ClusterDomainEvent() | _ResendTick() if (
                     replication is not None
                 ):

@@ -260,3 +260,23 @@ async def test_a_matcher_that_raises_fails_the_source_not_the_sender():
         ref.tell(1)
         with pytest.raises(ZeroDivisionError):
             await q.pull()
+
+
+async def test_a_failed_source_raises_its_failure_on_every_later_pull():
+    # rule 1.7, no signal after a terminal one: a pull after the failure does not complete.
+    # No stage pulls after a failure, so this reaches the source's iterator directly.
+    from ohra.stream.dsl import _Ctx  # pyright: ignore[reportPrivateUsage]
+
+    async with ActorTestKit() as kit:
+        source: Source[object, ActorRef[object]] = ActorSource.actor_ref(
+            completion_matcher=lambda _: False,
+            failure_matcher=lambda m: m if isinstance(m, ValueError) else None,
+            buffer_size=4,
+            overflow_strategy=OverflowStrategy.fail,
+        )
+        it, ref = source._build(_Ctx(kit.system))  # pyright: ignore[reportPrivateUsage]
+        ref.tell(ValueError("boom"))
+        for _ in range(2):
+            with pytest.raises(ValueError, match="boom"):
+                await anext(it)
+        await it.aclose()  # pyright: ignore[reportAttributeAccessIssue]

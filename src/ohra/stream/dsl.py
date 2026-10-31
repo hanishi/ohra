@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 from collections.abc import (
     AsyncGenerator,
     AsyncIterable,
@@ -63,6 +64,8 @@ class AbruptStageTerminationError(Exception):
 # Pekko's pekko.stream.materializer.sync-processing-limit: a source that never suspends lets the
 # event loop run after this many elements, so an endless stream can still be terminated.
 _SYNC_PROCESSING_LIMIT = 1000
+
+_log = logging.getLogger(__name__)
 
 
 class _Ctx:
@@ -745,15 +748,26 @@ async def _iterate_async[T](factory: Callable[[], AsyncIterable[T]]) -> AsyncGen
     it = aiter(factory())
     try:
         n = 0
-        async for x in it:
-            yield x
-            n += 1
-            if n % _SYNC_PROCESSING_LIMIT == 0:
-                await asyncio.sleep(0)
+        try:
+            async for x in it:
+                yield x
+                n += 1
+                if n % _SYNC_PROCESSING_LIMIT == 0:
+                    await asyncio.sleep(0)
+        except Exception:
+            task = asyncio.current_task()
+            if task is None or not task.cancelling():
+                raise
+            # a stage cancelled a pull inside it, and its cleanup raised: logged, as below
+            _log.exception("Error closing %r", it)
+            raise asyncio.CancelledError from None
     finally:
         aclose = getattr(it, "aclose", None)  # an iterator the user wrote may have none
         if aclose is not None:
-            await aclose()
+            try:
+                await aclose()
+            except Exception:  # as Pekko logs a stage that fails in postStop: it is stopping
+                _log.exception("Error closing %r", it)
 
 
 async def _fail(exc: Exception) -> AsyncGenerator[Never, None]:

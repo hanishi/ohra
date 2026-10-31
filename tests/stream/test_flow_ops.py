@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 
-from ohra.stream import Flow, Keep, OverflowStrategy, QueueOfferResult, Sink, Source
+from ohra.stream import Flow, Keep, KillSwitches, OverflowStrategy, QueueOfferResult, Sink, Source
 from ohra.testkit import ActorTestKit
 
 
@@ -98,14 +98,37 @@ async def _fails_to_close() -> AsyncGenerator[int, None]:
         raise RuntimeError("close failed")
 
 
-async def test_take_emits_the_nth_element_before_upstream_finishes_closing():
+async def test_take_completes_when_upstream_fails_to_close(caplog: pytest.LogCaptureFixture):
+    # Pekko logs a stage that fails while it stops; the stream already completed downstream
     async with ActorTestKit() as kit:
         out = (
             Source.from_async_iterable(_fails_to_close).take(1).run_with(Sink.queue(), kit.system)
         )
-        assert await out.pull() == 1  # the close's failure comes after the element
-        with pytest.raises(RuntimeError, match="close failed"):
-            await out.pull()
+        assert await out.pull() == 1
+        assert await out.pull() is None
+    assert any("close failed" in str(r.exc_info and r.exc_info[1]) for r in caplog.records)
+
+
+async def test_a_generator_that_ignores_generator_exit_does_not_fail_the_stream(
+    caplog: pytest.LogCaptureFixture,
+):
+    async def stubborn() -> AsyncGenerator[int, None]:
+        ignored = False
+        while True:
+            try:
+                yield 1
+            except GeneratorExit:
+                if ignored:  # the event loop's finalizer, later: let it close
+                    raise
+                ignored = True  # keeps going: the stream's aclose() raises RuntimeError
+
+    async with ActorTestKit() as kit:
+        assert await Source.from_async_iterable(stubborn).take(2).run_with(
+            Sink.seq(), kit.system
+        ) == [1, 1]
+    assert any(
+        "ignored GeneratorExit" in str(r.exc_info and r.exc_info[1]) for r in caplog.records
+    )
 
 
 async def test_take_does_not_outlive_terminate_when_upstream_never_finishes_closing():
@@ -126,6 +149,33 @@ async def test_take_does_not_outlive_terminate_when_upstream_never_finishes_clos
         out = Source.from_async_iterable(hangs_on_close).take(1).run_with(Sink.queue(), kit.system)
         assert await out.pull() == 1
     assert closes == ["cancelled"]  # terminate cancelled the close; no task outlives the test
+
+
+async def test_a_cleanup_that_raises_under_a_cancelled_pull_is_logged(
+    caplog: pytest.LogCaptureFixture,
+):
+    # a kill switch pulls in a task of its own: its cancel reaches the source inside an await
+    pulled = asyncio.Event()
+
+    async def fails_to_clean_up() -> AsyncGenerator[int, None]:
+        try:
+            pulled.set()
+            await asyncio.Event().wait()
+            yield 1
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    async with ActorTestKit() as kit:
+        switch, done = (
+            Source.from_async_iterable(fails_to_clean_up)
+            .via_mat(KillSwitches.single(), Keep.right)
+            .to_mat(Sink.ignore(), Keep.both)
+            .run(kit.system)
+        )
+        await pulled.wait()
+        switch.shutdown()
+        await done
+    assert any("cleanup failed" in str(r.exc_info and r.exc_info[1]) for r in caplog.records)
 
 
 async def test_take_while():

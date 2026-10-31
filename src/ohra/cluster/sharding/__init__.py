@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...behavior import Behaviors
 from ...ref import ActorRef
+from ...supervision import SupervisorStrategy
 from ...coordinated_shutdown import CoordinatedShutdown
 from ..core import Cluster
 from ..singleton import ClusterSingleton, SingletonActor
@@ -111,9 +112,15 @@ class ClusterSharding:
             f"region-shutdown-{name}",
             progress.task(Cluster(self.system), region.ref),
         )
-        coordinator = SingletonActor(
-            coordinator_behavior(name, settings), f"{name}Coordinator"
-        ).with_stop_message(_Terminate())
+        # Pekko's BackoffOpts.onStop restarts a coordinator that throws at once, with its default
+        # decider; the backoff is for one that stops, which this in-memory one never does but on
+        # its stop message
+        supervised = Behaviors.supervise(coordinator_behavior(name, settings)).on_failure(
+            SupervisorStrategy.restart()
+        )
+        coordinator = SingletonActor(supervised, f"{name}Coordinator").with_stop_message(
+            _Terminate()
+        )
         if settings.coordinator_singleton_settings is not None:
             coordinator = coordinator.with_settings(settings.coordinator_singleton_settings)
         ClusterSingleton(self.system).init(coordinator)

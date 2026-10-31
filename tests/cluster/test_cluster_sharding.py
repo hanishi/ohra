@@ -8,7 +8,7 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -298,6 +298,7 @@ async def test_shards_of_an_unreachable_node_wait_for_its_removal():
 # --- rebalance, hand-off and graceful leave (Task 4) ---------------------------------------------
 
 from ohra.cluster.sharding import shard_id_of  # noqa: E402
+from ohra.cluster.sharding.coordinator import Register  # noqa: E402
 
 
 async def shards_on(region: ActorRef[Any]) -> frozenset[str]:
@@ -591,3 +592,59 @@ async def test_coordinator_singleton_settings_apply_to_the_coordinator():
         await asyncio.wait_for(a.when_terminated(), timeout=5)
         # one 0.05 s retry, not the default second
         assert asyncio.get_running_loop().time() - began < 0.6
+
+
+def ids_on_new_shards(count: int, taken: set[str]) -> list[str]:
+    """``count`` entity ids, each on a shard of its own that is not in ``taken``."""
+    ids: list[str] = []
+    for i in range(1000):
+        shard = shard_id_of(f"n{i}", FAST_SHARDING.number_of_shards)
+        if shard not in taken:
+            taken.add(shard)
+            ids.append(f"n{i}")
+            if len(ids) == count:
+                return ids
+    raise AssertionError("not enough shards")
+
+
+async def test_a_full_buffer_drops_a_message_for_a_new_shard_and_keeps_the_rest(
+    caplog: pytest.LogCaptureFixture,
+):
+    """ShardRegion.deliverMessage: the first message for a shard asks for its home, and
+    bufferMessage drops it into dead letters when the buffer is full."""
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        small = replace(FAST_SHARDING, buffer_size=2)
+        start(a, settings=small)
+        start(b, settings=small)
+        # an answer through the coordinator: b's region has registered
+        assert await ask(ref(b, "warm"), lambda r: Count(1, r), timeout=5) == 1
+        ids = ids_on_new_shards(3, {shard_id_of("warm", small.number_of_shards)})
+        deliver = _drop(a, ("Sharding.GetShardHome",))  # no home comes back for now
+        replies: list[int] = []
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
+            for entity_id in ids:
+                ref(b, entity_id).tell(Count(1, FunctionRefHolder.keep(replies)))
+            await eventually(
+                lambda: any(ids[2] in r.getMessage() for r in caplog.records), timeout=3
+            )
+        a.remoting._handle = deliver  # pyright: ignore[reportPrivateUsage]
+        await eventually(lambda: sorted(replies) == [1, 1], timeout=5)
+
+
+async def test_a_failed_coordinator_restarts():
+    """ClusterSharding's BackoffOpts.onStop restarts a coordinator that throws, and the regions
+    register again with the new incarnation."""
+    p = free_port()
+    async with node(p, [p]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        start(a)
+        assert await ask(ref(a, "warm"), lambda r: Count(1, r), timeout=5) == 1
+        coordinator = a.resolve(
+            f"ohra://c@127.0.0.1:{p}/system/singletonManagerCounterCoordinator/singleton"
+        )
+        coordinator.tell(Register(cast(Any, "not a region"), ()))  # fails the coordinator
+        [fresh] = ids_on_new_shards(1, {shard_id_of("warm", FAST_SHARDING.number_of_shards)})
+        assert await ask(ref(a, fresh), lambda r: Count(1, r), timeout=5) == 1

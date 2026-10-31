@@ -180,9 +180,11 @@ class _Region:
         shard = shard_id_of(envelope.entity_id, self.settings.number_of_shards)
         home = self.region_by_shard.get(shard)
         if home is None:
-            self.buffer(shard, envelope)
-            if self.coordinator is not None and len(self.shard_buffers[shard]) == 1:
+            # as Pekko's deliverMessage: ask on a shard's first message, even one the full
+            # buffer then drops
+            if self.coordinator is not None and shard not in self.shard_buffers:
                 self.coordinator.tell(GetShardHome(shard, self.ctx.self))
+            self.buffer(shard, envelope)
         elif home.path == self.ctx.self.path:
             self.shard_for(shard).tell(envelope)
         else:

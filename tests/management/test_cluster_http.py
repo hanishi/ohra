@@ -50,6 +50,17 @@ async def test_cluster_members_json():
         assert (await get(uri + "/cluster/members/ohra://c@127.0.0.1:1", timeout=2))[0] == 404
 
 
+async def test_a_member_address_may_be_percent_encoded():
+    p = free_port()
+    async with cluster_node("c", p, [p]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        uri = await Management(a).start()
+        status, body = await get(
+            uri + f"/cluster/members/ohra%3A%2F%2Fc%40127.0.0.1%3A{p}", timeout=2
+        )
+        assert status == 200 and json.loads(body)["node"] == f"ohra://c@127.0.0.1:{p}"
+
+
 async def test_unreachable_members_list_their_observers():
     p1, p2 = sorted((free_port(), free_port()))
     async with AsyncExitStack() as stack:

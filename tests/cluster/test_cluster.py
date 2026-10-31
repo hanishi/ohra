@@ -17,11 +17,15 @@ from ohra import (
     ActorRef,
     ActorSystem,
     Behavior,
+    AllDeadLetters,
     Behaviors,
     ClusterLeavingReason,
     CoordinatedShutdown,
     CoordinatedShutdownSettings,
+    EventStream,
     ManagementSettings,
+    ReachabilityChanged,
+    SeenChanged,
 )
 from ohra.cluster.core import (
     Cluster,
@@ -30,6 +34,7 @@ from ohra.cluster.core import (
     CurrentClusterState,
     Down,
     GetCurrentState,
+    Heartbeat,
     Join,
     LeaderChanged,
     Leave,
@@ -272,6 +277,46 @@ async def test_torn_down_node_becomes_unreachable():
             next(m for m in Cluster(a).state.members if m.unique_address.port == p4).status
             == "joining"
         )
+
+
+async def test_a_domain_event_subscriber_gets_seen_and_reachability_changes():
+    """Chapter 5's listener for every ClusterDomainEvent can match SeenChanged and
+    ReachabilityChanged, imported from ohra."""
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a = await stack.enter_async_context(cluster_node("c", p1, [p1]))
+        events: list[ClusterDomainEvent] = []
+        Cluster(a).subscriptions.tell(Subscribe(probe(events), ClusterDomainEvent))
+        b = await stack.enter_async_context(cluster_node("c", p2, [p1]))
+        await eventually(lambda: all_up(a, 2), timeout=5)
+        await eventually(
+            lambda: any(isinstance(e, SeenChanged) and e.convergence for e in events), timeout=5
+        )
+        await crash(b)
+        await eventually(
+            lambda: any(isinstance(e, ReachabilityChanged) for e in events), timeout=5
+        )
+
+
+async def test_heartbeats_to_a_crashed_node_are_logged_not_published(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Pekko's Heartbeat is a DeadLetterSuppression: a crashed member does not flood a
+    DeadLetter subscriber until it is downed."""
+    p1, p2 = free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        a, b = [await stack.enter_async_context(cluster_node("c", p, [p1])) for p in (p1, p2)]
+        await eventually(lambda: all(all_up(n, 2) for n in (a, b)), timeout=5)
+        dead: list[AllDeadLetters] = []
+        a.event_stream.tell(EventStream.Subscribe(AllDeadLetters, FunctionRef("dl", dead.append)))
+        await crash(b)
+        await eventually(lambda: unreachable_ports(a) == {p2}, timeout=5)
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
+            caplog.clear()
+            await eventually(
+                lambda: any("Heartbeat(" in r.getMessage() for r in caplog.records), timeout=2
+            )
+        assert not [d for d in dead if isinstance(d.message, Heartbeat)]
 
 
 async def test_down_removes_an_unreachable_member():

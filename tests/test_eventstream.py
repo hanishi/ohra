@@ -14,6 +14,7 @@ from ohra import (
     Behavior,
     Behaviors,
     DeadLetter,
+    DeadLetterSuppression,
     Dropped,
     EventStream,
     MailboxSelector,
@@ -47,6 +48,27 @@ async def test_an_unhandled_message_is_published():
         ref = testkit.spawn(Behaviors.empty)
         ref.tell("nobody wants this")
         await unhandled.expect_message(UnhandledMessage("nobody wants this", ref))
+
+
+@dataclass(frozen=True)
+class Beat(DeadLetterSuppression):
+    pass
+
+
+async def test_a_dead_letter_suppression_is_still_published_when_unhandled():
+    # Pekko suppresses the dead letter only: an actor that does not handle it still publishes
+    async with ActorTestKit() as testkit:
+        dead: TestProbe[DeadLetter] = testkit.create_test_probe()
+        unhandled: TestProbe[UnhandledMessage] = testkit.create_test_probe()
+        testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, dead.ref))
+        testkit.system.event_stream.tell(EventStream.Subscribe(UnhandledMessage, unhandled.ref))
+        ref = testkit.spawn(Behaviors.empty)
+        ref.tell(Beat())
+        await unhandled.expect_message(UnhandledMessage(Beat(), ref))
+        await testkit.stop(ref)
+        ref.tell(Beat())
+        ref.tell(Hello("after"))
+        await dead.expect_message(DeadLetter(Hello("after"), ref))  # the Beat before it was not
 
 
 async def test_a_full_mailbox_drops_into_dead_letters():

@@ -169,18 +169,15 @@ class Entity[T]:
     type_key: EntityTypeKey[T]
     create_behavior: Callable[[EntityContext[T]], Behavior[T]]
     stop_message: T | None = None
+    # None takes the value from settings; a value set here wins over settings
     passivate_after: float | None = None
     # messages kept for a passivating entity; beyond this they are dead letters
-    buffer_size: int = 100_000
+    buffer_size: int | None = None
     settings: ClusterShardingSettings | None = None
 
     def with_buffer_size(self, size: int) -> Entity[T]:
         """Cap on messages buffered while an entity passivates, as Pekko's sharding buffer-size
         setting."""
-        if self.settings is not None:
-            return replace(
-                self, buffer_size=size, settings=replace(self.settings, buffer_size=size)
-            )
         return replace(self, buffer_size=size)
 
     def with_stop_message(self, msg: T) -> Entity[T]:
@@ -191,12 +188,6 @@ class Entity[T]:
     def with_passivate_after(self, seconds: float) -> Entity[T]:
         """Stop an entity that has received no message for this long. Not in Pekko, which uses
         settings."""
-        if self.settings is not None:
-            return replace(
-                self,
-                passivate_after=seconds,
-                settings=replace(self.settings, passivate_after=seconds),
-            )
         return replace(self, passivate_after=seconds)
 
     def with_settings(self, settings: ClusterShardingSettings) -> Entity[T]:
@@ -204,11 +195,14 @@ class Entity[T]:
 
     @property
     def effective_settings(self) -> ClusterShardingSettings:
-        if self.settings is not None:
-            return self.settings
-        return ClusterShardingSettings(
-            passivate_after=self.passivate_after, buffer_size=self.buffer_size
-        )
+        """``settings``, with ``passivate_after`` and ``buffer_size`` set on the entity on top,
+        whichever order they were set in."""
+        settings = self.settings or ClusterShardingSettings()
+        if self.passivate_after is not None:
+            settings = replace(settings, passivate_after=self.passivate_after)
+        if self.buffer_size is not None:
+            settings = replace(settings, buffer_size=self.buffer_size)
+        return settings
 
 
 class EntityRef[T](ActorRef[T]):

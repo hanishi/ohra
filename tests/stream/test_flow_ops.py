@@ -90,6 +90,44 @@ async def test_take_cancels_upstream_with_the_nth_element_before_another_pull():
         assert await out.pull() is None
 
 
+async def _fails_to_close() -> AsyncGenerator[int, None]:
+    try:
+        yield 1
+        yield 2
+    finally:
+        raise RuntimeError("close failed")
+
+
+async def test_take_emits_the_nth_element_before_upstream_finishes_closing():
+    async with ActorTestKit() as kit:
+        out = (
+            Source.from_async_iterable(_fails_to_close).take(1).run_with(Sink.queue(), kit.system)
+        )
+        assert await out.pull() == 1  # the close's failure comes after the element
+        with pytest.raises(RuntimeError, match="close failed"):
+            await out.pull()
+
+
+async def test_take_does_not_outlive_terminate_when_upstream_never_finishes_closing():
+    closes: list[str] = []
+
+    async def hangs_on_close() -> AsyncGenerator[int, None]:
+        try:
+            yield 1
+            yield 2
+        finally:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                closes.append("cancelled")
+                raise
+
+    async with ActorTestKit() as kit:
+        out = Source.from_async_iterable(hangs_on_close).take(1).run_with(Sink.queue(), kit.system)
+        assert await out.pull() == 1
+    assert closes == ["cancelled"]  # terminate cancelled the close; no task outlives the test
+
+
 async def test_take_while():
     assert await run(Source.from_iterable([1, 2, 3, 1]).take_while(lambda x: x < 3)) == [1, 2]
 

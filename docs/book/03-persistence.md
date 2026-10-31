@@ -163,15 +163,36 @@ recovered = durable_counter.recover("counter-1", empty=0)
 
 SQLite is a file on one disk. When sharding moves an entity to a pod on another node, the entity recovers from that node's file. Either its state is missing, or the file holds an older copy from a time the entity lived there, which no revision check can catch because each file only knows its own revisions. A network file system does not help: SQLite's locking is unreliable on one, and WAL mode needs memory shared between processes on a single machine. A cluster with several nodes needs a store that every node reaches.
 
-`PostgresStore` in `ohra.ext.postgres` is that store, with the same contract. It needs the `postgres` extra, which installs psycopg 3 and its connection pool. The store owns the pool for the life of an `async with` block, so the factory is wrapped inside it rather than with the decorator at import time:
+`PostgresStore` in `ohra.ext.postgres` is that store, with the same contract. It needs the `postgres` extra, which installs psycopg 3 and its connection pool. The store owns the pool for the life of an `async with` block, so the factory is wrapped inside it rather than with the decorator at import time. `cart_state` is the first example's `cart` without `@Behaviors.persisted(store)`, and `guardian` starts the carts, for example through [sharding](07-sharding.md):
 
 ```python
+from collections.abc import Callable
+
+from cart import CartCmd
+from ohra import ActorSystem, Address, Behavior, Behaviors, ClusterSettings
 from ohra.ext.postgres import PostgresStore
 
-async with PostgresStore[dict[str, int]]("postgresql://app:secret@db/app") as store:
-    cart = Behaviors.persisted(store)(cart_state)
-    async with ActorSystem(guardian(cart), "shop", address=..., cluster=...) as system:
-        await system.when_terminated()
+
+def cart_state(items: dict[str, int]) -> Behavior[CartCmd]:
+    # the cart factory of the first example, without its decorator
+    ...
+
+
+def guardian(cart: Callable[[dict[str, int]], Behavior[CartCmd]]) -> Behavior[CartCmd]:
+    # starts the carts, for example through sharding
+    ...
+
+
+async def main() -> None:
+    async with PostgresStore[dict[str, int]]("postgresql://app:secret@db/app") as store:
+        cart = Behaviors.persisted(store)(cart_state)
+        async with ActorSystem(
+            guardian(cart),
+            "shop",
+            address=("0.0.0.0", 2551),
+            cluster=ClusterSettings(seed_nodes=(Address("shop", "shop-0", 2551),)),
+        ) as system:
+            await system.when_terminated()
 ```
 
 The table follows the names of Pekko's JDBC durable state: `durable_state`, with `persistence_id`, `revision` and `state_payload`. The serializer columns the JVM needs are left out. `table=` names another table, schema-qualified if needed. The table is created when the store opens, under an advisory lock, because concurrent `CREATE TABLE IF NOT EXISTS` from pods starting together fails in Postgres. Saving revision 1 inserts only when the id is new, and every later revision updates only the row that holds the revision before it, so two incarnations on two nodes cannot both commit. When the database restarts, the pool still holds the closed connections. The first statement to fail with a connection error makes the pool drop every broken idle connection at once, and the statement runs once more. A retried save that had in fact committed fails the revision check, like any other failed write. The codec defaults to pickle, as in `SqliteStore`.

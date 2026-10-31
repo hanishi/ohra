@@ -11,7 +11,8 @@
 | `spawn`, `spawnAnonymous`, `ctx.stop(child)` | same |
 | `watch`, `watchWith`, `Terminated`, `ChildFailed`, `DeathPactException` | same; `DeathPactError` |
 | `PreRestart`, `PostStop` | same |
-| `SupervisorStrategy.resume / restart / stop / restartWithBackoff`, `withLimit`, `withResetBackoffAfter`, `withStashCapacity` | same, snake_case |
+| `SupervisorStrategy.resume / restart / stop / restartWithBackoff`, `withLimit`, `withStashCapacity` | same, snake_case |
+| `withResetBackoffAfter` | `Backoff.with_reset_after(seconds)` |
 | `Behaviors.setup(ctx => ...)` | `@Behaviors.setup` on a `def`, or the call form; the same for `receive`, `receive_message` and `receive_signal` |
 | (none) | `ctx.timers`, the same scheduler `with_timers` hands out, so one `setup` needs no timer factory layer |
 | `Behaviors.withTimers`, `TimerScheduler.startSingleTimer / startTimerWithFixedDelay / cancel / cancelAll / isTimerActive` | same, snake_case |

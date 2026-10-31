@@ -982,6 +982,17 @@ class ClusterSingleton:
         existing = self._proxies.get(singleton.name)
         if existing is not None:
             return existing
+        settings = self._init_manager(singleton)
+        root = self.system._system_root  # pyright: ignore[reportPrivateUsage]
+        proxy = root.spawn_child(
+            _proxy(singleton.name, settings), _proxy_name(singleton.name), None
+        )
+        self._proxies[singleton.name] = proxy.ref
+        return proxy.ref
+
+    def _init_manager[M](self, singleton: SingletonActor[M]) -> ClusterSingletonSettings:
+        """The manager and its shutdown tasks, without a proxy: sharding runs its coordinator so,
+        as Pekko's, and its regions reach the coordinator by path."""
         settings = (
             singleton.settings if singleton.settings is not None else ClusterSingletonSettings()
         )
@@ -1001,8 +1012,4 @@ class ClusterSingleton:
             f"singleton-exiting-2-{singleton.name}",
             progress.singleton_exiting_2(Cluster(self.system)),
         )
-        proxy = root.spawn_child(
-            _proxy(singleton.name, settings), _proxy_name(singleton.name), None
-        )
-        self._proxies[singleton.name] = proxy.ref
-        return proxy.ref
+        return settings

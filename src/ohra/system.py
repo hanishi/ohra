@@ -232,7 +232,7 @@ class ActorSystem[T](ActorRef[T]):
 
     def dead_letter(self, msg: object, recipient: ActorRef[Any]) -> None:
         self._dead_letters.debug("dead letter to %s: %r", recipient.path, msg)
-        if not is_suppressed(msg):
+        if not is_suppressed(msg, dead_letter=True):
             self.event_stream.tell(EventStream.Publish(DeadLetter(msg, recipient)))
 
     def unhandled(self, msg: object, recipient: ActorRef[Any]) -> None:

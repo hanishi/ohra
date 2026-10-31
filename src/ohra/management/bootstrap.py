@@ -508,8 +508,6 @@ class _Coordinator:
         self.schedule_discovery()
 
     def ensure_probing(self, cp: ResolvedTarget) -> None:
-        if cp in self.probes:
-            return
         port = cp.port if cp.port is not None else self.fallback_port
         self_remoting = self.cluster.self_address
         if (
@@ -527,7 +525,8 @@ class _Coordinator:
             return
         url = f"http://{cp.host}:{port}{self.base_path}/bootstrap/seed-nodes"
         name = "contactPointProbe-" + f"{cp.host}-{port}".replace(".", "-").replace(":", "-")
-        # Pekko's context.child: a dropped probe may still be stopping under that name
+        # Pekko's context.child, every round: a dropped probe may still be stopping under that
+        # name, and once it has stopped the next round starts a new one
         existing = self.ctx.child(name)
         self.probes[cp] = (
             existing

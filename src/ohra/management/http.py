@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 REASONS: dict[int, str] = {
     200: "OK",
@@ -24,6 +25,7 @@ _MAX_HEADERS = 100
 # a client that connects and says nothing holds a connection task for at most this long
 _HEAD_TIMEOUT = 10.0
 _MAX_BODY = 1024 * 1024  # every caller expects small JSON
+_log = logging.getLogger(__name__)
 
 
 def _is_decimal(text: str) -> bool:
@@ -39,7 +41,7 @@ class Response:
 
 
 type Handler = Callable[[str, str], Awaitable[Response]]
-"""``handler(method, path)``; the path has no query string."""
+"""``handler(method, path)``; the path is percent-decoded and has no query string."""
 
 
 def json_response(status: int, payload: object) -> Response:
@@ -63,13 +65,16 @@ def _encode(response: Response, extra: str = "") -> bytes:
 
 
 async def _read_head(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str]] | None:
-    """The request line and headers, or None when the request is malformed or too large."""
+    """The request line, with an absolute-form target cut to its path, and the headers; or None
+    when the request is malformed or too large."""
     try:
         line = await reader.readuntil(b"\n")
         parts = line.decode("latin-1").strip().split(" ")
         if len(parts) != 3 or not parts[2].startswith("HTTP/1."):
             return None
         method, target = parts[0], parts[1]
+        if not target.startswith("/"):  # absolute form, as sent to a proxy
+            target = urlsplit(target).path or "/"
         headers: dict[str, str] = {}
         for _ in range(_MAX_HEADERS):
             header = (await reader.readuntil(b"\n")).decode("latin-1")
@@ -97,6 +102,7 @@ class HttpServer:
     def __init__(self) -> None:
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.Task[None]] = set()
+        self._closed = False
 
     @property
     def port(self) -> int:
@@ -108,13 +114,19 @@ class HttpServer:
         assert self._server is not None
         return tuple(self._server.sockets)
 
-    def track(self) -> None:
-        task = asyncio.current_task()
-        if task is not None:
-            self._connections.add(task)
-            task.add_done_callback(self._connections.discard)
+    def track(self, task: asyncio.Task[None], writer: asyncio.StreamWriter) -> None:
+        # as the task is created, not in its first step, so that close() sees it however soon
+        # after the accept it runs; the writer closes even if the task is cancelled before it
+        # starts
+        task.add_done_callback(lambda _: writer.close())
+        if self._closed:
+            task.cancel()
+            return
+        self._connections.add(task)
+        task.add_done_callback(self._connections.discard)
 
     def close(self) -> None:
+        self._closed = True
         if self._server is not None:
             self._server.close()
         for task in list(self._connections):
@@ -131,14 +143,15 @@ async def serve(host: str, port: int, handler: Handler) -> HttpServer:
     http_server = HttpServer()
 
     async def on_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        http_server.track()
         try:
             head = await asyncio.wait_for(_read_head(reader), _HEAD_TIMEOUT)
             if head is None:
                 writer.write(_encode(Response(400, b"bad request", "text/plain")))
             else:
                 method, target, _headers = head
-                path = target.split("?", 1)[0]
+                # as Akka HTTP's path segments; an encoded "/" in a segment decodes too, so a
+                # prefix route's remainder may hold one (a member's address)
+                path = unquote(target.split("?", 1)[0])
                 if method != "GET":
                     writer.write(
                         _encode(
@@ -148,18 +161,27 @@ async def serve(host: str, port: int, handler: Handler) -> HttpServer:
                 else:
                     try:
                         response = await handler(method, path)
-                    except Exception as e:  # one failing route must not take the server down
-                        response = Response(500, str(e).encode(), "text/plain")
+                    except Exception:  # one failing route must not take the server down
+                        _log.error(
+                            "Error during processing of request: [%s]. Completing with 500 "
+                            "Internal Server Error response.",
+                            target,
+                            exc_info=True,
+                        )
+                        response = Response(
+                            500, b"There was an internal server error.", "text/plain"
+                        )
                     writer.write(_encode(response))
             await writer.drain()
         except (OSError, TimeoutError, asyncio.CancelledError):
             # a dead or silent client, or the server closing: nothing awaits this task, so
             # swallowing is safe
             pass
-        finally:
-            writer.close()
 
-    http_server._server = await asyncio.start_server(on_connection, host, port, limit=_LINE_LIMIT)  # pyright: ignore[reportPrivateUsage]
+    def on_accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        http_server.track(asyncio.ensure_future(on_connection(reader, writer)), writer)
+
+    http_server._server = await asyncio.start_server(on_accept, host, port, limit=_LINE_LIMIT)  # pyright: ignore[reportPrivateUsage]
     return http_server
 
 

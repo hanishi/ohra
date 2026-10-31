@@ -538,3 +538,15 @@ def test_fluent_setters_apply_on_top_of_settings():
     assert entity.effective_settings.number_of_shards == 5
     assert entity.effective_settings.passivate_after == 2.0
     assert entity.effective_settings.buffer_size == 7
+
+
+def test_settings_set_after_the_fluent_setters_keep_them():
+    entity = (
+        Entity(Counter, counter([]))
+        .with_passivate_after(2.0)
+        .with_buffer_size(7)
+        .with_settings(ClusterShardingSettings(number_of_shards=5))
+    )
+    assert entity.effective_settings.number_of_shards == 5
+    assert entity.effective_settings.passivate_after == 2.0
+    assert entity.effective_settings.buffer_size == 7

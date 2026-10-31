@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import pytest
 
 from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, RemoteRef
-from ohra.ref import PromiseRef
+from ohra.ref import FunctionRef, PromiseRef
 
 from .util import eventually, free_port
 
@@ -248,6 +248,19 @@ async def test_unknown_recipient_is_a_dead_letter(caplog: pytest.LogCaptureFixtu
         await eventually(lambda: any("nobody" in r.getMessage() for r in caplog.records))
         b.resolve(a.path).tell(Greet("found", b.ignore_ref))  # the connection is still usable
         await eventually(lambda: log == ["found"])
+
+
+async def test_a_dead_letter_for_an_unknown_recipient_carries_the_decoded_message():
+    async with (
+        node(Behaviors.ignore, "a", free_port()) as a,
+        node(Behaviors.ignore, "b", free_port()) as b,
+    ):
+        dead: list[DeadLetter] = []
+        a.event_stream.tell(EventStream.Subscribe(DeadLetter, FunctionRef("dl", dead.append)))
+        b.resolve(f"{a.path}/nobody").tell(Greet("lost", b.ignore_ref))
+        await eventually(lambda: bool(dead))
+        assert dead[0].message == Greet("lost", a.resolve(b.ignore_ref.path))
+        assert dead[0].recipient.path == f"{a.path}/nobody"
 
 
 async def test_unregistered_message_raises_at_tell():

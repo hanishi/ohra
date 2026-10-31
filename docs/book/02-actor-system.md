@@ -110,9 +110,40 @@ Actors find each other through the Receptionist, Apache Pekko's service registry
 
 ```python
 import asyncio
+from dataclasses import dataclass
 
-from ohra import Find, Listing, Receptionist, Register, ServiceKey
+from ohra import (
+    ActorContext,
+    ActorRef,
+    ActorSystem,
+    Address,
+    Behavior,
+    Behaviors,
+    Cluster,
+    ClusterSettings,
+    Find,
+    Listing,
+    Receptionist,
+    Register,
+    ServiceKey,
+    ask,
+    remotable,
+)
 from ohra.receptionist import Subscribe  # the cluster's Subscribe is the top-level one
+
+
+@remotable  # a message that crosses nodes needs the mark ([chapter 4](04-remoting.md))
+@dataclass(frozen=True)
+class Greet:
+    name: str
+    reply_to: ActorRef[str]
+
+
+@Behaviors.receive_message
+def greeter(msg: Greet) -> Behavior[Greet]:
+    msg.reply_to.tell(f"hello, {msg.name}")
+    return Behaviors.same
+
 
 GREETER = ServiceKey[Greet]("greeter")
 
@@ -149,6 +180,10 @@ async def main() -> None:
         # one local ref, one RemoteRef to the greeter on the first node
         for ref in listing.service_instances:
             print(await ask(ref, lambda r: Greet("pekko", r), timeout=1))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 Only local actors can register or subscribe, as in Pekko; the receptionist watches them, message adapters included. A `Find` may come from another node: `Listing` and the replies are `@remotable`. Replication is one versioned row per node, pushed to the other members on every change and re-sent every `receptionist_resend_interval`, instead of Pekko's distributed data; see the deviations.
@@ -166,11 +201,11 @@ Only local actors can register or subscribe, as in Pekko; the receptionist watch
 | `cluster-exiting-done`, `cluster-shutdown` | the cluster waits for removal and stops its daemon |
 | `actor-system-terminate` | stops `/user`, then `/system`, then closes remoting |
 
-The same sequence runs when a node is downed, when the guardian stops on its own, and, if you opt in with `run_on_signals`, on SIGTERM. A task that outlives its phase is cancelled and the run moves on, so a stuck hand-off cannot hold the process forever.
+[Using it](#using-it) below has the details.
 
 #### Using it
 
-`ActorSystem.terminate()` runs Apache Pekko's CoordinatedShutdown: a fixed sequence of phases, each bounded by a timeout, to which you add tasks. On a cluster node the cluster adds its own: `cluster-sharding-shutdown-region` hands the node's shards off, `cluster-leave` sends `Leave`, `cluster-exiting` waits for the leader to move the node to Exiting and is where singletons hand over, `cluster-exiting-done` confirms the exit, `cluster-shutdown` waits for the cluster daemon, and `actor-system-terminate` stops the actors. The same run happens when another node sends `Leave` for this one, when this node is downed, and, if you opt in, on a signal.
+`ActorSystem.terminate()` runs Apache Pekko's CoordinatedShutdown. You add tasks to the phases; the cluster adds its own, as the table shows. The same run happens when another node sends `Leave` for this one, when this node is downed, when the guardian stops on its own, and, if you opt in, on a signal.
 
 ```python
 import signal

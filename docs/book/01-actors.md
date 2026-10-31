@@ -131,7 +131,7 @@ flowchart LR
 
 - **Two queues.** The system queue holds stop, watch and death notifications, and always goes first. The user queue holds ordinary messages and may be bounded, dropping new or old messages or raising when full.
 - **Serialized across awaits.** The loop awaits the handler before it takes the next message. A handler can await I/O and no other message runs in between. That is why actors are useful on a single event loop. It also means the system queue waits too: a stop sent during the await is handled after it.
-- **Behaviors are values.** A handler returns the next behavior: itself with new state, `Behaviors.same`, or `Behaviors.stopped()`. State lives in a closure or a factory parameter, so `counter(n + 1)` is the whole state change. `setup`, `with_timers` and `with_stash` run once when the behavior is started.
+- **Behaviors are values.** A handler returns the next behavior: itself with new state, `Behaviors.same`, or `Behaviors.stopped()`. State lives in a closure or a factory parameter, so `counter(n + 1)` is the whole state change. (`counter` is the running example of the [repo README](../../README.md): a factory that takes the total so far and returns a behavior.) `setup`, `with_timers` and `with_stash` run once when the behavior is started.
 - **The ref is the only handle.** `ctx.self` is a `LocalRef` whose `tell` appends to the cell's queue. A message adapter or `pipe_to_self` also lands in the user queue, so their results are serialized with everything else.
 
 ### Messages and behaviors
@@ -145,6 +145,24 @@ An await in a handler holds the actor until it returns. That gives three cases. 
 - **Fine: an await that is short and sure to finish,** where you want the next message to wait, as the cart's stock check does. Give it a timeout, `async with asyncio.timeout(s):`, as Pekko's `Await.result(f, timeout)` takes one by signature. A stall then fails the actor: a [supervisor](#supervision) can restart it, and without one it stops, taking the system with it when it is the guardian.
 - **Hangs the actor: an await that can take long or never finish,** such as a send to a client, a call to a peer with no timeout, or a long job. Until it returns the actor can't be stopped, and nothing fails, so supervision never steps in. `system.terminate()` and leaving `async with ActorSystem` wait for it too. Use `ctx.pipe_to_self`: the actor goes on, and the result comes back as a message. For a connection, let the route own it and give the actors the ref of an `ohra.stream.ActorSource` ([chapter 13](13-streams.md#the-actor-stages)), as [chapter 9](09-fastapi.md#websockets-the-route-owns-the-connection) shows.
 - **Blocks every actor: a blocking call,** async handler or not: `time.sleep`, a synchronous database driver, a CPU-heavy loop. It holds the event loop, and every actor on it. Run it in a thread and pipe the result back: `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)`. This is Pekko's advice to make the blocking call in a `Future` on a thread pool with an upper limit: `to_thread` runs on the loop's default executor, a bounded thread pool. Pekko's first remedy, a dedicated dispatcher, has no counterpart, since ohra has no dispatchers.
+
+Two tools find blocking calls, one before the code runs and one while it runs:
+
+- **ruff's `ASYNC2` rules** flag the usual blocking calls inside an `async def`, such as `time.sleep`, blocking HTTP clients, `subprocess`, `open` and `input`. Add them to your project's lint selection:
+
+  ```toml
+  [tool.ruff.lint]
+  extend-select = ["ASYNC2"]
+  ```
+
+  They look only inside `async def`. A plain function that blocks is not flagged, and that includes a synchronous handler and a function passed to a stream's `map`. A CPU-heavy loop is never flagged.
+- **asyncio's debug mode** times every step of the event loop and logs each one that takes longer than `loop.slow_callback_duration`, 0.1 s by default, whatever the cause:
+
+  ```
+  Executing <Task ... coro=<look_up_price() ...> took 0.305 seconds
+  ```
+
+  Turn it on with `PYTHONASYNCIODEBUG=1` or `asyncio.run(main(), debug=True)`, in tests or a staging run. It slows the loop down, so leave it off in production.
 
 `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context. All of them are usually written as decorators, described next.
 
@@ -163,7 +181,7 @@ def on_message(ctx: ActorContext[AnalystCmd], msg: AnalystCmd) -> Behavior[Analy
             @ctx.pipe_to_self(work)  # ctx calls this with the work's result
             def _(result: Try[list[int]]) -> AnalystCmd: ...
 
-        ...
+    ...
 ```
 
 These are all of them:
@@ -401,7 +419,7 @@ The cluster, singleton and sharding actors are actors under `/system`, so `ohra.
 - There is one `TimerScheduler` per actor, and a `restart` or `restart_with_backoff` cancels all of its timers before `PreRestart`, as Pekko's `RestartSupervisor` does. `resume` leaves them running.
 - Background work started with `pipe_to_self` is cancelled when the actor stops. Every test asserts that no asyncio task outlives the system.
 - Timer messages are validated when dequeued, so a message from a timer that was cancelled or restarted while it sat in the mailbox is dropped. `unstash_all` replays the stashed messages inside the current message's turn, before any new message.
-- An idle actor costs about 3.5KB and 40µs to spawn. A busy actor handles over a million trivial messages a second; waking an idle one costs an asyncio task switch, about 16µs, which is what `batching` amortizes. 100k actors fit, but `examples/population.py` shows why 16 shard actors holding struct-of-arrays beat 100k single-arm actors by hundreds of times on memory and query time.
+- An idle actor costs about 3.5KB, and spawning and stopping one takes about 13µs ([appendix C](appendix-performance.md)). A busy actor handles over a million trivial messages a second; waking an idle one costs an asyncio task switch, about 16µs, which is what `batching` amortizes. 100k actors fit, but `examples/population.py` shows why 16 shard actors holding struct-of-arrays beat 100k single-arm actors by hundreds of times on memory and query time.
 
 ---
 

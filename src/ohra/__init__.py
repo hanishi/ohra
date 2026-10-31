@@ -21,8 +21,10 @@ from .cluster.core import (
     MemberRemoved,
     MemberUp,
     MemberWeaklyUp,
+    ReachabilityChanged,
     ReachabilityEvent,
     ReachableMember,
+    SeenChanged,
     SelfRemoved,
     SelfUp,
     Subscribe,
@@ -63,7 +65,14 @@ from .coordinated_shutdown import (
     JvmExitReason,
     Reason,
 )
-from .eventstream import AllDeadLetters, DeadLetter, Dropped, EventStream, UnhandledMessage
+from .eventstream import (
+    AllDeadLetters,
+    DeadLetter,
+    DeadLetterSuppression,
+    Dropped,
+    EventStream,
+    UnhandledMessage,
+)
 from .mailbox import MailboxOverflowError, MailboxSelector
 from .management import Management, ManagementSettings
 from .management.bootstrap import ClusterBootstrap, ClusterBootstrapSettings
@@ -159,6 +168,7 @@ __all__ = [
     "CurrentShardRegionState",
     "DONE",
     "DeadLetter",
+    "DeadLetterSuppression",
     "DeathPactError",
     "Deregister",
     "Deregistered",
@@ -215,6 +225,7 @@ __all__ = [
     "PoolRouter",
     "PostStop",
     "PreRestart",
+    "ReachabilityChanged",
     "ReachabilityEvent",
     "ReachableMember",
     "Reason",
@@ -233,6 +244,7 @@ __all__ = [
     "QueueOfferResult",
     "RunnableGraph",
     "Scheduler",
+    "SeenChanged",
     "SelfRemoved",
     "SelfUp",
     "Serialization",

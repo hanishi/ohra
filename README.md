@@ -127,6 +127,7 @@ The `testkit` fixture gives each test its own actor system and shuts it down aft
 10. [numpy and shared memory](https://github.com/hanishi/ohra/blob/main/docs/book/10-numpy-and-shared-memory.md): blocking work in a thread, loops compiled with numba, large arrays to another process without a copy
 11. [Putting it together](https://github.com/hanishi/ohra/blob/main/docs/book/11-putting-it-together.md): one cart request through every layer
 12. [Testing](https://github.com/hanishi/ohra/blob/main/docs/book/12-testing.md): the test kit, probes, manual time for timers, pytest fixtures
+13. [Streams](https://github.com/hanishi/ohra/blob/main/docs/book/13-streams.md): Source, Flow, Sink and actor stages
 
 Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-deviations.md), [performance](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-performance.md), and a [glossary](https://github.com/hanishi/ohra/blob/main/docs/book/glossary.md).
 

@@ -33,6 +33,16 @@ from ohra import (
     remotable,
 )
 from ohra.cluster.core import Cluster, Down, Leave
+from ohra.cluster.sharding.coordinator import (
+    BeginHandOff,
+    BeginHandOffAck,
+    GracefulShutdownReq,
+    HostShard,
+    Register,
+    RegisterAck,
+    _Coordinator,  # pyright: ignore[reportPrivateUsage]
+)
+from ohra.cluster.sharding.shard import HandOff
 from ohra.remote import Address
 from ohra.remote.serialization import Json
 
@@ -127,6 +137,19 @@ async def test_entity_refs_on_three_nodes_reach_one_entity():
         assert await ask(ref(nodes[0], "x"), lambda r: Count(1, r), timeout=5) == 1
         assert await ask(ref(nodes[1], "x"), lambda r: Count(1, r), timeout=5) == 2
         assert await ask(ref(nodes[2], "x"), lambda r: Count(1, r), timeout=5) == 3
+
+
+async def test_the_coordinator_runs_without_a_singleton_proxy():
+    """As Pekko's sharding: regions reach the coordinator through its manager's path, so no proxy
+    identifies it every second for the life of the node."""
+    p1 = free_port()
+    async with node(p1, [p1]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=3)
+        start(a)
+        assert await ask(ref(a, "x"), lambda r: Count(1, r), timeout=5) == 1
+        a.resolve(f"{a.path.removesuffix('/user')}/system/singletonManagerCounterCoordinator")
+        with pytest.raises(LookupError):
+            a.resolve(f"{a.path.removesuffix('/user')}/system/singletonProxyCounterCoordinator")
 
 
 async def test_entity_ref_for_before_registration_buffers_and_delivers():
@@ -648,3 +671,48 @@ async def test_a_failed_coordinator_restarts():
         coordinator.tell(Register(cast(Any, "not a region"), ()))  # fails the coordinator
         [fresh] = ids_on_new_shards(1, {shard_id_of("warm", FAST_SHARDING.number_of_shards)})
         assert await ask(ref(a, fresh), lambda r: Count(1, r), timeout=5) == 1
+
+
+async def test_a_shard_whose_region_terminated_during_hand_off_is_not_reallocated():
+    """ShardCoordinator's RebalanceDone: the shard could have been removed by
+    ShardRegionTerminated, and then nobody asked for it, so it is allocated only on demand."""
+    settings = replace(FAST_SHARDING, rebalance_interval=60.0)
+    coordinators: list[_Coordinator] = []
+
+    def coordinator(ctx: ActorContext[Any]) -> Behavior[Any]:
+        coordinators.append(_Coordinator(ctx, "T", settings))
+        return coordinators[0].behavior()
+
+    def region(log: list[object], stop_on_hand_off: bool) -> Behavior[Any]:
+        def on_message(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+            log.append(msg)
+            match msg:
+                case BeginHandOff(shard, reply_to):
+                    reply_to.tell(BeginHandOffAck(shard, ctx.self))
+                case HandOff() if stop_on_hand_off:
+                    return Behaviors.stopped()  # terminated before it reports ShardStopped
+                case _:
+                    pass
+            return Behaviors.same
+
+        return Behaviors.receive(on_message)
+
+    p1 = free_port()
+    async with node(p1, [p1]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=3)
+        root = a._system_root  # pyright: ignore[reportPrivateUsage]
+        coord = root.spawn_child(Behaviors.setup(coordinator), "coordinator", None).ref
+        log1: list[object] = []
+        log2: list[object] = []
+        r1 = root.spawn_child(region(log1, True), "r1", None).ref
+        r2 = root.spawn_child(region(log2, False), "r2", None).ref
+        coord.tell(Register(r1, ("s1",)))
+        coord.tell(Register(r2, ()))
+        await eventually(lambda: any(isinstance(m, RegisterAck) for m in log2))
+        coord.tell(GracefulShutdownReq(r1))
+        await eventually(lambda: any(isinstance(m, HandOff) for m in log1))
+        c = coordinators[0]
+        # r1 is gone and the worker has reported: rebalance_done has run
+        await eventually(lambda: r1.path not in c.refs and not c.rebalance_workers)
+        assert "s1" not in c.state.shards
+        assert not [m for m in log2 if isinstance(m, HostShard)]

@@ -94,6 +94,15 @@ class _BackoffRestart(Signal):
     token: object
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class _ResetRestartCount(Signal):
+    """Pekko's ResetRestartCount: sent ``reset_after`` once a backoff restart completes. It resets
+    the count only if no failure came since, so a restart that fails at once never resets it."""
+
+    token: object
+    current: int
+
+
 # --- runtime supervisor -----------------------------------------------------------
 
 
@@ -105,7 +114,6 @@ class _Supervisor[T](Behavior[T]):
     inner: Behavior[T] | None = None  # None while waiting for a backoff restart
     restarts: deque[float] = field(default_factory=lambda: deque[float]())
     attempt: int = 0
-    last_failure: float = float("-inf")
     stash: deque[Any] | None = None
     token: object = field(default_factory=object)
 
@@ -152,6 +160,8 @@ class TimerScheduler[T]:
 
     def _start(self, key: object, msg: T, delay: float, interval: float | None) -> None:
         self.cancel(key)
+        if self._cell.stopping:  # from PostStop: the timers are cancelled already
+            return
         self._active[key] = token = object()
         scheduler = self._cell.system.scheduler
 
@@ -186,11 +196,33 @@ async def _call[X](fn: Callable[..., MaybeAwaitable[X]], *args: Any) -> X:
     return r
 
 
+def _close(awaitable: Awaitable[Any]) -> None:
+    """End work that will not be awaited: close a coroutine, cancel a future."""
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+    elif isinstance(awaitable, asyncio.Future):
+        awaitable.cancel()  # a failed one: marks its exception retrieved
+
+
 def _held_by(b: Behavior[Any] | None) -> Holding[Any] | None:
     """The Holding under any supervisors, if the behavior is waiting on a store."""
     while isinstance(b, _Supervisor):
         b = b.inner
     return b if isinstance(b, Holding) else None
+
+
+def _rewrap[T](sup: _Supervisor[T], b: Behavior[T]) -> Behavior[T]:
+    """``b`` under ``sup``, as Pekko's InterceptorImpl.deduplicate: if ``b`` already has a
+    supervisor for the same exception type, that one replaces ``sup``, with fresh counts."""
+    if isinstance(b, Stopped):
+        return b
+    inner: Behavior[T] | None = b
+    while isinstance(inner, _Supervisor):
+        if inner.template.exc_type is sup.template.exc_type:
+            return b
+        inner = inner.inner
+    sup.inner = b
+    return sup
 
 
 def _backing_off(b: Behavior[Any] | None) -> _Supervisor[Any] | None:
@@ -361,6 +393,8 @@ class ActorCell[T]:
         if cell is self:
             raise ValueError("an actor stops itself by returning Behaviors.stopped")
         if self.children.get(cell.name) is not cell:
+            if cell.parent is self:
+                return  # a child that already stopped, as Pekko's ActorContextAdapter.stop
             raise ValueError(f"{ref.path} is not a child of {self.path}")
         if after_pending:
             if not cell.stopping and not cell._poisoned:
@@ -374,6 +408,14 @@ class ActorCell[T]:
         other = _cell_of(ref)
         if other is self:
             return
+        if other in self.watching:  # Pekko's DeathWatch.checkWatchingSame
+            if self.watching[other] != custom:
+                raise RuntimeError(
+                    f"watch of {other.path} by {self.path}: termination message was not "
+                    f"overwritten from {self.watching[other]!r} to {custom!r}; unwatch first to "
+                    "use another"
+                )
+            return
         self.watching[other] = custom
         other.send_sys(_Watch(self))
 
@@ -383,6 +425,10 @@ class ActorCell[T]:
         other.send_sys(_Unwatch(self))
 
     def pipe_to_self[R](self, awaitable: Awaitable[R], adapt: Callable[[Try[R]], T]) -> None:
+        if self.stopping:  # from PostStop: its work in flight is cancelled already, so is this
+            _close(awaitable)
+            return
+
         async def run() -> None:
             result: Try[R]
             try:
@@ -396,10 +442,7 @@ class ActorCell[T]:
         def settle(task: asyncio.Task[None]) -> None:
             self._tasks.discard(task)
             if task.cancelled():  # perhaps before run() reached its await: end the work too
-                if inspect.iscoroutine(awaitable):
-                    awaitable.close()
-                elif isinstance(awaitable, asyncio.Future):
-                    awaitable.cancel()  # a failed one: marks its exception retrieved
+                _close(awaitable)
 
         task = asyncio.get_running_loop().create_task(run(), name=f"{self.path}/$pipe")
         self._tasks.add(task)
@@ -468,7 +511,7 @@ class ActorCell[T]:
                             else Terminated(cell.ref)
                         )
                         self._set(await self._signal(self._behavior, sig))
-            case _BackoffRestart():
+            case _BackoffRestart() | _ResetRestartCount():
                 self._set(await self._signal(self._behavior, m))
             case _:
                 self.log.warning("unknown system message %r", m)
@@ -499,10 +542,7 @@ class ActorCell[T]:
             inner = await self._start(template.initial)
         except template.exc_type as e:
             return await self._on_failure(sup, e, during_start=True)
-        if isinstance(inner, Stopped):
-            return inner
-        sup.inner = inner
-        return sup
+        return _rewrap(sup, inner)
 
     async def _canonicalize(self, nb: Behavior[T], current: Behavior[T]) -> Behavior[T]:
         if nb is SAME or nb is UNHANDLED:
@@ -580,7 +620,7 @@ class ActorCell[T]:
             return await self._supervise(b, sig, is_signal=True)
         if isinstance(b, Receive):
             r = b
-            if isinstance(sig, _BackoffRestart):
+            if isinstance(sig, (_BackoffRestart, _ResetRestartCount)):
                 return r
             if isinstance(r, Holding) and (sig is PostStop or sig is PreRestart):
                 if r.visible is not None:
@@ -595,6 +635,10 @@ class ActorCell[T]:
     async def _supervise(self, sup: _Supervisor[T], item: Any, is_signal: bool) -> Behavior[T]:
         if isinstance(item, _BackoffRestart) and item.token is sup.token:
             return await self._backoff_restart(sup)
+        if isinstance(item, _ResetRestartCount) and item.token is sup.token:
+            if item.current == sup.attempt:
+                sup.attempt = 0
+            return sup
         if sup.inner is None:  # backing off: stash messages and Terminated, as Pekko does
             if not is_signal or isinstance(item, Terminated):
                 strategy = cast(Backoff, sup.template.strategy)
@@ -614,10 +658,7 @@ class ActorCell[T]:
             # a failing recovery is a failing start, as when recover's load ran in a setup
             starting = isinstance(sup.inner, Holding) and sup.inner.held.recovery_failed
             return await self._on_failure(sup, e, during_start=starting)
-        if isinstance(nb, Stopped):
-            return nb
-        sup.inner = nb
-        return sup
+        return _rewrap(sup, nb)
 
     async def _on_failure(
         self, sup: _Supervisor[T], e: Exception, during_start: bool = False
@@ -638,8 +679,7 @@ class ActorCell[T]:
                         raise e
                     back = Unstash(h.stash, resumed, tuple(h.signals), h.poisoned)
                     self.log.warning("resuming after %r", e)
-                    sup.inner = await self._unstash(resumed, back)
-                    return sup
+                    return _rewrap(sup, await self._unstash(resumed, back))
                 self.log.warning("resuming after %r", e)
                 return sup
             case Stop():
@@ -664,19 +704,10 @@ class ActorCell[T]:
                     h = held.held
                     carried = Unstash(h.stash, inner, tuple(h.signals), h.poisoned)
                     inner = await self._unstash(inner, carried)
-                if isinstance(inner, Stopped):
-                    return inner
-                sup.inner = inner
-                return sup
+                return _rewrap(sup, inner)
             case Backoff():
-                if (
-                    strategy.reset_after is not None
-                    and now - sup.last_failure > strategy.reset_after
-                ):
-                    sup.attempt = 0
                 if 0 <= strategy.max_restarts <= sup.attempt:
                     raise e
-                sup.last_failure = now
                 held = sup.inner
                 await self._pre_restart(sup)
                 await self._stop_children()
@@ -690,26 +721,34 @@ class ActorCell[T]:
                 delay = strategy.delay(sup.attempt, random.random())
                 sup.attempt += 1
                 self.log.warning("restarting in %.3fs after %r", delay, e)
-                token = sup.token
-                fired = False
-
-                def fire() -> None:
-                    nonlocal fired
-                    fired = True
-                    self._fire_backoff(token)
-
-                handle = self.system.scheduler.schedule_once(delay, fire)
-                if not fired:  # a scheduler may run a zero delay inside schedule_once
-                    self._timers[token] = handle
+                self._schedule_sys(sup.token, delay, _BackoffRestart(sup.token))
                 return sup
             case _:
                 raise e
 
-    def _fire_backoff(self, token: object) -> None:
-        self._timers.pop(token, None)
-        self.send_sys(_BackoffRestart(token))
+    def _schedule_sys(self, key: object, delay: float, msg: Signal) -> None:
+        """Send ``msg`` to this actor as a system message after ``delay``, in place of a pending
+        one under ``key``. ``_finish`` cancels what is still pending."""
+        old = self._timers.pop(key, None)
+        if old is not None:
+            old.cancel()
+        fired = False
+
+        def fire() -> None:
+            nonlocal fired
+            fired = True
+            self._timers.pop(key, None)
+            self.send_sys(msg)
+
+        handle = self.system.scheduler.schedule_once(delay, fire)
+        if not fired:  # a scheduler may run a zero delay inside schedule_once
+            self._timers[key] = handle
 
     async def _backoff_restart(self, sup: _Supervisor[T]) -> Behavior[T]:
+        # Pekko's restartCompleted: the reset counts from here, with the count as it is now
+        strategy = cast(Backoff, sup.template.strategy)
+        reset = _ResetRestartCount(sup.token, sup.attempt)
+        self._schedule_sys((sup.token, "reset"), strategy.reset_backoff_after, reset)
         stash, sup.stash = sup.stash or deque(), None
         try:
             try:
@@ -717,10 +756,7 @@ class ActorCell[T]:
             except sup.template.exc_type as e:
                 sup.stash, stash = stash, deque[Any]()  # backing off again: the stash goes back
                 return await self._on_failure(sup, e, during_start=False)
-            if isinstance(inner, Stopped):
-                return await self._replay(inner, stash)
-            sup.inner = inner
-            return await self._replay(sup, stash)
+            return await self._replay(_rewrap(sup, inner), stash)
         except BaseException:
             self._dead_letters(stash)  # the actor fails: what the restart didn't reach
             raise
@@ -801,3 +837,9 @@ def _cell_of(ref: ActorRef[Any]) -> ActorCell[Any]:
 def is_local_actor(ref: ActorRef[Any]) -> bool:
     """True for a ref that can be watched: a local actor, or a message adapter of one."""
     return isinstance(ref, LocalRef) or (isinstance(ref, FunctionRef) and ref.owner is not None)
+
+
+def watched_ref(ref: ActorRef[Any]) -> ActorRef[Any] | None:
+    """The actor a watch of ``ref`` watches: its own, or a message adapter's owner. None for a ref
+    that is not a local actor."""
+    return _cell_of(ref).ref if is_local_actor(ref) else None

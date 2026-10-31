@@ -506,6 +506,48 @@ async def test_a_stopped_local_subscriber_is_forgotten(caplog: pytest.LogCapture
         assert not [r for r in caplog.records if subscriber.path in r.getMessage()]
 
 
+def adapters_guardian(
+    ctx: ActorContext[SpawnSubscriber], msg: SpawnSubscriber
+) -> Behavior[SpawnSubscriber]:
+    """Spawns an actor that subscribes to cluster events through two message adapters."""
+
+    def subscribing(sctx: ActorContext[object]) -> Behavior[object]:
+        subscriptions = Cluster(sctx.system).subscriptions
+        subscriptions.tell(Subscribe(sctx.message_adapter(lambda e: ("member", e)), MemberEvent))
+        subscriptions.tell(Subscribe(sctx.message_adapter(lambda e: ("up", e)), MemberUp))
+        return Behaviors.receive_message(
+            lambda event: Behaviors.stopped() if event == "stop" else Behaviors.same
+        )
+
+    msg.reply_to.tell(ctx.spawn(Behaviors.setup(subscribing), "subscriber"))
+    return Behaviors.same
+
+
+async def test_subscriptions_through_two_adapters_of_one_actor_both_end_with_it(
+    caplog: pytest.LogCaptureFixture,
+):
+    p1, p2 = free_port(), free_port()
+    seeds = (Address("c", "127.0.0.1", p1),)
+    a = ActorSystem(
+        Behaviors.receive(adapters_guardian),
+        "c",
+        address=("127.0.0.1", p1),
+        cluster=ClusterSettings(seed_nodes=seeds, **FAST),
+    )
+    async with a:
+        await eventually(lambda: all_up(a, 1), timeout=3)
+        subscriber = await ask(a, SpawnSubscriber, timeout=1)
+        # both subscriptions are in once the daemon answers a later request
+        await ask(Cluster(a).subscriptions, GetCurrentState, timeout=1)
+        subscriber.tell("stop")
+        await eventually(lambda: _gone(a, subscriber.path), timeout=2)
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
+            async with cluster_node("c", p2, [p1]) as b:
+                await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        assert not [r for r in caplog.records if subscriber.path in r.getMessage()]
+        assert not Cluster(a).is_terminated
+
+
 def _gone(system: ActorSystem[Any], path: str) -> bool:
     try:
         system.resolve(path)

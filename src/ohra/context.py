@@ -64,8 +64,9 @@ class ActorContext[T]:
 
     def stop(self, child: ActorRef[Any], *, after_pending: bool = False) -> None:
         """Stop a direct child after its current message; its pending messages become dead letters.
-        With after_pending=True the stop queues behind the messages already in the child's mailbox,
-        like classic Pekko's PoisonPill, which Pekko Typed has no public equivalent of."""
+        A child that has already stopped is left alone, as in Pekko. With after_pending=True the
+        stop queues behind the messages already in the child's mailbox, like classic Pekko's
+        PoisonPill, which Pekko Typed has no public equivalent of."""
         self._cell.stop_child(child, after_pending)
 
     # --- DeathWatch -----------------------------------------------------------
@@ -76,7 +77,9 @@ class ActorContext[T]:
         self._cell.watch(ref, None)
 
     def watch_with(self, ref: ActorRef[Any], msg: T) -> None:
-        """Receive msg as an ordinary message when ref stops."""
+        """Receive msg as an ordinary message when ref stops. Watching ref again with an equal
+        message does nothing; with another one, or with ``watch``, raises RuntimeError, as Pekko's
+        IllegalStateException: unwatch first."""
         self._cell.watch(ref, (msg,))
 
     def unwatch(self, ref: ActorRef[Any]) -> None:

@@ -533,7 +533,7 @@ sequenceDiagram
   MT-->>Test: done
 ```
 
-The plain `ask(ref, make, timeout)` function runs its timeout on the event loop, since it has no system to ask; pass `scheduler=testkit.scheduler` to put it on the manual clock. What stays on real time: the probes' deadlines, coordinated shutdown's phase timeouts, management's HTTP timeouts, and the supervision windows of `with_limit` and `with_reset_after`, which are real time in Pekko too.
+The plain `ask(ref, make, timeout)` function runs its timeout on the event loop, since it has no system to ask; pass `scheduler=testkit.scheduler` to put it on the manual clock. What stays on real time: the probes' deadlines, coordinated shutdown's phase timeouts, management's HTTP timeouts, and the restart window of `with_limit`, which is real time in Pekko too. A backoff's `with_reset_after` is on the manual clock, as its delays are.
 
 ---
 

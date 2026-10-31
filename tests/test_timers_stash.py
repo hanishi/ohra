@@ -11,11 +11,14 @@ from ohra import (
     ActorSystem,
     Behavior,
     Behaviors,
+    PostStop,
+    Signal,
     StashBuffer,
     StashOverflowError,
     SupervisorStrategy,
     TimerScheduler,
 )
+from ohra.testkit import ActorTestKit, ManualTime
 
 from .util import eventually
 
@@ -277,3 +280,19 @@ async def test_unstash_inside_setup_is_allowed():
 
     async with ActorSystem(Behaviors.with_stash(10, with_stash), "t") as system:
         assert await system.ask(Get, timeout=1) == [7]
+
+
+async def test_a_timer_started_in_post_stop_never_fires():
+    # the actor's timers are cancelled before PostStop: one started there would outlive it
+    def on_signal(ctx: ActorContext[str], sig: Signal) -> Behavior[str]:
+        if sig is PostStop:
+            ctx.timers.start_timer_with_fixed_delay("tick", "tick", 1.0)
+        return Behaviors.same
+
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual_time = ManualTime(testkit.system)
+        dead = testkit.create_dead_letter_probe()
+        behavior = Behaviors.receive_message(lambda _m: Behaviors.same).receive_signal(on_signal)
+        ref = testkit.spawn(behavior)
+        await testkit.stop(ref)
+        await manual_time.expect_no_message_for(3.0, dead)

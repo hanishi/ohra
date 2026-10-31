@@ -248,6 +248,26 @@ async def test_pipe_to_self_closes_work_the_actor_stopped_before_it_started():
     assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
 
 
+async def test_pipe_to_self_from_post_stop_closes_the_work_at_once():
+    # the actor is stopping: nothing it starts now could be cancelled with the rest of its work
+    async def work() -> str:
+        await asyncio.sleep(3600)
+        return "never"
+
+    coro = work()
+
+    def on_signal(ctx: ActorContext[str], sig: Signal) -> Behavior[str]:
+        if sig is PostStop:
+            ctx.pipe_to_self(coro, lambda r: "done")
+        return Behaviors.same
+
+    behavior = Behaviors.receive_message(lambda _m: Behaviors.same).receive_signal(on_signal)
+    async with ActorSystem(behavior, "t") as system:
+        system.terminate()
+        await system.when_terminated()
+        assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+
+
 @dataclass(frozen=True)
 class Asked:
     reply_to: ActorRef[str]

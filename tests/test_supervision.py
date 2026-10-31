@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
+
+import pytest
 
 from ohra import (
     ActorContext,
@@ -372,3 +375,115 @@ async def test_a_zero_delay_backoff_under_manual_time_leaves_no_timer_behind():
         assert await totals.receive_message() == 0  # restarted
         cell = ref._cell  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         assert not cell._timers  # pyright: ignore[reportUnknownMemberType]
+
+
+async def test_a_supervisor_returned_for_the_same_exception_replaces_the_current_one():
+    """Pekko's SupervisionSpec, "replace supervision when new returned behavior catches same
+    exception": the returned stop supervisor is the only one left, so the failure stops the actor
+    instead of reaching the restart around it."""
+
+    def switched(msg: str) -> Behavior[str]:
+        raise ValueError(msg)
+
+    def first(msg: str) -> Behavior[str]:
+        if msg == "switch":
+            return Behaviors.supervise(Behaviors.receive_message(switched)).on_failure(S.stop())
+        return Behaviors.same
+
+    async with ActorTestKit() as testkit:
+        ref = testkit.spawn(
+            Behaviors.supervise(Behaviors.receive_message(first)).on_failure(S.restart())
+        )
+        probe: TestProbe[str] = testkit.create_test_probe()
+        ref.tell("switch")
+        ref.tell("boom")
+        await probe.expect_terminated(ref)
+
+
+async def test_a_supervisor_nested_for_the_same_exception_keeps_only_the_inner_one():
+    """Pekko's InterceptorImpl.preStart deduplicates the started stack: the inner stop supervisor
+    hides the outer restart for the same exception."""
+
+    def fails(msg: str) -> Behavior[str]:
+        raise ValueError(msg)
+
+    inner = Behaviors.supervise(Behaviors.receive_message(fails)).on_failure(S.stop())
+    async with ActorTestKit() as testkit:
+        ref = testkit.spawn(Behaviors.supervise(inner).on_failure(S.restart()))
+        probe: TestProbe[str] = testkit.create_test_probe()
+        ref.tell("boom")
+        await probe.expect_terminated(ref)
+
+
+async def test_a_supervisor_nested_for_another_exception_stays():
+    """Pekko's SupervisionSpec, "support nesting to handle different exceptions"."""
+
+    def fails(msg: str) -> Behavior[str]:
+        raise ValueError(msg)
+
+    def counted(events: list[str]) -> Behavior[str]:
+        def setup(_ctx: ActorContext[str]) -> Behavior[str]:
+            events.append("setup")
+            return Behaviors.supervise(Behaviors.receive_message(fails)).on_failure(
+                S.stop(), exc_type=KeyError
+            )
+
+        return Behaviors.setup(setup)
+
+    events: list[str] = []
+    async with ActorTestKit() as testkit:
+        ref = testkit.spawn(Behaviors.supervise(counted(events)).on_failure(S.restart()))
+        ref.tell("boom")  # a ValueError: past the KeyError stop, to the restart
+        await eventually(lambda: events == ["setup", "setup"])
+
+
+def test_reset_after_defaults_to_the_mean_of_min_and_max_backoff():
+    """Pekko's SupervisionSpec, "default resetBackoffAfter to average of min and max backoff"."""
+    assert S.restart_with_backoff(1.0, 3.0, 0).reset_backoff_after == 2.0
+    assert S.restart_with_backoff(1.0, 3.0, 0).with_reset_after(0.5).reset_backoff_after == 0.5
+
+
+async def test_the_backoff_count_resets_once_the_restarted_actor_has_run_reset_after():
+    """Pekko's SupervisionSpec, "reset exponential backoff count after reset timeout", with the
+    default reset_after of (1 + 10) / 2 seconds."""
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual_time = ManualTime(testkit.system)
+        events: list[str] = []
+        ref = testkit.spawn(
+            Behaviors.supervise(started(events)).on_failure(S.restart_with_backoff(1, 10, 0.0))
+        )
+        totals: TestProbe[int] = testkit.create_test_probe()
+        ref.tell(Add(-1))  # backs off min_backoff
+        ref.tell(Get(totals.ref))
+        await manual_time.time_passes(1)
+        await totals.expect_message(0, max=0)
+        await manual_time.time_passes(6)  # up for longer than reset_after
+        ref.tell(Add(-1))
+        ref.tell(Get(totals.ref))
+        await manual_time.time_passes(1)  # min_backoff again, not twice it
+        await totals.expect_message(0, max=0)
+
+
+async def test_a_restart_that_fails_at_once_never_resets_the_backoff_count(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Pekko's RestartSupervisor schedules its ResetRestartCount when a restart completes, so the
+    backoff delay itself is not healthy time: a setup that always fails keeps doubling the delay,
+    even past reset_after."""
+    attempts: list[int] = []
+
+    def setup(_ctx: ActorContext[str]) -> Behavior[str]:
+        attempts.append(len(attempts))
+        raise ConnectionError("not ready")
+
+    strategy = S.restart_with_backoff(0.01, 5.0, 0.0).with_reset_after(0.015)
+    with caplog.at_level(logging.WARNING, logger="ohra.actor"):
+        async with ActorTestKit() as testkit:
+            testkit.spawn(Behaviors.supervise(Behaviors.setup(setup)).on_failure(strategy))
+            await eventually(lambda: len(attempts) >= 5)
+    delays = [
+        r.getMessage().split("restarting in ")[1].split("s ")[0]
+        for r in caplog.records
+        if "restarting in" in r.getMessage()
+    ]
+    assert delays[:4] == ["0.010", "0.020", "0.040", "0.080"]

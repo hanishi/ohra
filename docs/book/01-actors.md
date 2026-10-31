@@ -131,7 +131,7 @@ flowchart LR
 
 - **Two queues.** The system queue holds stop, watch and death notifications, and always goes first. The user queue holds ordinary messages and may be bounded, dropping new or old messages or raising when full.
 - **Serialized across awaits.** The loop awaits the handler before it takes the next message. A handler can await I/O and no other message runs in between. That is why actors are useful on a single event loop. It also means the system queue waits too: a stop sent during the await is handled after it.
-- **Behaviors are values.** A handler returns the next behavior: itself with new state, `Behaviors.same`, or `Behaviors.stopped()`. State lives in a closure or a factory parameter, so `counter(n + 1)` is the whole state change. `setup`, `with_timers` and `with_stash` run once when the behavior is started.
+- **Behaviors are values.** A handler returns the next behavior: itself with new state, `Behaviors.same`, or `Behaviors.stopped()`. State lives in a closure or a factory parameter, so `counter(n + 1)` is the whole state change. (`counter` is the running example of the [repo README](../../README.md): a factory that takes the total so far and returns a behavior.) `setup`, `with_timers` and `with_stash` run once when the behavior is started.
 - **The ref is the only handle.** `ctx.self` is a `LocalRef` whose `tell` appends to the cell's queue. A message adapter or `pipe_to_self` also lands in the user queue, so their results are serialized with everything else.
 
 ### Messages and behaviors
@@ -181,7 +181,7 @@ def on_message(ctx: ActorContext[AnalystCmd], msg: AnalystCmd) -> Behavior[Analy
             @ctx.pipe_to_self(work)  # ctx calls this with the work's result
             def _(result: Try[list[int]]) -> AnalystCmd: ...
 
-        ...
+    ...
 ```
 
 These are all of them:
@@ -419,7 +419,7 @@ The cluster, singleton and sharding actors are actors under `/system`, so `ohra.
 - There is one `TimerScheduler` per actor, and a `restart` or `restart_with_backoff` cancels all of its timers before `PreRestart`, as Pekko's `RestartSupervisor` does. `resume` leaves them running.
 - Background work started with `pipe_to_self` is cancelled when the actor stops. Every test asserts that no asyncio task outlives the system.
 - Timer messages are validated when dequeued, so a message from a timer that was cancelled or restarted while it sat in the mailbox is dropped. `unstash_all` replays the stashed messages inside the current message's turn, before any new message.
-- An idle actor costs about 3.5KB and 40µs to spawn. A busy actor handles over a million trivial messages a second; waking an idle one costs an asyncio task switch, about 16µs, which is what `batching` amortizes. 100k actors fit, but `examples/population.py` shows why 16 shard actors holding struct-of-arrays beat 100k single-arm actors by hundreds of times on memory and query time.
+- An idle actor costs about 3.5KB, and spawning and stopping one takes about 13µs ([appendix C](appendix-performance.md)). A busy actor handles over a million trivial messages a second; waking an idle one costs an asyncio task switch, about 16µs, which is what `batching` amortizes. 100k actors fit, but `examples/population.py` shows why 16 shard actors holding struct-of-arrays beat 100k single-arm actors by hundreds of times on memory and query time.
 
 ---
 

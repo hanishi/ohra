@@ -30,6 +30,12 @@ from .tls import RotatingKeysSSLEngineProvider
 _log = logging.getLogger("ohra.remote")
 MAX_FRAME = 16 * 2**20
 QUEUE_BOUND = 1000  # frames held for a peer while its connection is being opened
+# bytes a connected peer may leave unread before tells to it are dead letters, as Pekko's
+# outbound-message-queue-size: a peer that stopped reading must not grow memory without end
+OUTBOUND_BUFFER_BOUND = MAX_FRAME
+# how long closing a connection waits for its unsent bytes and the peer's close, as Pekko's
+# shutdown-flush-timeout: a frozen or partitioned peer must not hold up termination
+SHUTDOWN_FLUSH_TIMEOUT = 1.0
 # how long closing a TLS connection waits for the peer's close_notify, as Pekko's
 # shutdown-flush-timeout: a frozen or partitioned peer must not hold up termination
 TLS_SHUTDOWN_TIMEOUT = 1.0
@@ -211,6 +217,12 @@ class _Association:
         self.connected = asyncio.Event()
         self.task = asyncio.get_running_loop().create_task(self._run())
 
+    def full(self) -> bool:
+        writer = self.writer
+        return (
+            writer is not None and writer.transport.get_write_buffer_size() > OUTBOUND_BUFFER_BOUND
+        )
+
     def send(self, path: str, msg: object, frame: bytes) -> None:
         if self.writer is not None:
             self.writer.write(frame)
@@ -228,50 +240,48 @@ class _Association:
 
     async def _run(self) -> None:
         tls = self.remoting.tls
+        writer: asyncio.StreamWriter | None = None
+        # every way out, a cancelled connect included, releases the offers waiting on connected
         try:
-            if tls is None:
-                reader, writer = await asyncio.open_connection(self.host, self.port)
-            else:
-                reader, writer = await asyncio.open_connection(
-                    self.host,
-                    self.port,
-                    ssl=tls.client_context(),
-                    server_hostname=self.host,
-                    ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT,
-                    ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT,
-                )
-                if (reason := tls.verify_session(writer.get_extra_info("peercert"))) is not None:
-                    await _close(writer)
-                    raise ssl.SSLCertVerificationError(None, reason)
-        except OSError as e:
-            if isinstance(e, ssl.SSLError):
-                _log.warning("TLS connection to %s:%s failed: %s", self.host, self.port, e)
-            else:
-                # every tick to a dead peer: keep it quiet
-                _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)
-            for path, msg, _ in self.pending:
-                self.remoting.system.dead_letter(msg, RemoteRef(path, self.remoting))
+            try:
+                if tls is None:
+                    reader, writer = await asyncio.open_connection(self.host, self.port)
+                else:
+                    reader, writer = await asyncio.open_connection(
+                        self.host,
+                        self.port,
+                        ssl=tls.client_context(),
+                        server_hostname=self.host,
+                        ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT,
+                        ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT,
+                    )
+                    reason = tls.verify_session(writer.get_extra_info("peercert"))
+                    if reason is not None:
+                        raise ssl.SSLCertVerificationError(None, reason)
+            except OSError as e:
+                if isinstance(e, ssl.SSLError):
+                    _log.warning("TLS connection to %s:%s failed: %s", self.host, self.port, e)
+                else:
+                    # every tick to a dead peer: keep it quiet
+                    _log.debug("cannot connect to %s:%s: %s", self.host, self.port, e)
+                return
+            writer.write(self.remoting.hello())
+            # only the bytes: keep no message alive
+            frames = [frame for _path, _msg, frame in self.pending]
             self.pending.clear()
-            self.remoting.drop(self)
+            for frame in frames:
+                writer.write(frame)
+            self.writer = writer
             self.connected.set()
-            return
-        writer.write(self.remoting.hello())
-        # only the bytes: keep no message alive
-        frames = [frame for _path, _msg, frame in self.pending]
-        self.pending.clear()
-        for frame in frames:
-            writer.write(frame)
-        self.writer = writer
-        self.connected.set()
-        try:
             await self.remoting.read_loop(reader)
         finally:
             self.remoting.drop(self)
-            self.connected.set()  # a cancelled connect must not leave an offer waiting
+            self.connected.set()
             for path, msg, _ in self.pending:
                 self.remoting.system.dead_letter(msg, RemoteRef(path, self.remoting))
             self.pending.clear()
-            await _close(writer)
+            if writer is not None:
+                await _close(writer)
 
 
 def _reject(writer: asyncio.StreamWriter, reason: str) -> None:
@@ -279,9 +289,20 @@ def _reject(writer: asyncio.StreamWriter, reason: str) -> None:
 
 
 async def _close(writer: asyncio.StreamWriter) -> None:
+    """Close, waiting at most SHUTDOWN_FLUSH_TIMEOUT for the unsent bytes to go out; past it the
+    connection is dropped. A close waits for its buffer to empty, which a peer that stopped
+    reading never lets happen."""
     writer.close()
-    with contextlib.suppress(OSError, asyncio.CancelledError):
-        await writer.wait_closed()
+    try:
+        async with asyncio.timeout(SHUTDOWN_FLUSH_TIMEOUT):
+            await writer.wait_closed()
+    except TimeoutError:
+        writer.transport.abort()
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
+    except OSError:
+        pass
 
 
 class Remoting:
@@ -341,7 +362,11 @@ class Remoting:
         if self._closed:
             self.system.dead_letter(msg, RemoteRef(path, self))
             return
-        self._association(path).send(path, msg, frame)
+        association = self._association(path)
+        if association.full():  # an offer waits for room instead
+            self.system.dead_letter(msg, RemoteRef(path, self))
+            return
+        association.send(path, msg, frame)
 
     async def offer(self, path: str, msg: object) -> None:
         frame = self._frame(path, msg)

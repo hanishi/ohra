@@ -468,3 +468,94 @@ async def test_tell_after_close_is_a_dead_letter(caplog: pytest.LogCaptureFixtur
         remote = a.resolve("ohra://b@127.0.0.1:1/user")
     remote.tell(Greet("late", a.ignore_ref))  # the system is gone: nothing may start
     assert any("late" in r.getMessage() for r in caplog.records)
+
+
+# --- a peer that stopped reading -----------------------------------------------------------------
+
+from collections.abc import AsyncGenerator  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
+
+from typing import Any  # noqa: E402
+
+from ohra import DeadLetter, EventStream  # noqa: E402
+from ohra.remote import remoting as remoting_module  # noqa: E402
+from ohra.remote.remoting import MAX_FRAME  # noqa: E402
+
+
+@asynccontextmanager
+async def stalled_peer() -> AsyncGenerator[tuple[int, list[asyncio.StreamWriter]]]:
+    """A listener that accepts and never reads, like a frozen process: what is sent to it stays
+    in the sender's buffer. Yields its port and the accepted connections."""
+    port = free_port()
+    accepted: list[asyncio.StreamWriter] = []
+    release = asyncio.Event()
+
+    async def never_read(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.append(writer)
+        await release.wait()
+
+    server = await asyncio.start_server(never_read, "127.0.0.1", port)
+    async with server:
+        try:
+            yield port, accepted
+        finally:
+            for w in accepted:
+                w.transport.abort()
+            release.set()
+
+
+def writers(system: ActorSystem[Any]) -> list[asyncio.StreamWriter]:
+    remoting = system.remoting
+    assert remoting is not None
+    associations = remoting._associations.values()  # pyright: ignore[reportPrivateUsage]
+    return [a.writer for a in associations if a.writer is not None]
+
+
+def unsent(system: ActorSystem[Any]) -> int:
+    return sum(w.transport.get_write_buffer_size() for w in writers(system))
+
+
+async def test_terminate_does_not_wait_for_a_peer_that_stopped_reading(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(remoting_module, "SHUTDOWN_FLUSH_TIMEOUT", 0.05)
+    async with stalled_peer() as (port, accepted):
+        async with node(Behaviors.ignore, "a", free_port()) as a:
+            remote = a.resolve(f"ohra://b@127.0.0.1:{port}/user")
+            for _ in range(8):  # more than the socket buffers take
+                remote.tell(Greeted("x" * 2**20))
+            await eventually(lambda: unsent(a) > 0)
+            a.terminate()
+            try:
+                await asyncio.wait_for(asyncio.shield(a.when_terminated()), 3)
+            finally:
+                for w in accepted:
+                    w.transport.abort()  # a close stuck on the peer can finish now
+
+
+async def test_tells_to_a_peer_that_stopped_reading_are_dead_letters_past_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(remoting_module, "SHUTDOWN_FLUSH_TIMEOUT", 0.05)
+    dead: list[DeadLetter] = []
+
+    def recorder(ctx: ActorContext[DeadLetter]) -> Behavior[DeadLetter]:
+        ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, ctx.self))
+
+        def on_message(d: DeadLetter) -> Behavior[DeadLetter]:
+            dead.append(d)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    async with (
+        stalled_peer() as (port, _),
+        ActorSystem(Behaviors.setup(recorder), "a", address=("127.0.0.1", free_port())) as a,
+    ):
+        remote = a.resolve(f"ohra://b@127.0.0.1:{port}/user")
+        remote.tell(Greeted("first"))
+        await eventually(lambda: bool(writers(a)))
+        for _ in range(MAX_FRAME // 2**20 + 8):
+            remote.tell(Greeted("x" * 2**20))
+        await eventually(lambda: any(isinstance(d.message, Greeted) for d in dead))
+        assert unsent(a) <= MAX_FRAME + 2**21  # the bound, plus the one frame that crossed it

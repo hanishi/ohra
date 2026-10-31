@@ -16,7 +16,7 @@ from ...ref import ActorRef
 from ...remote import Address, UniqueAddress
 from ...remote.serialization import Serialization
 from ...cell import is_local_actor
-from ...signals import PostStop, Signal
+from ...signals import PostStop, PreRestart, Signal
 from .shard import (
     ClusterShardingSettings,
     HandOff,
@@ -709,8 +709,9 @@ class _Coordinator:
             return Behaviors.stopped() if self.stop_now else Behaviors.same
 
         def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
-            if sig is PostStop:
-                # what their DeathWatch of the coordinator would tell them
+            if sig is PostStop or sig is PreRestart:
+                # what their DeathWatch of the coordinator would tell them; a restarted one has
+                # lost its state, so they register again
                 for path in self.alive_regions:
                     if path in self.refs:
                         self.refs[path].tell(CoordinatorStopped(self.ctx.self))

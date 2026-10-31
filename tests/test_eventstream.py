@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 from ohra import (
+    ActorRef,
     ActorContext,
     AllDeadLetters,
     Behavior,
@@ -223,3 +224,53 @@ async def test_a_topic_must_be_a_class():
         probe: TestProbe[list[int]] = testkit.create_test_probe()
         with pytest.raises(TypeError, match="topic must be a class"):
             EventStream.Subscribe(list[int], probe.ref)
+
+
+async def test_a_dead_letter_to_an_adapter_carries_the_message_sent():
+    async with ActorTestKit() as testkit:
+        dead: TestProbe[DeadLetter] = testkit.create_test_probe()
+        adapters: TestProbe[ActorRef[str]] = testkit.create_test_probe()
+        testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, dead.ref))
+
+        def owner(ctx: ActorContext[str]) -> Behavior[str]:
+            adapters.ref.tell(ctx.message_adapter(lambda s: s.upper()))
+            return Behaviors.ignore
+
+        ref = testkit.spawn(Behaviors.setup(owner))
+        adapter = await adapters.receive_message()
+        await testkit.stop(ref)
+        adapter.tell("late")
+        await dead.expect_message(DeadLetter("late", ref))
+
+
+async def test_an_adapter_subscriber_that_cannot_take_a_dead_letter_does_not_loop():
+    gate = asyncio.Event()
+    busy = asyncio.Event()
+
+    async def wait(_m: str) -> Behavior[str]:
+        busy.set()
+        await gate.wait()
+        return Behaviors.same
+
+    def listener(ctx: ActorContext[str]) -> Behavior[str]:
+        adapter = ctx.message_adapter(lambda d: f"saw {d.message}")
+        ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, adapter))
+        return Behaviors.receive_message(wait)
+
+    async with ActorTestKit() as testkit:
+        try:
+            others: TestProbe[DeadLetter] = testkit.create_test_probe()
+            testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, others.ref))
+            full = testkit.system._root.spawn_child(  # pyright: ignore[reportPrivateUsage]
+                Behaviors.setup(listener), "full", MailboxSelector.bounded(1)
+            )
+            full.ref.tell("busy")
+            await busy.wait()
+            full.ref.tell("fills the one slot")
+            ref = testkit.spawn(Behaviors.ignore)
+            await testkit.stop(ref)
+            ref.tell("late")  # its DeadLetter overflows the listener's mailbox
+            await others.expect_message(DeadLetter("late", ref))
+            await others.expect_no_message()  # the overflowed one is not published again
+        finally:
+            gate.set()

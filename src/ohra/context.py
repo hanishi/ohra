@@ -118,7 +118,7 @@ class ActorContext[T]:
         keeps the adapter for its lifetime, so create adapters in setup rather than per message."""
         ref: FunctionRef[U] = FunctionRef(
             f"{self._cell.path}/$adapter",
-            lambda u: self._cell.send_adapted(lambda: f(u)),
+            lambda u: self._cell.send_adapted(lambda: f(u), u),
             owner=self._cell,
         )
         self._cell.adapters.append(ref)

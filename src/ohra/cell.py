@@ -76,6 +76,13 @@ class _DeathNotify:
 @dataclass(frozen=True, slots=True)
 class _Adapted:
     thunk: Callable[[], object]  # returns the message, or _DROP to skip it
+    sent: object  # what was told to the adapter or timer: a dead letter carries it
+
+
+def _sent(msg: object) -> object:
+    """The message as it was sent. A dead letter shows it, not the wrapper, so the event stream
+    recognizes its own events coming back through an adapter."""
+    return msg.sent if isinstance(msg, _Adapted) else msg
 
 
 _DROP = object()
@@ -162,7 +169,7 @@ class TimerScheduler[T]:
             fired = True
             if interval is None:
                 self._handles.pop(key, None)
-            self._cell.send_adapted(deliver)
+            self._cell.send_adapted(deliver, msg)
 
         if interval is None:
             handle = scheduler.schedule_once(delay, fire)
@@ -246,13 +253,13 @@ class ActorCell[T]:
 
     def send_user(self, msg: object) -> None:
         if self.stopping:
-            self.system.dead_letter(msg, self.ref)
+            self.system.dead_letter(_sent(msg), self.ref)
             return
         cap = self.mailbox.capacity
         if cap is not None and self._occupancy() >= cap:
             match self.mailbox.overflow:
                 case "drop_new":
-                    self.system.dead_letter(msg, self.ref)
+                    self.system.dead_letter(_sent(msg), self.ref)
                     return
                 case "drop_old":
                     victim = self._user.popleft()
@@ -260,7 +267,7 @@ class ActorCell[T]:
                     if victim is _POISON:
                         victim = self._user.popleft()
                         self._user.appendleft(_POISON)
-                    self.system.dead_letter(victim, self.ref)
+                    self.system.dead_letter(_sent(victim), self.ref)
                 case "fail":
                     raise MailboxOverflowError(f"mailbox of {self.path} is full ({cap})")
         self._user.append(msg)
@@ -269,8 +276,8 @@ class ActorCell[T]:
     def _occupancy(self) -> int:
         return len(self._user) - self._poisoned
 
-    def send_adapted(self, thunk: Callable[[], object]) -> None:
-        self.send_user(_Adapted(thunk))
+    def send_adapted(self, thunk: Callable[[], object], sent: object) -> None:
+        self.send_user(_Adapted(thunk, sent))
 
     async def offer(self, msg: object) -> None:
         """Enqueue, waiting for room while a bounded mailbox is full. FIFO among waiters."""
@@ -384,7 +391,7 @@ class ActorCell[T]:
                 raise
             except Exception as e:
                 result = Failure(e)
-            self.send_adapted(lambda: adapt(result))
+            self.send_adapted(lambda: adapt(result), result)
 
         def settle(task: asyncio.Task[None]) -> None:
             self._tasks.discard(task)
@@ -553,7 +560,7 @@ class ActorCell[T]:
         quietly."""
         while msgs:
             if (msg := msgs.popleft()) is not _POISON and not isinstance(msg, Signal):
-                self.system.dead_letter(msg, self.ref)
+                self.system.dead_letter(_sent(msg), self.ref)
 
     async def _deliver(self, b: Behavior[T], msg: Any) -> Behavior[T]:
         if isinstance(b, _Supervisor):

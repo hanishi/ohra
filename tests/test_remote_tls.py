@@ -467,3 +467,29 @@ async def test_three_nodes_form_a_cluster_over_tls():
             return len(members) == 3 and all(m.status == "up" for m in members)
 
         await eventually(lambda: all(all_up(n) for n in nodes), timeout=5)
+
+
+async def test_an_offer_does_not_wait_on_a_connect_that_terminate_cancels():
+    port = free_port()
+    handshaking = asyncio.Event()
+    release = asyncio.Event()
+
+    async def silent(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handshaking.set()  # accepted, and never answers the TLS handshake
+        try:
+            await release.wait()
+        finally:
+            writer.transport.abort()  # the server's close waits for every connection
+
+    server = await asyncio.start_server(silent, "127.0.0.1", port)
+    async with server:
+        try:
+            async with tls_node(Behaviors.ignore, "a", free_port(), TLS / "node-a") as a:
+                remote = a.resolve(f"ohra://x@127.0.0.1:{port}/user")
+                offer = asyncio.ensure_future(remote.offer(Hail("stuck")))
+                await handshaking.wait()
+                a.terminate()
+                await a.when_terminated()
+                await asyncio.wait_for(offer, 3)
+        finally:
+            release.set()

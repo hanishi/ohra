@@ -154,20 +154,23 @@ def map_concat_op[I, O](f: Callable[[I], Iterable[O]]) -> Op[I, O]:
 
 
 def take_op[T](n: int) -> Op[T, T]:
-    async def run(upstream: AsyncIterator[T], _ctx: _Ctx) -> AsyncGenerator[T, None]:
-        async with closing(upstream) as up:
-            if n <= 0:
-                return
+    async def run(upstream: AsyncIterator[T], ctx: _Ctx) -> AsyncGenerator[T, None]:
+        # Pekko's Take pushes the nth element and completes the stage at once: the close of
+        # upstream starts with the nth element, which goes down without waiting for it
+        closer: asyncio.Future[None] | None = None
+        try:
             count = 0
-            nth: list[T] = []
-            async for x in up:
-                count += 1
-                if count >= n:
-                    nth.append(x)
-                    break  # as Pekko's Take, which completes with the nth push: close upstream
-                yield x
-        for x in nth:  # upstream is closed before the nth element goes down
-            yield x
+            if n > 0:
+                async for x in upstream:
+                    count += 1
+                    if count >= n:
+                        closer = close = asyncio.ensure_future(cast(Any, upstream).aclose())
+                        ctx.on_abort(close.cancel)  # a run torn down does not wait on the close
+                        yield x
+                        return
+                    yield x
+        finally:
+            await (closer if closer is not None else cast(Any, upstream).aclose())
 
     return run
 

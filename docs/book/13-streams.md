@@ -137,7 +137,7 @@ A stage pulls as much as it needs to produce one element, and no more: `grouped(
 
 ### Cancel: the end goes up
 
-A stage that needs no more elements closes its upstream with `aclose()`. `take(n)` does so on its `n`th element, before passing it on; `Sink.head()` after the first; a kill switch when it is thrown. Each stage holds its upstream in `contextlib.aclosing`, so the close goes up stage by stage, and each one runs its `finally` blocks, cancels its tasks and cancels its timers on the way:
+A stage that needs no more elements closes its upstream with `aclose()`. `take(n)` starts to do so with its `n`th element, which it passes on without waiting for the close; `Sink.head()` after the first; a kill switch when it is thrown. Each stage holds its upstream in `contextlib.aclosing`, so the close goes up stage by stage, and each one runs its `finally` blocks, cancels its tasks and cancels its timers on the way:
 
 ```mermaid
 sequenceDiagram

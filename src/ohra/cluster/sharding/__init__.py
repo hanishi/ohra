@@ -123,7 +123,7 @@ class ClusterSharding:
         )
         if settings.coordinator_singleton_settings is not None:
             coordinator = coordinator.with_settings(settings.coordinator_singleton_settings)
-        ClusterSingleton(self.system).init(coordinator)
+        ClusterSingleton(self.system)._init_manager(coordinator)  # pyright: ignore[reportPrivateUsage]
         self._regions[name] = region.ref
         self._entities[name] = entity
         return region.ref

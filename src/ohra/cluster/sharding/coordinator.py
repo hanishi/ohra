@@ -790,10 +790,13 @@ class _Coordinator:
     def rebalance_done(self, shard: str, ok: bool) -> None:
         self.rebalance_workers.pop(shard, None)
         if ok:
+            # as Pekko: the shard could have been removed by ShardRegionTerminated
             if shard in self.state.shards:
                 self.state = self.state.updated(ShardHomeDeallocated(shard))
-            self.clear_rebalance_in_progress(shard)
-            self.get_shard_home(shard, self.ctx.system.ignore_ref)  # reallocate at once, as Pekko
+                self.clear_rebalance_in_progress(shard)
+                self.get_shard_home(shard, self.ctx.system.ignore_ref)  # reallocate at once
+            else:
+                self.clear_rebalance_in_progress(shard)
         else:
             self.log.warning(
                 "%s: Shard [%s] deallocation did not complete within [%s]s",

@@ -129,9 +129,8 @@ class _ActorRefSource[T]:
 
     async def __anext__(self) -> T:
         while True:
-            if self._failure is not None:
-                failure, self._failure = self._failure, None
-                raise failure
+            if self._failure is not None:  # every later pull too: no signal after a terminal one
+                raise self._failure
             if self._buffer:
                 return self._buffer.popleft()
             if self._completing or self._stopped:

@@ -139,7 +139,7 @@ A stage pulls as much as it needs to produce one element, and no more: `grouped(
 
 ### Cancel: the end goes up
 
-A stage that needs no more elements closes its upstream with `aclose()`. `take(n)` starts to do so with its `n`th element, which it passes on without waiting for the close; `Sink.head()` after the first; a kill switch when it is thrown. Each stage holds its upstream in `contextlib.aclosing`, so the close goes up stage by stage, and each one runs its `finally` blocks, cancels its tasks and cancels its timers on the way:
+A stage that needs no more elements closes its upstream with `aclose()`. `take(n)` starts to do so with its `n`th element, which it passes on without waiting for the close; `Sink.head()` after the first; a kill switch when it is thrown. Each stage holds its upstream in `contextlib.aclosing`, so the close goes up stage by stage, and each one runs its `finally` blocks, cancels its tasks and cancels its timers on the way. Put a source's cleanup in `finally`: a generator above a stage that pulls in a task of its own, such as `map_async`, `merge`, `zip`, the kill switch or `Sink.queue`, sees `CancelledError` there rather than `GeneratorExit`. A cleanup that raises is logged, and the stream ends as it would have:
 
 ```mermaid
 sequenceDiagram

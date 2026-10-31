@@ -1,7 +1,9 @@
 """Checked by pyright, never run. Each `type: ignore` must be needed,
 because reportUnnecessaryTypeIgnoreComment is an error: if typing regresses, pyright fails."""
 
+import asyncio
 from dataclasses import dataclass
+from typing import Any
 
 from ohra import (
     ActorContext,
@@ -17,6 +19,16 @@ from ohra import (
     StashBuffer,
     TimerScheduler,
     batching,
+)
+from ohra.stream import (
+    Flow,
+    Keep,
+    KillSwitches,
+    NotUsed,
+    RunnableGraph,
+    Sink,
+    Source,
+    UniqueKillSwitch,
 )
 
 
@@ -161,3 +173,33 @@ async def probes_are_typed() -> None:
         s: Greeting = await probe2.expect_message_type(Greeting)
         wrong: Bye = await probe2.expect_message_type(Greeting)  # type: ignore[assignment]
         del x, s, wrong
+
+
+def streams_are_typed(system: ActorSystem[Any]) -> None:
+    # Flow.of(str) alone is accepted here: type[T] is covariant, so pyright solves T = int | str,
+    # and an identity flow of int | str does take ints. A flow that uses str is rejected.
+    Source.from_iterable([1]).via(Flow.of(str).map(str.upper))  # type: ignore[arg-type]
+    g: RunnableGraph[tuple[NotUsed, asyncio.Future[list[int]]]] = Source.from_iterable([1]).to_mat(
+        Sink.seq(), Keep.both
+    )
+    empty: Source[int, NotUsed] = Source.empty()  # Source is covariant in its elements
+    ints: Sink[int, NotUsed] = Sink.cancelled()  # and Sink contravariant
+    flow: Flow[bool, object, object] = Flow.of(int)
+    wrong: asyncio.Future[str] = Source.single(1).run_with(Sink.head(), system)  # type: ignore[assignment]
+    zipped: Source[tuple[int, str], NotUsed] = Source.single(1).zip(Source.single("a"))
+    # merge and concat widen to the union, as Pekko's merge[U >: Out]
+    nums = Source.from_iterable([1, 2])
+    bools = Source.single(True)
+    strs = Source.single("a")
+    from_empty: Source[int, NotUsed] = Source.empty().merge(nums)
+    merged: Source[int, NotUsed] = nums.merge(bools)
+    concat_empty: Source[int, NotUsed] = Source.empty().concat(nums)
+    concatenated: Source[int, NotUsed] = nums.concat(bools)
+    either: Source[int | str, NotUsed] = nums.merge(strs)
+    flow_merged: Flow[int, int, NotUsed] = Flow.of(int).merge(bools)
+    not_ints: Source[int, NotUsed] = nums.merge(strs)  # type: ignore[assignment]
+    switched: Source[int, UniqueKillSwitch] = Source.single(1).via_mat(
+        KillSwitches.single(), Keep.right
+    )
+    del g, empty, ints, flow, wrong, zipped, switched, from_empty, merged, concat_empty
+    del concatenated, either, flow_merged, not_ints

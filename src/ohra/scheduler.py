@@ -23,6 +23,11 @@ class Cancellable(Protocol):
 class Scheduler(Protocol):
     """Runs ``fn`` later. Durations are seconds."""
 
+    @property
+    def current_time(self) -> float:
+        """The scheduler's clock in seconds: monotonic, with no relation to wall-clock time."""
+        ...
+
     def schedule_once(self, delay: float, fn: Callable[[], None]) -> Cancellable: ...
 
     def schedule_with_fixed_delay(
@@ -59,6 +64,10 @@ class _Scheduled:
 
 class EventLoopScheduler:
     """The default scheduler: ``call_later`` and ``call_at`` on the running loop."""
+
+    @property
+    def current_time(self) -> float:
+        return asyncio.get_running_loop().time()
 
     def schedule_once(self, delay: float, fn: Callable[[], None]) -> Cancellable:
         job = _Scheduled()

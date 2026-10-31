@@ -18,6 +18,7 @@ from ohra import (
     SupervisorStrategy,
     ask,
 )
+from ohra.stream import Source
 from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 
 
@@ -254,6 +255,18 @@ async def test_time_passes_does_not_wait_forever_for_a_busy_actor():
         await manual_time.time_passes(1)
         assert time.monotonic() - t0 < 0.5
         never.set_result(None)
+
+
+async def test_time_passes_waits_for_a_stream_run_just_before_to_reach_its_pull():
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual_time = ManualTime(testkit.system)
+        probe: TestProbe[str] = testkit.create_test_probe()
+        done = Source.tick(1.0, 1.0, "tick").take(2).run_foreach(probe.ref.tell, testkit.system)
+        await manual_time.time_passes(1.0)  # the tick finds the stream's first pull waiting
+        await probe.expect_message("tick")
+        await manual_time.time_passes(1.0)
+        await probe.expect_message("tick")
+        await done
 
 
 async def test_manual_time_on_a_default_system_raises():

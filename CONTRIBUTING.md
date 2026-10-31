@@ -20,6 +20,7 @@ uv run ruff format   # PEP 8 layout, lines up to 99 characters
 uv run ruff check    # PEP 8 style and naming
 uv run pytest        # every test fails if any asyncio task outlives it (tests/conftest.py)
 uv run pytest examples/testing   # the book's chapter 12 tests, run as a reader runs them
+uv run pytest examples/streams   # the book's chapter 13 tests
 uv run pyright       # strict mode, 0 errors
 ```
 
@@ -70,7 +71,7 @@ uv run pyright       # strict mode, 0 errors
 - `remote/`: `remoting.py` (transport, addresses, `RemoteRef`) and `serialization.py` (`@remotable`).
 - `cluster/`: `core.py` (the membership daemon and the `Cluster` extension), its internals `gossip.py`, `reachability.py`, `vector_clock.py`, `failure_detector.py`, the split-brain resolver `sbr.py`, then `singleton.py` and `sharding/` (`shard.py`: the Shard actor and the single-node `Sharding`; `coordinator.py`; `region.py`; the `ClusterSharding` extension in `__init__.py`).
 - `management/`: Pekko Management for Kubernetes: `http.py` (stdlib HTTP/1.1 server and client), `health.py`, the `Management` extension in `__init__.py`, `cluster_http.py` (read-only routes), `bootstrap.py` (cluster bootstrap), `kubernetes.py` (API discovery).
-- `stream/`: `actor_source.py`, Pekko's stream-typed `ActorSource.actorRef`: an outbox that actors tell and a route iterates. There are no streams beyond it.
+- `stream/`: Pekko Streams' typed DSL over async iterators: `dsl.py` (`Source`, `Flow`, `Sink`, `RunnableGraph`, `Keep`), `ops.py` (the operators), `materializer.py` (one actor per run under `/system`), `queue.py` (`Source.queue`, `Sink.queue`), `kill_switch.py`, and Pekko's stream-typed `actor_source.py`, `actor_sink.py` and `actor_flow.py`.
 - `ext/`: `fastapi.py`, `postgres.py` (`PostgresStore`, durable state for clusters) and `shm.py`, integrations outside the core.
 - `testkit/`: Pekko's actor-testkit-typed: `actor_testkit.py`, `probe.py` (`TestProbe`, `FishingOutcomes`), `manual_time.py` (`ManualTime`, `ExplicitlyTriggeredScheduler`), `settings.py`, and `pytest_plugin.py`, the only module that imports pytest.
 - `docs/book/`: the documentation, one chapter per layer with Mermaid diagrams; README.md is only the front page.

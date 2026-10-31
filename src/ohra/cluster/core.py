@@ -15,6 +15,7 @@ from ..behavior import Behavior, Behaviors
 from ..context import ActorContext
 from ..cell import ActorCell, watched_ref
 from ..coordinated_shutdown import ClusterDowningReason, ClusterLeavingReason, CoordinatedShutdown
+from ..eventstream import DeadLetterSuppression
 from ..ref import ActorRef, FunctionRef
 from ..remote import Address, UniqueAddress
 from ..remote.serialization import remotable
@@ -256,19 +257,19 @@ type ClusterStateSubscription = Subscribe | Unsubscribe | GetCurrentState
 
 @remotable
 @dataclass(frozen=True)
-class InitJoinAck:
+class InitJoinAck(DeadLetterSuppression):
     address: Address
 
 
 @remotable
 @dataclass(frozen=True)
-class InitJoinNack:
+class InitJoinNack(DeadLetterSuppression):
     address: Address
 
 
 @remotable
 @dataclass(frozen=True)
-class InitJoin:
+class InitJoin(DeadLetterSuppression):
     reply_to: ActorRef[InitJoinAck | InitJoinNack]
 
 
@@ -306,13 +307,13 @@ class GossipStatus:
 
 @remotable
 @dataclass(frozen=True)
-class ExitingConfirmed:
+class ExitingConfirmed(DeadLetterSuppression):
     node: UniqueAddress
 
 
 @remotable
 @dataclass(frozen=True)
-class HeartbeatRsp:
+class HeartbeatRsp(DeadLetterSuppression):
     from_: UniqueAddress
     seq: int
     created_ns: int
@@ -320,7 +321,7 @@ class HeartbeatRsp:
 
 @remotable
 @dataclass(frozen=True)
-class Heartbeat:
+class Heartbeat(DeadLetterSuppression):
     """Sent to a peer's ``/system/cluster/heartbeat``, which answers ``reply_to`` with a
     HeartbeatRsp."""
 

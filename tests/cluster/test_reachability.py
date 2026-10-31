@@ -46,3 +46,12 @@ def test_remove_drops_a_node_as_observer_and_subject():
     assert gone.records == () and gone.version_of(B) == 0
     assert r.remove_observers(frozenset({A})).status(B, C) == "unreachable"
     assert r.all_observers == frozenset({A, B})
+
+
+def test_equal_tables_compare_equal_in_any_record_order():
+    """As Pekko's equals, by observer rows and versions: merge builds records in a frozenset's
+    order, which differs between processes, and an order change must not count as a change."""
+    r = Reachability.empty().unreachable(A, C).unreachable(B, C)
+    swapped = Reachability(r.records[::-1], r.versions[::-1])
+    assert r == swapped and hash(r) == hash(swapped)
+    assert r != r.unreachable(A, B)

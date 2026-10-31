@@ -33,6 +33,18 @@ class Reachability:
     def empty() -> Reachability:
         return Reachability()
 
+    def __eq__(self, other: object) -> bool:
+        """As Pekko's equals: by rows and versions, not by the order merge built them in."""
+        if not isinstance(other, Reachability):
+            return NotImplemented
+        return (
+            dict(self.versions) == dict(other.versions)
+            and self._observer_rows == other._observer_rows
+        )
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self.versions))
+
     # --- derived views ---------------------------------------------------------------------------
 
     @cached_property

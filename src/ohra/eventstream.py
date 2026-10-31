@@ -51,6 +51,14 @@ class Dropped(AllDeadLetters):
     recipient: ActorRef[Any]
 
 
+class DeadLetterSuppression:
+    """Pekko's marker for a message whose dead letter is expected and harmless, such as a cluster
+    heartbeat to a node that has crashed. Its dead letter is logged at debug level, not
+    published."""
+
+    __slots__ = ()
+
+
 class EventStream:
     """The commands ``system.event_stream`` accepts."""
 
@@ -80,10 +88,13 @@ class EventStream:
     type Command = Publish | Subscribe[Any] | Unsubscribe
 
 
-def is_suppressed(msg: object) -> bool:
-    """A dead letter that must not be published again: one of the stream's own messages, which
-    would otherwise loop through a stopped subscriber or a stopped stream."""
-    return isinstance(msg, (AllDeadLetters, EventStream.Publish))
+def is_suppressed(msg: object, dead_letter: bool = False) -> bool:
+    """A message that is only logged: one of the stream's own, which would otherwise loop through
+    a stopped subscriber or a stopped stream, or, as a dead letter, a ``DeadLetterSuppression``,
+    which as in Pekko still publishes when unhandled or dropped."""
+    return isinstance(msg, (AllDeadLetters, EventStream.Publish)) or (
+        dead_letter and isinstance(msg, DeadLetterSuppression)
+    )
 
 
 def _watched(ref: ActorRef[Any]) -> ActorRef[Any] | None:

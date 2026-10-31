@@ -472,14 +472,16 @@ class Remoting:
             case "hello":
                 self._hello(frame.get("address"))
             case "msg":
-                to, message = frame.get("to"), frame.get("message")
+                to, wire = frame.get("to"), frame.get("message")
+                message: object = wire  # the dead letter's message, if decoding fails
                 try:
+                    message = Serialization.decode(wire, self.resolve)
                     if not isinstance(to, str):
                         raise LookupError("frame has no recipient")
                     target = self.resolve(to)
                     if isinstance(target, RemoteRef):
                         raise LookupError(f"{to} is not on this node")
-                    target.tell(Serialization.decode(message, self.resolve))
+                    target.tell(message)
                 # one bad message must not take the connection and the frames behind it
                 except Exception as e:
                     _log.debug("dead letter: %r", e)

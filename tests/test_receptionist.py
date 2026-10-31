@@ -267,3 +267,35 @@ async def test_a_service_that_subscribes_too_leaves_its_keys_when_it_stops():
         await eventually(lambda: listings[-1:] != [] and actor in listings[-1].service_instances)
         actor.tell("stop")
         await eventually(lambda: listings[-1].service_instances == frozenset())
+
+
+async def test_a_message_adapter_registers_and_leaves_with_its_actor():
+    """Pekko's LocalReceptionist registers any local ref; an adapter's actor is watched once,
+    with the actor itself registered under another key."""
+
+    def registering(ctx: ActorContext[Any]) -> Behavior[Any]:
+        rec = Receptionist(ctx.system).ref
+        rec.tell(Register(GREETER, ctx.self))
+        rec.tell(Register(OTHER, ctx.message_adapter(lambda text: ("other", text))))
+        return Behaviors.receive_message(
+            lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
+        )
+
+    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+        listings: list[Listing[str]] = []
+        watcher = await ask(system, lambda r: Spawn(recorder(listings), "watcher", r), timeout=1)
+        actor = await ask(
+            system, lambda r: Spawn(Behaviors.setup(registering), "both", r), timeout=1
+        )
+        rec = Receptionist(system).ref
+        rec.tell(Subscribe(OTHER, watcher))
+        await eventually(
+            lambda: len(listings[-1:]) == 1 and len(listings[-1].service_instances) == 1
+        )
+        (adapter,) = listings[-1].service_instances
+        assert adapter != actor
+        actor.tell("stop")
+        await eventually(lambda: listings[-1].service_instances == frozenset())
+        assert (
+            await ask(rec, lambda r: Find(GREETER, r), timeout=1)
+        ).service_instances == frozenset()

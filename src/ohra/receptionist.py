@@ -21,7 +21,7 @@ from .cluster.core import (
 from .cluster.core import Subscribe as ClusterSubscribe
 from .cell import watched_ref
 from .context import ActorContext
-from .ref import ActorRef, LocalRef
+from .ref import ActorRef
 from .remote import Address, RemoteRef, UniqueAddress
 from .remote.serialization import remotable
 
@@ -190,14 +190,15 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                     del registry[key]
 
         def in_use(actor: ActorRef[Any]) -> bool:
-            return actor in services_per_actor or any(
+            return any(watched_ref(s) == actor for s in services_per_actor) or any(
                 watched_ref(s) == actor for s in subscriptions_per_actor
             )
 
         def on_message(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
                 case Register(key, service, reply_to):
-                    if not isinstance(service, LocalRef):
+                    # a local actor, or a message adapter of one, which watches its actor
+                    if (actor := watched_ref(service)) is None:
                         ctx.log.warning(
                             "Receptionist only accepts local actors for registration, ignoring "
                             "[%s] for [%s]",
@@ -205,7 +206,7 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                             key.id,
                         )
                         return Behaviors.same
-                    ctx.watch_with(service, _ActorTerminated(service))  # once per actor
+                    ctx.watch_with(actor, _ActorTerminated(actor))  # once per actor
                     if reply_to is not None:
                         reply_to.tell(Registered(key, service))
                     services_per_actor.setdefault(service, set()).add(key)
@@ -217,8 +218,8 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                         if reply_to is not None:
                             reply_to.tell(Deregistered(key, service))
                         remove_binding(key, service)
-                        if not in_use(service):
-                            ctx.unwatch(service)
+                        if (actor := watched_ref(service)) is not None and not in_use(actor):
+                            ctx.unwatch(actor)
                         local_change([key])
                 case Find(key, reply_to):
                     reply_to.tell(listing(key))
@@ -244,10 +245,13 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                             subscribers[key].discard(subscriber)
                             if not subscribers[key]:
                                 del subscribers[key]
-                    keys = services_per_actor.pop(ref, set())
-                    for key in keys:
-                        remove_binding(key, ref)
-                    local_change(keys)
+                    left: set[ServiceKey[Any]] = set()
+                    for service in [s for s in services_per_actor if watched_ref(s) == ref]:
+                        service_keys = services_per_actor.pop(service)
+                        left |= service_keys
+                        for key in service_keys:
+                            remove_binding(key, service)
+                    local_change(left)
                 case ReceptionistRow() | ClusterDomainEvent() | _ResendTick() if (
                     replication is not None
                 ):

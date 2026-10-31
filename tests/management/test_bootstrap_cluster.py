@@ -201,6 +201,42 @@ async def test_ensure_probing_reuses_a_child_that_is_still_stopping():
         assert await asyncio.wait_for(outcome, 5) == "reused"
 
 
+async def test_a_reused_probe_that_stopped_is_replaced_in_the_next_round():
+    """A probe reused while stopping is not kept once it has stopped: the next round starts a new
+    one, as Pekko's coordinator, which asks context.child every round."""
+    from ohra import ActorContext, Behavior, Behaviors, Signal, Terminated
+    from ohra.management.bootstrap import _Coordinator  # pyright: ignore[reportPrivateUsage]
+
+    p, m = free_port(), free_port()
+    outcome: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    cp = ResolvedTarget("127.0.0.1", free_port(), "127.0.0.1")
+    settings = ClusterBootstrapSettings(service_name="svc", **BOOT)
+
+    def reuse_then_replace(ctx: ActorContext[None]) -> Behavior[None]:
+        coordinator = _Coordinator(
+            ctx, settings, ConfigServiceDiscovery({"svc": [cp]}), ("127.0.0.1", m), ""
+        )
+        coordinator.ensure_probing(cp)
+        first = coordinator.probes[cp]
+        ctx.watch(first)
+        ctx.stop(first)
+        coordinator.ensure_probing(cp)  # still stopping: reused
+
+        def on_signal(_ctx: ActorContext[None], sig: Signal) -> Behavior[None]:
+            if isinstance(sig, Terminated) and sig.ref == first:
+                coordinator.ensure_probing(cp)
+                outcome.set_result(coordinator.probes[cp] != first)
+            return Behaviors.same
+
+        return Behaviors.receive_signal(on_signal)
+
+    async with cluster_node(
+        "c", p, [], management=ManagementSettings(hostname="127.0.0.1", port=m)
+    ) as node:
+        node._system_root.spawn_child(Behaviors.setup(reuse_then_replace), "probeAgain", None)  # pyright: ignore[reportPrivateUsage]
+        assert await asyncio.wait_for(outcome, 5)
+
+
 def test_decider_resolves_its_own_hostname_once(monkeypatch: pytest.MonkeyPatch):
     """matches_self must not call DNS on the event loop per tick: the self IP is resolved once at
     construction."""

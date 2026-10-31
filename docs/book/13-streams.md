@@ -109,6 +109,8 @@ async def test_keep_both_hands_back_both_values(testkit: ActorTestKit):
 
 `run` returns at once, and the stream starts on the next loop steps. The `Materializer` spawns one actor per run under `/system/Materializers/StreamSupervisor`, which drives the sink and stops when the stream ends. The stages run fused, in the one task that actor starts, and a stage that races its upstream against something else (`map_async` and `ActorFlow.ask`, `merge`, `zip`, `grouped_within`, the kill switch, `Sink.queue`, `ActorSink`) puts each pull in a task of its own. A source that never suspends, such as `Source.repeat`, lets the event loop run every 1000 elements, so even an endless stream can be stopped.
 
+The stages share the event loop with every actor, so a function passed to a stage must not block. A `time.sleep` or a synchronous HTTP call in `map` holds up the whole process. Give `map_async` an `async def`, and move blocking work into a thread with `asyncio.to_thread`. [When a handler may await](01-actors.md#when-a-handler-may-await) shows how to find such calls.
+
 A flow's input type is checked where it is attached. One that uses its input as the wrong type is a pyright error: `Source.from_iterable([1]).via(Flow.of(str).map(str.upper))` is rejected. A bare `Flow.of(str)` after a source of ints is accepted, since pyright widens its type to `int | str`, and an identity flow of `int | str` does take ints.
 
 ### Pull: demand goes up, elements come down

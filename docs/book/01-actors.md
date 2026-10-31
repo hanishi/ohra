@@ -146,6 +146,24 @@ An await in a handler holds the actor until it returns. That gives three cases. 
 - **Hangs the actor: an await that can take long or never finish,** such as a send to a client, a call to a peer with no timeout, or a long job. Until it returns the actor can't be stopped, and nothing fails, so supervision never steps in. `system.terminate()` and leaving `async with ActorSystem` wait for it too. Use `ctx.pipe_to_self`: the actor goes on, and the result comes back as a message. For a connection, let the route own it and give the actors the ref of an `ohra.stream.ActorSource` ([chapter 13](13-streams.md#the-actor-stages)), as [chapter 9](09-fastapi.md#websockets-the-route-owns-the-connection) shows.
 - **Blocks every actor: a blocking call,** async handler or not: `time.sleep`, a synchronous database driver, a CPU-heavy loop. It holds the event loop, and every actor on it. Run it in a thread and pipe the result back: `ctx.pipe_to_self(asyncio.to_thread(fn, ...), adapt)`. This is Pekko's advice to make the blocking call in a `Future` on a thread pool with an upper limit: `to_thread` runs on the loop's default executor, a bounded thread pool. Pekko's first remedy, a dedicated dispatcher, has no counterpart, since ohra has no dispatchers.
 
+Two tools find blocking calls, one before the code runs and one while it runs:
+
+- **ruff's `ASYNC2` rules** flag the usual blocking calls inside an `async def`, such as `time.sleep`, blocking HTTP clients, `subprocess`, `open` and `input`. Add them to your project's lint selection:
+
+  ```toml
+  [tool.ruff.lint]
+  extend-select = ["ASYNC2"]
+  ```
+
+  They look only inside `async def`. A plain function that blocks is not flagged, and that includes a synchronous handler and a function passed to a stream's `map`. A CPU-heavy loop is never flagged.
+- **asyncio's debug mode** times every step of the event loop and logs each one that takes longer than `loop.slow_callback_duration`, 0.1 s by default, whatever the cause:
+
+  ```
+  Executing <Task ... coro=<look_up_price() ...> took 0.305 seconds
+  ```
+
+  Turn it on with `PYTHONASYNCIODEBUG=1` or `asyncio.run(main(), debug=True)`, in tests or a staging run. It slows the loop down, so leave it off in production.
+
 `setup` runs once per actor and is where per-actor state and children are created. `receive` is `receive_message` with the context. All of them are usually written as decorators, described next.
 
 ### Decorators

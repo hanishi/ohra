@@ -125,7 +125,7 @@ async def chat(ws: WebSocket) -> None:
 - **The two lives are tied.** A closed socket stops the actor, after the frames it already has. An actor that stops, by returning `Behaviors.stopped()` or by failing, closes the socket once the frames it told `out` are sent, and so does the system shutting down: `terminate()` drains every open connection in the coordinated shutdown's `service-stop` phase, up to the phase's timeout, and closes it with 1000.
 - **`out` holds 16 frames** (`buffer_size`). A client that falls further behind is closed with code 1008 under the default `OverflowStrategy.fail`, even one that has stopped reading so that a send never returns. The drop strategies drop frames instead.
 - **A connection that arrives while the system shuts down** is closed with 1001 (going away).
-- **`decode` is the trust boundary.** A frame it rejects by raising closes the socket with 1003 (unsupported data), logged with its traceback on `ohra.ext.fastapi`, and stops the actor.
+- **`decode` is the trust boundary.** A frame it rejects by raising closes the socket with 1003 (unsupported data), logged with its traceback on `ohra.ext.fastapi`, and stops the actor. Frames the actor tells after that close are dropped: they have nowhere to go, and they are not the route's error.
 
 `examples/fastapi_chatroom.py` is the full version: a connection actor per socket that joins a room through a lobby, turns the client's frames into posts and room events into frames for `out`, and a room that watches its connection actors to tell the others when someone leaves.
 

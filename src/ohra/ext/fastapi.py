@@ -161,11 +161,17 @@ class Actors[T]:
             with contextlib.suppress(WebSocketDisconnect, BufferOverflowError):
                 try:
                     async for frame in outbox:
+                        # the server closed meanwhile (a rejected frame): the frame has nowhere
+                        # to go, and ending here would cancel receive() mid-close, so drop it
+                        if ws.application_state != WebSocketState.CONNECTED:
+                            continue
                         await ws.send_json(frame)
                 except AbruptStageTerminationError:  # terminated with no service-stop drain
-                    await ws.close(code=1001, reason="going away")
+                    if ws.application_state == WebSocketState.CONNECTED:
+                        await ws.close(code=1001, reason="going away")
                     return
-                await ws.close()  # the actor stopped and its frames are sent
+                if ws.application_state == WebSocketState.CONNECTED:
+                    await ws.close()  # the actor stopped and its frames are sent
 
         receiving = asyncio.create_task(receive())
         sending = asyncio.create_task(send())

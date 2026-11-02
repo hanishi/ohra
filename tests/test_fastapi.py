@@ -197,6 +197,7 @@ class FakeSocket:
         close_error: BaseException | None = None,
         frame_on_close: str | None = None,
         sends_block_after: int | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         from starlette.websockets import WebSocketState
 
@@ -205,6 +206,7 @@ class FakeSocket:
         self.close_error = close_error
         self.frame_on_close = frame_on_close  # a frame that arrives in the tick the server closes
         self.sends_block_after = sends_block_after  # a client that stops reading
+        self.on_close = on_close  # runs in the tick the server closes
         self.blocked = False
         self.sends = 0
         self.sent: list[Any] = []
@@ -219,6 +221,10 @@ class FakeSocket:
         pass
 
     async def send_json(self, data: Any) -> None:
+        from starlette.websockets import WebSocketState
+
+        if self.application_state != WebSocketState.CONNECTED:  # as Starlette's
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
         if self.sends_block_after is not None and self.sends >= self.sends_block_after:
             self.blocked = True
             await asyncio.Event().wait()  # the TCP window is full: the send never returns
@@ -243,6 +249,10 @@ class FakeSocket:
         if self.application_state != WebSocketState.CONNECTED:  # as Starlette's
             raise RuntimeError('Cannot call "send" once a close message has been sent.')
         self.application_state = WebSocketState.DISCONNECTED
+        if self.on_close is not None:
+            self.on_close()
+            for _ in range(10):  # Starlette awaits the close frame's send after the state change
+                await asyncio.sleep(0)
         if self.frame_on_close is not None:
             self.incoming.put_nowait(self.frame_on_close)
         if self.close_error is not None:
@@ -474,6 +484,29 @@ async def test_a_frame_decode_rejects_closes_with_1003_and_stops_the_actor():
         await actors.websocket(ws.socket(), lambda out: echo(out, stopped), strict)
         assert ws.closed == 1003
         await eventually(stopped.is_set)
+
+
+async def test_a_frame_told_in_the_tick_of_a_1003_close_is_not_an_error():
+    """The actor tells a frame in the tick decode's rejection closes the socket with 1003: it
+    has nowhere to go, and that is not the route's error."""
+    actors = Actors(Behaviors.ignore, "ws")
+    outs: list[ActorRef[Frame]] = []
+
+    def props(out: ActorRef[Frame]) -> Behavior[Said]:
+        outs.append(out)
+        return echo(out)
+
+    def strict(text: str) -> Said:
+        if not text:
+            raise ValueError("empty frame")
+        return Said(text)
+
+    async with actors.lifespan(FastAPI(exception_handlers=actors.exception_handlers)):
+        ws = FakeSocket(on_close=lambda: outs[0].tell({"late": "1"}))
+        ws.incoming.put_nowait("")
+        await asyncio.wait_for(actors.websocket(ws.socket(), props, strict), 1)
+        assert ws.closed == 1003
+        assert ws.sent == []
 
 
 async def test_a_client_that_stops_reading_is_closed_with_1008():

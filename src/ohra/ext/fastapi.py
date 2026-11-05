@@ -27,6 +27,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -261,6 +262,11 @@ def _flow[In, Out](
 
 
 # --- synced: pages on the server's clock ---------------------------------------------------------
+
+
+CLOCK_JS = Path(__file__).with_name("clock.js")
+"""The page side of ``synced``, for a route: ``app.get("/ohra/clock.js")(lambda:
+FileResponse(CLOCK_JS))``."""
 
 
 @dataclass(frozen=True)

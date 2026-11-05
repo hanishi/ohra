@@ -58,7 +58,7 @@ async with ActorTestKit(manual_time=True) as kit:
     await manual.time_passes(180.0)  # the whole game, at once
 ```
 
-The example's 34 tests play out game after game this way: misses, the clock running out, a watchdog serving again after a silent phone, a phone dropping mid-game and coming back with its lives, a ninth player turned away. They run in about five seconds, two of them a deliberate real-time wait, and give the same result every time. When the reviewer reported that the game might not end at 0:00 on a clock running slightly slow, the agent wrote that clock into a test, watched the game fail to end, fixed it, and watched it end.
+The example's 34 tests play out game after game this way: misses, the clock running out, a watchdog serving again after a silent phone, a phone dropping mid-game and coming back with its lives, a ninth player turned away. They run in about six seconds, two of them a deliberate real-time wait, and give the same result every time. When the reviewer reported that the game might not end at 0:00 on a clock running slightly slow, the agent wrote that clock into a test, watched the game fail to end, fixed it, and watched it end.
 
 For timing bugs, this is the difference between reasoning about them and checking them. People benefit from it too; for an agent, which can run tests far more easily than it can watch a screen, it decides what it can verify at all.
 

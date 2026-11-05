@@ -24,7 +24,7 @@ from fastapi import FastAPI, WebSocket  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 from ohra import ActorRef, ActorSystem, Behavior, Behaviors, PostStop, Signal  # noqa: E402
-from ohra.ext.fastapi import Actors  # noqa: E402
+from ohra.ext.fastapi import Actors, synced  # noqa: E402
 
 from .util import eventually  # noqa: E402
 
@@ -594,3 +594,61 @@ async def test_a_rejected_frame_in_the_tick_the_server_closes_is_not_an_error():
         ws = FakeSocket(frame_on_close="")
         await actors.websocket(ws.socket(), talker({"n": "1"}), strict)
         assert ws.closed == 1000
+
+
+# --- synced: the server's clock for a page's pings -----------------------------------------------
+
+
+async def _synced_connection(
+    ws: FakeSocket, props: Callable[[ActorRef[Frame]], Behavior[Said]] = echo
+) -> None:
+    actors = Actors(Behaviors.ignore, "ws")
+    async with actors.lifespan(FastAPI(exception_handlers=actors.exception_handlers)):
+        await actors.websocket(ws.socket(), *synced(props, Said, clock=lambda: 42.0))
+
+
+async def test_synced_answers_a_ping_with_the_server_clock():
+    from fastapi import WebSocketDisconnect
+
+    ws = FakeSocket()
+    connection = asyncio.create_task(_synced_connection(ws))
+    ws.incoming.put_nowait('{"type": "ping", "c": 1.5}')
+    await eventually(lambda: ws.sent == [{"type": "pong", "c": 1.5, "s": 42.0}])
+    ws.incoming.put_nowait(WebSocketDisconnect(1000))
+    await connection
+
+
+async def test_synced_passes_other_frames_to_the_apps_decode():
+    from fastapi import WebSocketDisconnect
+
+    ws = FakeSocket()
+    connection = asyncio.create_task(_synced_connection(ws))
+    ws.incoming.put_nowait("hi")  # not JSON: still the app's
+    ws.incoming.put_nowait('{"type": "x"}')
+    await eventually(lambda: ws.sent == [{"echo": "hi"}, {"echo": '{"type": "x"}'}])
+    ws.incoming.put_nowait(WebSocketDisconnect(1000))
+    await connection
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        '{"type": "ping"}',
+        '{"type": "ping", "c": "1"}',
+        '{"type": "ping", "c": NaN}',
+        '{"type": "ping", "c": Infinity}',
+        '{"type": "ping", "c": true}',
+    ],
+)
+async def test_synced_closes_on_a_bad_ping(frame: str):
+    ws = FakeSocket()
+    ws.incoming.put_nowait(frame)
+    await _synced_connection(ws)
+    assert ws.closed == 1003
+
+
+async def test_synced_closes_the_socket_when_the_apps_actor_stops():
+    ws = FakeSocket()
+    await _synced_connection(ws, talker({"bye": "1"}))
+    assert ws.sent == [{"bye": "1"}]
+    assert ws.closed == 1000

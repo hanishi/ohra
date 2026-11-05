@@ -10,17 +10,23 @@ dependency.
 
 With ``actors.exception_handlers``, an ``AskTimeoutError`` escaping a route becomes a 504.
 ``actors.websocket`` gives a WebSocket route an actor per connection, as Play's
-``ActorFlow.actorRef`` does: the route owns the socket and the actor only gets ``out``. Requires
-the ``web`` extra.
+``ActorFlow.actorRef`` does: the route owns the socket and the actor only gets ``out``.
+``synced`` puts a connection's page on the server's clock, so pages run a message at the same
+moment: it answers the page's clock pings, and ``clock.js`` (``CLOCK_JS``) is its page side.
+Requires the ``web`` extra.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import math
+import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, cast
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -252,3 +258,64 @@ def _flow[In, Out](
         return Behaviors.receive_message(on_message).receive_signal(on_signal)
 
     return Behaviors.setup(setup)
+
+
+# --- synced: pages on the server's clock ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Ping:
+    """A page's clock ping: ``c`` is the page's clock when it sent it."""
+
+    c: float
+
+
+def synced[In, Out](
+    props: Callable[[ActorRef[Out]], Behavior[In]],
+    decode: Callable[[str], In],
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[
+    Callable[[ActorRef[Out | dict[str, Any]]], Behavior[In | Ping]],
+    Callable[[str], In | Ping],
+]:
+    """Put a connection's page on the server's clock, for ``actors.websocket(ws, *synced(props,
+    decode))``. A ``{"type": "ping", "c": n}`` frame is answered with ``{"type": "pong", "c": n,
+    "s": clock()}``; every other frame goes to ``decode`` and on to ``props(out)``'s actor, as
+    without the wrapper. The app stamps times with the same ``clock`` and the page, with
+    ``clock.js`` (``CLOCK_JS``), runs them at that moment on its own clock. A ping without a
+    finite number ``c`` closes the socket with 1003."""
+
+    def synced_decode(text: str) -> In | Ping:
+        try:
+            doc: object = json.loads(text)
+        except ValueError:
+            return decode(text)
+        if not isinstance(doc, dict) or cast(dict[str, object], doc).get("type") != "ping":
+            return decode(text)
+        c = cast(dict[str, object], doc).get("c")
+        if isinstance(c, bool) or not isinstance(c, int | float) or not math.isfinite(c):
+            raise ValueError(f"a ping needs a finite number c, not {c!r}")
+        return Ping(float(c))
+
+    def synced_props(out: ActorRef[Out | dict[str, Any]]) -> Behavior[In | Ping]:
+        def setup(ctx: ActorContext[In | Ping]) -> Behavior[In | Ping]:
+            actor = ctx.spawn(props(cast(ActorRef[Out], out)), "synced")
+            ctx.watch(actor)
+
+            def on_message(msg: In | Ping) -> Behavior[In | Ping]:
+                if isinstance(msg, Ping):
+                    out.tell({"type": "pong", "c": msg.c, "s": clock()})
+                else:
+                    actor.tell(msg)
+                return Behaviors.same
+
+            def on_signal(_ctx: ActorContext[In | Ping], sig: Signal) -> Behavior[In | Ping]:
+                if isinstance(sig, Terminated):
+                    return Behaviors.stopped()
+                return Behaviors.unhandled
+
+            return Behaviors.receive_message(on_message).receive_signal(on_signal)
+
+        return Behaviors.setup(setup)
+
+    return synced_props, synced_decode

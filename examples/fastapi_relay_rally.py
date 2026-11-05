@@ -14,6 +14,7 @@ connection, relaying between it and the page. The phones are trusted for their h
 it is a party game.
 """
 
+import itertools
 import json
 import math
 import random
@@ -180,7 +181,8 @@ def rally(
         players: dict[str, _Player] = {}
         walls: list[ActorRef[Frame]] = []
         game = _Game()
-        serials = iter(range(1, 1 << 62))
+        serials = itertools.count(1)
+        joins = itertools.count()  # colours and default names, never reused in a session
         timers = ctx.timers
 
         def state() -> Frame:
@@ -240,12 +242,12 @@ def rally(
                 return puck
             return None
 
-        def ended() -> bool:
+        def ended(time_up: bool = False) -> bool:
             """Ends the game when its time is up or one player is left; True if it did."""
             if game.phase != "playing":
                 return False
             assert game.ends_at is not None
-            if clock() < game.ends_at and len(playing()) > 1:
+            if not time_up and clock() < game.ends_at and len(playing()) > 1:
                 return False
             # ponytail: a disconnected player cannot win, so a walkout leaves the one who stayed
             here = [p for p in players.values() if p.in_game and p.ref is not None]
@@ -263,8 +265,9 @@ def rally(
                 case Join(id, name, ref):
                     p = players.get(id)
                     if p is None:
-                        name = name.strip()[:NAME_MAX] or f"P{len(players) + 1}"
-                        p = _Player(id, name, COLORS[len(players) % len(COLORS)], ref)
+                        n = next(joins)
+                        name = name.strip()[:NAME_MAX] or f"P{n + 1}"
+                        p = _Player(id, name, COLORS[n % len(COLORS)], ref)
                         players[id] = p
                     p.ref = ref  # a reconnect, or a second tab, takes over
                     ctx.watch_with(ref, _Gone(id, ref))
@@ -296,6 +299,7 @@ def rally(
                     to = rand.choice(others)
                     x = min(max(x, 0.0), 1.0)
                     angle = min(max(angle, -MAX_ANGLE), MAX_ANGLE)
+                    t = max(t, clock())  # a late report (a phone that stalled): land in the future
                     send_puck(to, t + FLIGHT_S, x, angle, now.speed * SPEEDUP)
                     for w in walls:
                         w.tell(
@@ -316,7 +320,7 @@ def rally(
                     if game.puck is not None and game.puck.serial == serial:
                         serve()  # the phone went quiet: no life lost
                 case _TimeUp():
-                    ended()
+                    ended(time_up=True)  # the timer, not the clock: they may disagree a little
                 case _ToLobby():
                     for id in [id for id, p in players.items() if p.ref is None]:
                         del players[id]

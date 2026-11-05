@@ -42,7 +42,10 @@
   crt();
 
   const store = (() => { try { return sessionStorage; } catch { return null; } })();
-  const id = store?.getItem("rr-id") ?? crypto.randomUUID();
+  // getRandomValues, as UUID helpers need https and the join URL is plain http on the LAN
+  const newId = () => [...crypto.getRandomValues(new Uint8Array(16))]
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+  const id = store?.getItem("rr-id") ?? newId();
   store?.setItem("rr-id", id);
   nameInput.value = store?.getItem("rr-name") ?? "";
 
@@ -170,9 +173,10 @@
     if (state.phase === "lobby") return lobby(w, h, px, color);
     if (state.phase === "over") return over(w, h, px, color);
 
+    const mine = state.players.find((p) => p.id === me?.id);
+    if (!mine?.in_game) return nextGame(w, h, px, color);
     const now = conn.now();
     step(now);
-    const mine = state.players.find((p) => p.id === me?.id);
     const { ox, oy } = view;
 
     glow(ctx, color, 8); // the side walls
@@ -222,6 +226,14 @@
     });
     if (Math.floor(performance.now() / 600) % 2 === 0) {
       text(ctx, "WAITING FOR START", w / 2, h * 0.88, px, GREEN, "center");
+    }
+  }
+
+  function nextGame(w, h, px, color) { // joined during a game: you are in the next one
+    text(ctx, me?.name ?? "", w / 2, h * 0.3, px * 2, color, "center");
+    text(ctx, "GAME ON", w / 2, h * 0.45, px * 2, GREEN, "center");
+    if (Math.floor(performance.now() / 600) % 2 === 0) {
+      text(ctx, "YOU PLAY NEXT GAME", w / 2, h * 0.6, px, GREEN, "center");
     }
   }
 

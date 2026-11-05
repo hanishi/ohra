@@ -240,6 +240,10 @@ def _flow[In, Out](
     """Play's wrapper actor: spawns the connection's actor, forwards frames to it, and stops it
     behind those frames (Play's PoisonPill) when the connection is over."""
 
+    # synced(): this wrapper answers the page's pings itself, so the app's actor stays its only
+    # child and is still stopped behind the frames it has
+    clock = _clock_of(props)
+
     def setup(ctx: ActorContext[In | _Close]) -> Behavior[In | _Close]:
         actor = ctx.spawn(props(out), "flowActor")
         ctx.watch(actor)
@@ -247,6 +251,8 @@ def _flow[In, Out](
         def on_message(msg: In | _Close) -> Behavior[In | _Close]:
             if isinstance(msg, _Close):
                 ctx.stop(actor, after_pending=True)
+            elif clock is not None and isinstance(msg, Ping):
+                out.tell(cast(Out, {"type": "pong", "c": msg.c, "s": clock()}))
             else:
                 actor.tell(msg)
             return Behaviors.same
@@ -266,7 +272,9 @@ def _flow[In, Out](
 
 CLOCK_JS = Path(__file__).with_name("clock.js")
 """The page side of ``synced``, for a route: ``app.get("/ohra/clock.js")(lambda:
-FileResponse(CLOCK_JS))``."""
+FileResponse(CLOCK_JS, media_type="text/javascript"))``. Name the type: guessed from the
+extension, it can be text/plain (Windows reads it from the registry), which a module import
+refuses."""
 
 
 @dataclass(frozen=True)
@@ -274,6 +282,24 @@ class Ping:
     """A page's clock ping: ``c`` is the page's clock when it sent it."""
 
     c: float
+
+
+@dataclass(frozen=True)
+class _SyncedProps[In, Out]:
+    """The app's props, marked with the clock ``_flow`` answers pings with."""
+
+    props: Callable[[ActorRef[Out]], Behavior[In]]
+    clock: Callable[[], float]
+
+    def __call__(self, out: ActorRef[Out | dict[str, Any]]) -> Behavior[In | Ping]:
+        # the app's actor never gets a Ping: _flow answers it
+        return cast(Behavior[In | Ping], self.props(cast(ActorRef[Out], out)))
+
+
+def _clock_of(props: object) -> Callable[[], float] | None:
+    if isinstance(props, _SyncedProps):
+        return cast(_SyncedProps[Any, Any], props).clock
+    return None
 
 
 def synced[In, Out](
@@ -303,25 +329,4 @@ def synced[In, Out](
             raise ValueError(f"a ping needs a finite number c, not {c!r}")
         return Ping(float(c))
 
-    def synced_props(out: ActorRef[Out | dict[str, Any]]) -> Behavior[In | Ping]:
-        def setup(ctx: ActorContext[In | Ping]) -> Behavior[In | Ping]:
-            actor = ctx.spawn(props(cast(ActorRef[Out], out)), "synced")
-            ctx.watch(actor)
-
-            def on_message(msg: In | Ping) -> Behavior[In | Ping]:
-                if isinstance(msg, Ping):
-                    out.tell({"type": "pong", "c": msg.c, "s": clock()})
-                else:
-                    actor.tell(msg)
-                return Behaviors.same
-
-            def on_signal(_ctx: ActorContext[In | Ping], sig: Signal) -> Behavior[In | Ping]:
-                if isinstance(sig, Terminated):
-                    return Behaviors.stopped()
-                return Behaviors.unhandled
-
-            return Behaviors.receive_message(on_message).receive_signal(on_signal)
-
-        return Behaviors.setup(setup)
-
-    return synced_props, synced_decode
+    return _SyncedProps[In, Out](props, clock), synced_decode

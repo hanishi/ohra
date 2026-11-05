@@ -215,7 +215,7 @@ from fastapi.responses import FileResponse
 
 from ohra.ext.fastapi import CLOCK_JS, synced
 
-app.get("/ohra/clock.js")(lambda: FileResponse(CLOCK_JS))
+app.get("/ohra/clock.js")(lambda: FileResponse(CLOCK_JS, media_type="text/javascript"))
 
 
 @app.websocket("/ws")

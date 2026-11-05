@@ -652,3 +652,29 @@ async def test_synced_closes_the_socket_when_the_apps_actor_stops():
     await _synced_connection(ws, talker({"bye": "1"}))
     assert ws.sent == [{"bye": "1"}]
     assert ws.closed == 1000
+
+
+async def test_synced_handles_the_frames_its_actor_has_when_the_client_closes():
+    from fastapi import WebSocketDisconnect
+
+    actors = Actors(Behaviors.ignore, "ws")
+    gate = asyncio.Event()
+    got: list[str] = []
+
+    def slow(_out: ActorRef[Frame]) -> Behavior[Said]:
+        @Behaviors.receive_message
+        async def on_message(msg: Said) -> Behavior[Said]:
+            await gate.wait()
+            got.append(msg.text)
+            return Behaviors.same
+
+        return on_message
+
+    async with actors.lifespan(FastAPI(exception_handlers=actors.exception_handlers)):
+        ws = FakeSocket()
+        for frame in ("1", "2", "3"):
+            ws.incoming.put_nowait(frame)
+        ws.incoming.put_nowait(WebSocketDisconnect(1000))
+        await actors.websocket(ws.socket(), *synced(slow, Said))
+        gate.set()
+        await eventually(lambda: got == ["1", "2", "3"])

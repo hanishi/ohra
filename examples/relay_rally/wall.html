@@ -16,7 +16,7 @@
   button[hidden] { display: none; }
 </style>
 <!-- the join code; the only third-party script in the example -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script async src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 </head>
 <body>
 <canvas id="wall"></canvas>
@@ -35,15 +35,18 @@
   let qr = null; // the join code's modules, rows of booleans
   let joinUrl = "";
 
-  fetch("/join").then((r) => r.json()).then(({ url }) => {
-    joinUrl = url;
-    if (typeof qrcode !== "function") return; // offline: the URL alone still works
+  fetch("/join").then((r) => r.json()).then(({ url }) => (joinUrl = url));
+
+  // The code, once both the URL and the library are here. The library loads async: offline it
+  // never comes, and the URL alone still works.
+  function makeQr() {
+    if (qr || !joinUrl || typeof qrcode !== "function") return;
     const code = qrcode(0, "M");
-    code.addData(url);
+    code.addData(joinUrl);
     code.make();
     const n = code.getModuleCount();
     qr = Array.from({ length: n }, (_, r) => Array.from({ length: n }, (_, c) => code.isDark(r, c)));
-  });
+  }
 
   const conn = connect("/ws/wall", (m) => {
     if (m.type === "state") {
@@ -86,6 +89,7 @@
   }
 
   function lobby(w, h, px) {
+    makeQr();
     text(ctx, "RELAY RALLY", w / 2, h * 0.08, px * 3, GREEN, "center");
     const size = Math.min(w * 0.35, h * 0.5);
     if (qr) {

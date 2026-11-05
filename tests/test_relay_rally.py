@@ -432,3 +432,62 @@ def test_the_join_url_falls_back_to_localhost(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(socket, "socket", broken)
     assert rr.lan_url(8000) == "http://127.0.0.1:8000/play"
+
+
+# --- review fixes -------------------------------------------------------------------------------
+
+
+async def test_a_late_out_lands_in_the_future():
+    async with game() as g:
+        i, incoming = await g.start()
+        await g.settle(5.0)
+        g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now() - 4.0, 0.5, 0.0))
+        _, passed = await g.puck()
+        assert passed["t"] == pytest.approx(g.now() + 0.6)
+        (pass_,) = of(await drain(g.wall), "pass")
+        assert pass_["t0"] == pytest.approx(g.now())
+
+
+async def test_time_up_ends_the_game_on_a_clock_that_runs_a_little_slow():
+    async with ActorTestKit(manual_time=True) as kit:
+        manual = ManualTime(kit.system)
+        rally = kit.spawn(
+            rr.rally(clock=lambda: manual.scheduler.current_time * 0.999, rng=random.Random(1))
+        )
+        wall: TestProbe[Frame] = kit.create_test_probe()
+        rally.tell(rr.WatchWall(wall.ref))
+        g = Game(kit, manual, rally, wall, [])
+        g.phones = [g.join("a", "A"), g.join("b", "B")]
+        await g.start()
+        await g.settle(180.0)
+        assert (await g.state())["phase"] == "over"
+
+
+async def test_a_new_player_never_shares_a_color_or_a_name():
+    async with game(players=0) as g:
+        g.phones = [g.join("a", "A"), g.join("b", "B"), g.join("c", " ")]
+        await g.settle()
+        g.phones[1].stop()
+        await g.settle()
+        await g.start()  # drops b, who is gone
+        g.join("d", " ")
+        players = (await g.state())["players"]
+        assert len({p["color"] for p in players}) == len(players)
+        assert len({p["name"] for p in players}) == len(players)
+
+
+def test_the_wall_does_not_wait_for_the_qr_library():
+    page = (Path(rr.__file__).parent / "relay_rally" / "wall.html").read_text()
+    (tag,) = [line for line in page.splitlines() if "qrcode.min.js" in line]
+    assert " async" in tag  # defer would still hold the module script back behind it
+
+
+def test_the_phone_uses_no_api_that_needs_https():
+    page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
+    assert "randomUUID" not in page  # the join URL is plain http on the LAN
+
+
+def test_the_books_clock_js_route_sets_its_media_type():
+    book = Path(__file__).resolve().parents[1] / "docs" / "book" / "09-fastapi.md"
+    (line,) = [x for x in book.read_text().splitlines() if "FileResponse(CLOCK_JS" in x]
+    assert 'media_type="text/javascript"' in line

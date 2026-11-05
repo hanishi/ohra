@@ -206,6 +206,44 @@ async def chat(ws: WebSocket, system: ActorSystem[Say] = actors.depends()) -> No
 > - `actors.websocket` follows Play Framework's `ActorFlow.actorRef`, which builds the same thing from Pekko streams: a wrapper actor that spawns yours and watches it, a `Source.actorRef` for `out`, and a `Sink.actorRef` for the frames that come in. Pekko itself has no counterpart.
 > - `ActorSource.actorRef` comes from Pekko's stream-typed module, as does the rest of [chapter 13](13-streams.md). [Appendix B](appendix-deviations.md) lists where it differs.
 
+## Devices on one clock
+
+Some apps need several browsers to act at the same moment: a row of screens that one picture crosses, phones that flash together, a quiz that reveals on every device at once. Sending each one a message "now" doesn't do it, since every socket has its own delay. The server says *when* instead, on its own clock, and each page works out what that means on its clock. `synced` is the server half:
+
+```python
+from fastapi.responses import FileResponse
+
+from ohra.ext.fastapi import CLOCK_JS, synced
+
+app.get("/ohra/clock.js")(lambda: FileResponse(CLOCK_JS))
+
+
+@app.websocket("/ws")
+async def screen(ws: WebSocket) -> None:
+    await actors.websocket(ws, *synced(echo, Said))  # time.monotonic is the clock by default
+```
+
+- **`synced(props, decode, clock=time.monotonic)`** returns the `props` and `decode` that `actors.websocket` takes. A `{"type": "ping", "c": n}` frame is answered with `{"type": "pong", "c": n, "s": clock()}` and never reaches your actor; every other frame goes to your `decode` and on to your actor, as without it. A ping whose `c` is not a finite number closes the socket with 1003.
+- **Your actor stamps times with the same `clock`**, as `{"type": "show", "t": clock() + 0.5}`: half a second from now, on every page. `synced` never reads `t`; it is a convention between your app and the page.
+- **The server keeps nothing per connection.** The page holds what it receives until it knows its offset, so a slow page can't make frames pile up on the server.
+
+`clock.js` is the page half, an ES module shipped in the wheel:
+
+```js
+import { connect } from "/ohra/clock.js";
+const conn = connect("/ws", (msg) => conn.at(msg.t, () => show(msg)));
+conn.send({ type: "hello" }); // JSON; dropped while disconnected
+conn.now();                   // the server's clock now, in seconds
+conn.cancelAll();             // drop every pending at()
+```
+
+- **The offset** comes from the ping with the shortest round trip among the last six, one every 10 s: the server's time minus the page's time halfway through it. Not the fastest of all time, because a device's clock drifts against the server's.
+- **Messages wait for the first pong** of each connection, and come in order right after it. It reconnects on its own, with backoff, and syncs again first.
+- **`at(t, fn)`** runs `fn` at server time `t`, at once if that has passed, or if it is more than 5 s away: a `t` that far ahead means the offset is wrong, and acting beats waiting forever.
+- **Draw motion from events, not streams.** Send where something starts, its velocity and its `t0`; every page draws it each frame from `conn.now()`. Nothing is streamed, and every page agrees on where it is.
+
+`examples/fastapi_relay_rally.py` is a game built this way: phones are the courts, a big screen is the scoreboard, and the puck is passed from phone to phone, dropping in on the next one at the moment the server named.
+
 ---
 
 [← Management and Kubernetes](08-management-and-kubernetes.md) · [Contents](README.md) · [numpy and shared memory →](10-numpy-and-shared-memory.md)

@@ -32,6 +32,8 @@
 
   let state = null;
   let passes = []; // {from, to, t0, t1}, kept a little after they land
+  let misses = []; // {id, heart, at}: a heart just lost, on the page clock (ms)
+  const MISS_MS = 1200;
   let qr = null; // the join code's modules, rows of booleans
   let joinUrl = "";
 
@@ -50,6 +52,14 @@
 
   const conn = connect("/ws/wall", (m) => {
     if (m.type === "state") {
+      // a heart fewer than last time is a miss: flash the name, drop the heart
+      const before = new Map((state?.phase === "playing" ? state.players : []).map((p) => [p.id, p.lives]));
+      for (const p of m.phase === "playing" ? m.players : []) {
+        if (before.has(p.id) && p.lives < before.get(p.id)) {
+          misses.push({ id: p.id, heart: p.lives, at: performance.now() });
+          blip(98, 0.5, 0.2);
+        }
+      }
       state = m;
       if (m.phase !== "playing") passes = [];
       const here = m.players.filter((p) => p.connected).length;
@@ -143,11 +153,23 @@
       ctx.globalAlpha = 1;
     }
 
+    const t = performance.now();
+    misses = misses.filter((m) => t - m.at < MISS_MS);
     for (const { p, x, y } of at.values()) {
       const color = p.connected ? p.color : DIM;
+      const missed = misses.find((m) => m.id === p.id);
+      const flashing = missed && Math.floor((t - missed.at) / 90) % 2 === 0;
       ctx.globalAlpha = p.lives > 0 ? 1 : 0.4;
-      text(ctx, p.name, x, y - 7 * px, px * 1.5, color, "center");
+      text(ctx, p.name, x, y - 7 * px, px * 1.5, flashing ? "#ffffff" : color, "center");
       for (let i = 0; i < 5; i++) heart(ctx, x - 17 * px + i * 7 * px, y + 2 * px, px, color, i < p.lives);
+      ctx.globalAlpha = 1;
+    }
+    for (const m of misses) { // the lost heart falls off the wall and fades
+      const seat = at.get(m.id);
+      if (!seat) continue;
+      const k = (t - m.at) / MISS_MS;
+      ctx.globalAlpha = 1 - k;
+      heart(ctx, seat.x - 17 * px + m.heart * 7 * px, seat.y + 2 * px + k * k * h * 0.5, px * 1.5, seat.p.color);
       ctx.globalAlpha = 1;
     }
   }

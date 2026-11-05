@@ -85,6 +85,10 @@
         puck = { serial: m.serial, t0: m.t, x0: m.x * W, vx: m.vx, vy: m.vy,
           speed: Math.hypot(m.vx, m.vy), up: null, done: false, bounces: 0 };
         trail = [];
+        // heads up: a buzz and a rising chime now, then a blip as it drops in
+        navigator.vibrate?.([40, 60, 40]);
+        blip(523, 0.08, 0.2);
+        setTimeout(() => blip(784, 0.12, 0.2), 110);
         conn.at(m.t, () => blip(880, 0.05));
         break;
     }
@@ -202,6 +206,10 @@
     ctx.fillRect(ox + (paddle - PADDLE_HALF) * s, oy + PADDLE_Y * s, 2 * PADDLE_HALF * s, 0.35 * s);
 
     const p = at(now);
+    ctx.save(); // the puck stays inside the court, never over the hearts and the clock
+    ctx.beginPath();
+    ctx.rect(ox, oy, W * s, H * s);
+    ctx.clip();
     if (p && !(puck.done && !puck.up)) { // the puck, with a short trail
       trail = [...trail, p].slice(-6);
       trail.forEach((q, i) => {
@@ -211,9 +219,15 @@
       ctx.globalAlpha = 1;
       glow(ctx, "#ffffff", 20);
       ctx.fillRect(ox + (p.x - PUCK / 2) * s, oy + (p.y - PUCK / 2) * s, PUCK * s, PUCK * s);
-    } else if (puck && now < puck.t0 && Math.floor(now * 4) % 2 === 0) {
-      text(ctx, "V", ox + puck.x0 * s, oy + 0.4 * s, px, color, "center"); // it drops in here
+    } else if (puck && now < puck.t0) { // incoming: a bar pulses over where it drops in
+      const pulse = 0.5 + 0.5 * Math.sin(now * 18);
+      ctx.globalAlpha = 0.35 + 0.65 * pulse;
+      glow(ctx, color, 24);
+      ctx.fillRect(ox + (puck.x0 - 1.2) * s, oy, 2.4 * s, 0.3 * s);
+      ctx.globalAlpha = 1;
+      text(ctx, "V", ox + puck.x0 * s, oy + 0.6 * s, px, color, "center");
     }
+    ctx.restore();
 
     if (mine && mine.lives === 0) text(ctx, "OUT", w / 2, oy + (H * s) / 2, px * 2, color, "center");
     if (performance.now() < flash) {

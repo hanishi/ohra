@@ -461,6 +461,10 @@ def make_app(
     async def phone_page() -> FileResponse:
         return FileResponse(PAGES / "phone.html")
 
+    @app.get("/arcade.js")
+    async def arcade_js() -> FileResponse:
+        return FileResponse(PAGES / "arcade.js", media_type="text/javascript")
+
     @app.get("/ohra/clock.js")
     async def clock_js() -> FileResponse:
         return FileResponse(CLOCK_JS, media_type="text/javascript")

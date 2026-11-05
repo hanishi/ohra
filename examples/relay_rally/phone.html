@@ -1,2 +1,239 @@
 <!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Relay Rally</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none;
+    overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  form { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 18px; font: 700 18px ui-monospace, monospace; color: #39ff6a;
+    text-shadow: 0 0 8px #39ff6a; z-index: 5; background: #000; }
+  form input, form button { font: inherit; color: #39ff6a; background: #000;
+    border: 2px solid #39ff6a; padding: 10px 14px; text-transform: uppercase;
+    box-shadow: 0 0 10px #39ff6a55; text-align: center; }
+  form input { width: 12ch; }
+  form button { cursor: pointer; }
+  form[hidden] { display: none; }
+</style>
+</head>
+<body>
+<form id="join">
+  <div>RELAY RALLY</div>
+  <label for="name">YOUR NAME</label>
+  <input id="name" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false">
+  <button>JOIN</button>
+</form>
+<canvas id="court"></canvas>
+<script type="module">
+  import { connect } from "/ohra/clock.js";
+  import { blip, crt, fit, glow, heart, text, unlock, DIM, GREEN } from "/arcade.js";
+
+  // The court, in court units: 9 wide, 16 tall, the paddle near the bottom.
+  const W = 9, H = 16, PADDLE_Y = H - 1.4, PADDLE_HALF = 0.9, PUCK = 0.45;
+  const MAX_ANGLE = Math.PI / 3; // 60 degrees off vertical, at the paddle's edge
+
+  const canvas = document.getElementById("court");
+  const ctx = canvas.getContext("2d");
+  const form = document.getElementById("join");
+  const nameInput = document.getElementById("name");
+  crt();
+
+  const store = (() => { try { return sessionStorage; } catch { return null; } })();
+  const id = store?.getItem("rr-id") ?? crypto.randomUUID();
+  store?.setItem("rr-id", id);
+  nameInput.value = store?.getItem("rr-name") ?? "";
+
+  let conn = null;
+  let me = null; // {id, name, color}
+  let state = null; // the last state frame
+  let puck = null; // {serial, t0, x0, vx, vy, speed, up, done, bounces}
+  let paddle = W / 2;
+  let flash = 0; // until when the miss flash shows, on the page clock
+  let trail = [];
+  let view = null; // court units to canvas pixels: {s, ox, oy}
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    unlock(); // a tap: browsers allow audio from here on
+    const name = nameInput.value.trim().slice(0, 12);
+    store?.setItem("rr-name", name);
+    form.hidden = true;
+    conn = connect(`/ws/player?${new URLSearchParams({ id, name })}`, onMessage);
+  });
+
+  function onMessage(m) {
+    switch (m.type) {
+      case "you":
+        me = m;
+        break;
+      case "state":
+        state = m;
+        if (m.phase !== "playing") puck = null;
+        break;
+      case "incoming":
+        puck = { serial: m.serial, t0: m.t, x0: m.x * W, vx: m.vx, vy: m.vy,
+          speed: Math.hypot(m.vx, m.vy), up: null, done: false, bounces: 0 };
+        trail = [];
+        conn.at(m.t, () => blip(880, 0.05));
+        break;
+    }
+  }
+
+  // The puck bounces off the side walls: fold a straight line into [0, W]. k is how many
+  // times it bounced; an odd k means it is going the other way now.
+  function fold(x) {
+    const k = Math.floor(x / W);
+    const u = x - k * W;
+    return { x: k % 2 === 0 ? u : W - u, k };
+  }
+
+  // Where the puck is at server time t, in court units, or null before it drops in.
+  function at(t) {
+    if (!puck || t < puck.t0) return null;
+    if (puck.up) {
+      const dt = t - puck.up.t1;
+      return { x: fold(puck.up.x1 + puck.up.vx * dt).x, y: PADDLE_Y + puck.up.vy * dt };
+    }
+    const dt = t - puck.t0;
+    return { x: fold(puck.x0 + puck.vx * dt).x, y: puck.vy * dt };
+  }
+
+  function bounced(k) {
+    if (k !== puck.bounces) {
+      puck.bounces = k;
+      blip(440, 0.03, 0.08);
+    }
+  }
+
+  // Hit, miss and out, each judged at the exact moment it happens, not at the frame's time.
+  function step(now) {
+    if (!puck || puck.done || now < puck.t0) return;
+    if (!puck.up) {
+      bounced(fold(puck.x0 + puck.vx * (now - puck.t0)).k);
+      const tc = puck.t0 + PADDLE_Y / puck.vy; // when it reaches the paddle's line
+      if (now < tc) return;
+      const x = fold(puck.x0 + puck.vx * (tc - puck.t0)).x;
+      if (Math.abs(x - paddle) > PADDLE_HALF + PUCK / 2) {
+        puck.done = true;
+        conn.send({ type: "miss", serial: puck.serial });
+        flash = performance.now() + 400;
+        blip(110, 0.4, 0.2);
+        return;
+      }
+      // where it meets the paddle sets the angle: straight up in the middle, 60 at the edges
+      const angle = Math.max(-1, Math.min(1, (x - paddle) / PADDLE_HALF)) * MAX_ANGLE;
+      puck.up = { t1: tc, x1: x, vx: puck.speed * Math.sin(angle), vy: -puck.speed * Math.cos(angle) };
+      puck.bounces = 0;
+      blip(660, 0.05);
+      navigator.vibrate?.(15);
+      return;
+    }
+    const up = puck.up;
+    bounced(fold(up.x1 + up.vx * (now - up.t1)).k);
+    const te = up.t1 + PADDLE_Y / -up.vy; // when it leaves through the top
+    if (now < te) return;
+    const exit = fold(up.x1 + up.vx * (te - up.t1));
+    const turned = exit.k % 2 === 0 ? 1 : -1;
+    const angle = turned * Math.sign(up.vx) * Math.asin(Math.min(1, Math.abs(up.vx) / puck.speed));
+    puck.done = true;
+    conn.send({ type: "out", serial: puck.serial, t: te, x: exit.x / W, angle });
+  }
+
+  // --- the paddle follows the finger, here on the phone: no round trip -------------------------
+
+  function pointer(e) {
+    if (!view) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+    paddle = Math.max(PADDLE_HALF, Math.min(W - PADDLE_HALF, (px - view.ox) / view.s));
+  }
+  canvas.addEventListener("pointermove", pointer);
+  canvas.addEventListener("pointerdown", pointer);
+
+  // --- drawing ---------------------------------------------------------------------------------
+
+  function frame() {
+    requestAnimationFrame(frame);
+    const { w, h } = fit(canvas);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+    if (!conn) return;
+    const s = Math.min(w / W, h / (H + 2)); // room for the hearts and the clock above the court
+    view = { s, ox: (w - W * s) / 2, oy: (h - (H + 2) * s) / 2 + 2 * s };
+    const color = me?.color ?? GREEN;
+    const px = Math.max(2, Math.round(s / 6));
+    if (!state) return text(ctx, "CONNECTING", w / 2, h / 2, px, color, "center");
+    if (state.phase === "lobby") return lobby(w, h, px, color);
+    if (state.phase === "over") return over(w, h, px, color);
+
+    const now = conn.now();
+    step(now);
+    const mine = state.players.find((p) => p.id === me?.id);
+    const { ox, oy } = view;
+
+    glow(ctx, color, 8); // the side walls
+    ctx.globalAlpha = 0.6;
+    ctx.fillRect(ox - px, oy, px, H * s);
+    ctx.fillRect(ox + W * s, oy, px, H * s);
+    ctx.globalAlpha = 1;
+
+    for (let i = 0; i < 5; i++) {
+      heart(ctx, ox + i * 7 * px, oy - 1.6 * s, px, color, i < (mine?.lives ?? 0));
+    }
+    const left = Math.max(0, Math.ceil(state.ends_at - now));
+    const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    text(ctx, clock, ox + W * s, oy - 1.6 * s, px, color, "right");
+
+    glow(ctx, color, 16); // the paddle
+    ctx.fillRect(ox + (paddle - PADDLE_HALF) * s, oy + PADDLE_Y * s, 2 * PADDLE_HALF * s, 0.35 * s);
+
+    const p = at(now);
+    if (p && !(puck.done && !puck.up)) { // the puck, with a short trail
+      trail = [...trail, p].slice(-6);
+      trail.forEach((q, i) => {
+        ctx.globalAlpha = ((i + 1) / trail.length) * 0.5;
+        ctx.fillRect(ox + (q.x - PUCK / 2) * s, oy + (q.y - PUCK / 2) * s, PUCK * s, PUCK * s);
+      });
+      ctx.globalAlpha = 1;
+      glow(ctx, "#ffffff", 20);
+      ctx.fillRect(ox + (p.x - PUCK / 2) * s, oy + (p.y - PUCK / 2) * s, PUCK * s, PUCK * s);
+    } else if (puck && now < puck.t0 && Math.floor(now * 4) % 2 === 0) {
+      text(ctx, "V", ox + puck.x0 * s, oy + 0.4 * s, px, color, "center"); // it drops in here
+    }
+
+    if (mine && mine.lives === 0) text(ctx, "OUT", w / 2, oy + (H * s) / 2, px * 2, color, "center");
+    if (performance.now() < flash) {
+      ctx.globalAlpha = 0.25;
+      glow(ctx, color, 0);
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function lobby(w, h, px, color) {
+    text(ctx, "RELAY RALLY", w / 2, h * 0.18, px * 2, GREEN, "center");
+    text(ctx, me?.name ?? "", w / 2, h * 0.3, px * 2, color, "center");
+    state.players.forEach((p, i) => {
+      text(ctx, p.name, w / 2, h * 0.42 + i * 8 * px, px, p.connected ? p.color : DIM, "center");
+    });
+    if (Math.floor(performance.now() / 600) % 2 === 0) {
+      text(ctx, "WAITING FOR START", w / 2, h * 0.88, px, GREEN, "center");
+    }
+  }
+
+  function over(w, h, px, color) {
+    const won = state.winners.includes(me?.id);
+    text(ctx, won ? "YOU WIN!" : "GAME OVER", w / 2, h * 0.3, px * 2, won ? color : GREEN, "center");
+    state.players.filter((p) => state.winners.includes(p.id)).forEach((p, i) => {
+      text(ctx, p.name, w / 2, h * 0.45 + i * 8 * px, px * 1.5, p.color, "center");
+    });
+  }
+
+  requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -417,6 +417,9 @@ def test_the_pages_and_clock_js_are_served():
         assert "<!doctype html>" in client.get("/wall").text.lower()
         assert "<!doctype html>" in client.get("/play").text.lower()
         assert "export function connect" in client.get("/ohra/clock.js").text
+        arcade = client.get("/arcade.js")
+        assert "export function text" in arcade.text
+        assert arcade.headers["content-type"].startswith("text/javascript")
         url = client.get("/join").json()["url"]
         assert url.startswith("http://") and url.endswith(":80/play")
 

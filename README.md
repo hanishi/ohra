@@ -131,6 +131,10 @@ The `testkit` fixture gives each test its own actor system and shuts it down aft
 
 Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-deviations.md), [performance](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-performance.md), and a [glossary](https://github.com/hanishi/ohra/blob/main/docs/book/glossary.md).
 
+## Articles
+
+- [Abstractions are for the AI, too](https://github.com/hanishi/ohra/blob/main/docs/articles/abstractions-for-ai.md) ([日本語](https://github.com/hanishi/ohra/blob/main/docs/articles/abstractions-for-ai.ja.md)): a coding agent builds a multiplayer game on ohra, and where its bugs were, and were not
+
 ## Examples
 
 | File | Shows |
@@ -146,6 +150,7 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 | `examples/interaction_patterns/` | one runnable file per pattern in Apache Pekko's [Interaction Patterns](https://pekko.apache.org/docs/pekko/current/typed/interaction-patterns.html) page: fire and forget, request-response, adapted response, ask between actors, ask from outside, generic response wrapper, ignoring replies, pipe to self, per-session child, aggregator, tail chopping, scheduling to self |
 | `examples/fastapi_carts.py` | a FastAPI service over actors: one entity per cart id through `Sharding`, persisted in SQLite with `Behaviors.persisted` so carts survive passivation and restarts, typed `ask` from routes to entities |
 | `examples/fastapi_chatroom.py` | the chat room over WebSockets: `actors.websocket` owns each socket and gives it a connection actor, as Play's `ActorFlow.actorRef` does, rooms created on demand, and DeathWatch turning a closed socket into a "left" notice; serves a browser page at `/` |
+| `examples/fastapi_relay_rally.py` | Relay Rally, a party game for 2 to 8 phones and a wall: `synced()` puts every device on the server's clock, so the server sends one message per pass and each page draws the puck from it; one actor owns the game, its timers and a watchdog; the tests play whole games with manual time. `uv run --extra web uvicorn examples.fastapi_relay_rally:app --host 0.0.0.0`, open `/wall` and scan the QR code |
 | `examples/fastapi_online_learning.py` | a feedback loop behind FastAPI: predictions micro-batched into one numpy call, outcomes posted back, a learner actor taking gradient steps in a thread and hot-swapping the model; serves a playground page at `/`, and `python examples/fastapi_online_learning.py` runs the server with a demo client |
 | `examples/fastapi_purchase_predictor.py` | the same loop with PyTorch: a model of which shopper buys which product, learned from simulated shoppers with hidden tastes; the learner trains its own copy in a thread and sends the predictor copies of the weights; the page at `/` shows the true tastes beside the model's predictions, accuracy over time, and a button that shifts the tastes so you can watch the model catch up. Needs the `web` and `torch` extras |
 | `examples/bandit.py` | Thompson sampling over sharded arms: Beta posteriors as arrays, one vectorized draw per shard, `ctx.ask` fan-out, a progress timer |

@@ -543,3 +543,121 @@ def test_a_full_phone_stays_connected_long_enough_to_sync_and_see_it():
                     late.receive_json()
         for p in phones:
             p.__exit__(None, None, None)
+
+
+# --- computer players ---------------------------------------------------------------------------
+
+
+def seats(state: Frame) -> list[tuple[str, bool]]:
+    return [(p["name"], p["cpu"]) for p in state["players"]]
+
+
+async def test_add_cpu_seats_a_computer_player():
+    async with game(players=1) as g:
+        g.rally.tell(rr.AddCpu())
+        state = await g.state()
+        assert seats(state) == [("PlayerA", False), ("CPU 1", True)]
+        assert state["players"][1]["connected"]
+
+
+async def test_add_cpu_is_refused_when_every_seat_is_taken():
+    async with game(players=7) as g:
+        g.rally.tell(rr.AddCpu())
+        g.rally.tell(rr.AddCpu())
+        assert len((await g.state())["players"]) == rr.MAX_PLAYERS
+
+
+async def test_remove_cpu_frees_the_newest_computer_seat():
+    async with game(players=1) as g:
+        g.rally.tell(rr.AddCpu())
+        g.rally.tell(rr.AddCpu())
+        g.rally.tell(rr.RemoveCpu())
+        g.rally.tell(rr.RemoveCpu())
+        g.rally.tell(rr.RemoveCpu())  # none left: nothing happens
+        assert seats(await g.state()) == [("PlayerA", False)]
+
+
+async def test_one_player_and_a_cpu_can_start():
+    async with game(players=1) as g:
+        g.rally.tell(rr.AddCpu())
+        g.rally.tell(rr.Start())
+        assert (await g.state())["phase"] == "playing"
+
+
+async def test_cpus_are_only_added_and_removed_in_the_lobby():
+    async with game(players=1) as g:
+        g.rally.tell(rr.AddCpu())
+        await g.start()
+        g.rally.tell(rr.AddCpu())
+        g.rally.tell(rr.RemoveCpu())
+        assert seats(await g.state()) == [("PlayerA", False), ("CPU 1", True)]
+
+
+class Always(random.Random):
+    """random() is always ``r``; uniform(a, b) is the middle."""
+
+    def __init__(self, r: float) -> None:
+        super().__init__()
+        self.r = r
+
+    def random(self) -> float:
+        return self.r
+
+    def uniform(self, a: float, b: float) -> float:
+        return (a + b) / 2
+
+
+async def cpu_answer(r: float) -> tuple[float, Any]:
+    """A CPU given a puck that enters at t = 1, straight down at 10 units a second: when it
+    answered and what."""
+    async with ActorTestKit(manual_time=True) as kit:
+        manual = ManualTime(kit.system)
+        rally: TestProbe[Any] = kit.create_test_probe()
+        now = lambda: manual.scheduler.current_time  # noqa: E731
+        cpu = kit.spawn(rr.cpu("cpu-1", rally.ref, now, Always(r)))
+        cpu.tell({"type": "incoming", "serial": 7, "t": 1.0, "x": 0.5, "vx": 0.0, "vy": 10.0})
+        for _ in range(50):
+            await manual.time_passes(0.1)
+            try:
+                return now(), await rally.receive_message(0.01)
+            except AssertionError:
+                pass
+        raise AssertionError("the CPU never answered")
+
+
+async def test_a_cpu_that_hits_reports_the_puck_out_when_it_leaves_the_top():
+    at, msg = await cpu_answer(0.0)
+    # down 16 units at 10 a second, then back up straight: out at 1 + 1.6 + 1.6
+    assert msg == rr.Out("cpu-1", 7, pytest.approx(4.2), 0.5, 0.0)
+    assert at == pytest.approx(4.2, abs=0.11)
+
+
+async def test_a_cpu_that_misses_reports_it_when_the_puck_reaches_its_paddle():
+    at, msg = await cpu_answer(0.999)
+    assert msg == rr.Miss("cpu-1", 7)
+    assert at == pytest.approx(2.6, abs=0.11)
+
+
+async def test_cpus_play_a_whole_game_by_themselves():
+    async with game(players=0, seed=3) as g:
+        for _ in range(3):
+            g.rally.tell(rr.AddCpu())
+        g.rally.tell(rr.Start())
+        await g.settle(rr.GAME_S + 1)
+        frames = await drain(g.wall)
+        assert len(of(frames, "pass")) > 20
+        over = of(frames, "state")[-1]
+        assert over["phase"] == "over" and over["winners"]
+        assert any(p["lives"] < rr.LIVES for p in over["players"])
+
+
+def test_the_wall_adds_and_removes_cpus_over_its_socket():
+    from fastapi.testclient import TestClient
+
+    with TestClient(rr.make_app()) as client:
+        with client.websocket_connect("/ws/wall") as wall:
+            until(wall, "state")
+            wall.send_json({"type": "add_cpu"})
+            assert seats(until(wall, "state")) == [("CPU 1", True)]
+            wall.send_json({"type": "remove_cpu"})
+            assert seats(until(wall, "state")) == []

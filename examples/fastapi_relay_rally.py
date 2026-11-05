@@ -7,10 +7,12 @@ draws it from ``conn.now()``, so nothing is streamed.
 
 then open http://localhost:8000/wall on a big screen and scan its code with phones on the same
 Wi-Fi, up to 8 of them. Press START with two or more players: each has 5 lives, a miss costs
-one, and after 3:00 (or when one player is left) the most lives win.
+one, and after 3:00 (or when one player is left) the most lives win. +CPU on the wall adds a
+computer player, so one person can play, or nobody: CPUs play each other.
 
 ``rally`` is the game, the one place its state lives; ``player`` and ``wall`` are one actor per
-connection, relaying between it and the page. The phones are trusted for their hits and misses:
+connection, relaying between it and the page. ``cpu`` is a player with no connection: it gets the
+frames a phone gets and answers as a phone does. The phones are trusted for their hits and misses:
 it is a party game.
 """
 
@@ -41,6 +43,10 @@ GAME_S = 180.0
 SERVE_LEAD_S = 1.0  # a serve drops in this long after it is sent: time to get ready
 FLIGHT_S = 0.6  # the puck in the air between two phones
 BASE_SPEED = 10.0  # court units per second; the court is 9 wide and 16 tall
+COURT_H = 16.0
+CPU_HIT = (
+    0.92  # a CPU's chance to return a puck at BASE_SPEED; a faster puck, CPU_HIT ** (v / BASE)
+)
 SPEEDUP = 1.06  # per pass, back to BASE_SPEED after a miss
 SERVE_MAX_ANGLE = math.radians(20)
 MAX_ANGLE = math.radians(60)  # off vertical, at the paddle's edge
@@ -76,6 +82,16 @@ class WatchWall:
 
 @dataclass(frozen=True)
 class Start:
+    pass
+
+
+@dataclass(frozen=True)
+class AddCpu:
+    pass
+
+
+@dataclass(frozen=True)
+class RemoveCpu:
     pass
 
 
@@ -134,6 +150,8 @@ type RallyMsg = (
     Join
     | WatchWall
     | Start
+    | AddCpu
+    | RemoveCpu
     | Out
     | Miss
     | _Serve
@@ -156,6 +174,7 @@ class _Player:
     ref: ActorRef[Frame] | None  # None while disconnected
     lives: int = LIVES
     in_game: bool = False
+    cpu: bool = False
 
 
 @dataclass
@@ -185,6 +204,7 @@ def rally(
         game = _Game()
         serials = itertools.count(1)
         joins = itertools.count()  # colours and default names, never reused in a session
+        cpus = itertools.count(1)
         timers = ctx.timers
 
         def state() -> Frame:
@@ -199,6 +219,7 @@ def rally(
                         "lives": p.lives,
                         "connected": p.ref is not None,
                         "in_game": p.in_game,
+                        "cpu": p.cpu,
                     }
                     for p in players.values()
                 ],
@@ -296,6 +317,23 @@ def rally(
                     timers.start_single_timer("time-up", _TimeUp(), GAME_S)
                     tell_everyone(state())
                     serve()
+                case AddCpu():
+                    if game.phase != "lobby" or len(players) >= MAX_PLAYERS:
+                        return Behaviors.same
+                    k, n = next(cpus), next(joins)
+                    id = f"cpu-{k}"
+                    ref = ctx.spawn(cpu(id, ctx.self, clock, rand), id)
+                    players[id] = _Player(id, f"CPU {k}", COLORS[n % len(COLORS)], ref, cpu=True)
+                    ctx.watch_with(ref, _Gone(id, ref))
+                    tell_everyone(state())
+                case RemoveCpu():
+                    ids = [id for id, p in players.items() if p.cpu]
+                    if game.phase != "lobby" or not ids:
+                        return Behaviors.same
+                    gone = players.pop(ids[-1])
+                    assert gone.ref is not None
+                    ctx.stop(gone.ref)  # its _Gone finds no player and is ignored
+                    tell_everyone(state())
                 case Out(id, serial, t, x, angle):
                     now = current(id, serial)
                     if now is None:
@@ -356,6 +394,54 @@ def rally(
     return Behaviors.setup(setup)
 
 
+# --- a computer player -------------------------------------------------------------------------
+
+
+def cpu(
+    id: str, rally: ActorRef[RallyMsg], clock: Callable[[], float], rng: random.Random
+) -> Behavior[Frame]:
+    """A player with no phone: rally tells it what it tells a phone, and it answers as a phone
+    would, when the phone would. The puck falls COURT_H to the paddle, and a return goes back up
+    as far; the side walls only fold x, so they do not change the times."""
+
+    def setup(ctx: ActorContext[Frame]) -> Behavior[Frame]:
+        def at(t: float, frame: Frame) -> None:
+            ctx.timers.start_single_timer("puck", frame, max(0.0, t - clock()))
+
+        def on_message(frame: Frame) -> Behavior[Frame]:
+            match frame["type"]:
+                case "incoming":
+                    speed = math.hypot(frame["vx"], frame["vy"])
+                    paddle = frame["t"] + COURT_H / frame["vy"]
+                    if rng.random() < CPU_HIT ** (speed / BASE_SPEED):
+                        angle = rng.uniform(-MAX_ANGLE / 2, MAX_ANGLE / 2)
+                        t = paddle + COURT_H / (speed * math.cos(angle))
+                        x = rng.uniform(0.1, 0.9)
+                        at(
+                            t,
+                            {
+                                "type": "_out",
+                                "serial": frame["serial"],
+                                "t": t,
+                                "x": x,
+                                "angle": angle,
+                            },
+                        )
+                    else:
+                        at(paddle, {"type": "_miss", "serial": frame["serial"]})
+                case "_out":
+                    rally.tell(Out(id, frame["serial"], frame["t"], frame["x"], frame["angle"]))
+                case "_miss":
+                    rally.tell(Miss(id, frame["serial"]))
+                case _:
+                    pass  # you, state: a CPU needs nothing from them
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    return Behaviors.setup(setup)
+
+
 # --- one actor per connection -------------------------------------------------------------------
 
 
@@ -398,10 +484,11 @@ def decode_player(text: str) -> Frame:
 
 
 def decode_wall(text: str) -> Frame:
-    """``{"type": "start"}``; anything else raises ValueError."""
-    if _object(text).get("type") != "start":
-        raise ValueError("a wall only starts the game")
-    return {"type": "start"}
+    """``{"type": "start" | "add_cpu" | "remove_cpu"}``; anything else raises ValueError."""
+    kind = _object(text).get("type")
+    if kind not in ("start", "add_cpu", "remove_cpu"):
+        raise ValueError(f"unknown frame type: {kind!r}")
+    return {"type": kind}
 
 
 def player(id: str, name: str, rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
@@ -435,10 +522,15 @@ def wall(rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
         rally.tell(WatchWall(ctx.self))
 
         def on_message(frame: Frame) -> Behavior[Frame]:
-            if frame["type"] == "start":
-                rally.tell(Start())
-            else:
-                out.tell(frame)
+            match frame["type"]:
+                case "start":
+                    rally.tell(Start())
+                case "add_cpu":
+                    rally.tell(AddCpu())
+                case "remove_cpu":
+                    rally.tell(RemoveCpu())
+                case _:
+                    out.tell(frame)
             return Behaviors.same
 
         return Behaviors.receive_message(on_message)

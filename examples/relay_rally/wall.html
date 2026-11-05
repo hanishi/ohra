@@ -7,27 +7,33 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-  button { position: fixed; left: 50%; bottom: 7vh; transform: translateX(-50%); z-index: 5;
-    font: 700 clamp(18px, 3vw, 36px) ui-monospace, monospace; color: #39ff6a; background: #000;
+  #controls { position: fixed; left: 50%; bottom: 7vh; transform: translateX(-50%); z-index: 5;
+    display: flex; gap: 1.2em; align-items: center; }
+  #controls[hidden] { display: none; }
+  button { font: 700 clamp(18px, 3vw, 36px) ui-monospace, monospace; color: #39ff6a; background: #000;
     border: 3px solid #39ff6a; padding: 0.4em 1.4em; text-shadow: 0 0 10px #39ff6a;
     box-shadow: 0 0 18px #39ff6a66; cursor: pointer; }
   button:disabled { color: #0d3a1a; border-color: #0d3a1a; text-shadow: none; box-shadow: none;
     cursor: default; }
-  button[hidden] { display: none; }
+  button.cpu { font-size: clamp(14px, 2vw, 24px); padding: 0.4em 0.8em; }
 </style>
 <!-- the join code; the only third-party script in the example -->
 <script async src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 </head>
 <body>
 <canvas id="wall"></canvas>
-<button id="start" hidden disabled>START</button>
+<div id="controls" hidden>
+  <button id="less" class="cpu" disabled>&minus;CPU</button>
+  <button id="start" disabled>START</button>
+  <button id="more" class="cpu">+CPU</button>
+</div>
 <script type="module">
   import { connect } from "/ohra/clock.js";
   import { blip, crt, fit, glow, heart, text, unlock, DIM, GREEN } from "/arcade.js";
 
   const canvas = document.getElementById("wall");
   const ctx = canvas.getContext("2d");
-  const start = document.getElementById("start");
+  const [controls, start, less, more] = ["controls", "start", "less", "more"].map((id) => document.getElementById(id));
   crt();
 
   let state = null;
@@ -63,8 +69,10 @@
       state = m;
       if (m.phase !== "playing") passes = [];
       const here = m.players.filter((p) => p.connected).length;
-      start.hidden = m.phase !== "lobby";
+      controls.hidden = m.phase !== "lobby";
       start.disabled = here < 2;
+      less.disabled = !m.players.some((p) => p.cpu);
+      more.disabled = m.players.length >= 8;
     } else if (m.type === "pass") {
       passes.push(m);
       conn.at(m.t1, () => blip(520, 0.05, 0.1));
@@ -75,6 +83,8 @@
     unlock();
     conn.send({ type: "start" });
   });
+  less.addEventListener("click", () => conn.send({ type: "remove_cpu" }));
+  more.addEventListener("click", () => conn.send({ type: "add_cpu" }));
 
   // Where each player sits on the wall: around an ellipse, in join order.
   function seats(w, h) {

@@ -340,3 +340,92 @@ async def test_a_player_who_joins_mid_game_waits():
             g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
             i, incoming = await g.puck()
         assert not of(await drain(late), "incoming")
+
+
+# --- Task 5: the app, over its sockets ----------------------------------------------------------
+
+
+class First(random.Random):
+    """Always picks the first: the serve goes to the first player, a pass to the next."""
+
+    def choice(self, seq: Any) -> Any:
+        return seq[0]
+
+
+def until(ws: Any, kind: str) -> Frame:
+    while True:
+        frame = ws.receive_json()
+        if frame["type"] == kind:
+            return frame
+
+
+def test_two_phones_and_a_wall_play_over_the_sockets():
+    from fastapi.testclient import TestClient
+
+    with TestClient(rr.make_app(rng=First())) as client:
+        with (
+            client.websocket_connect("/ws/wall") as wall,
+            client.websocket_connect("/ws/player?id=a&name=Aki") as aki,
+            client.websocket_connect("/ws/player?id=b&name=Ben") as ben,
+        ):
+            assert until(aki, "you")["name"] == "Aki"  # sent on connect, before any pong
+            for ws in (wall, aki, ben):
+                ws.send_json({"type": "ping", "c": 0})
+                assert "s" in until(ws, "pong")
+            wall.send_json({"type": "start"})
+            assert until(aki, "state")["phase"] == "playing"
+            incoming = until(aki, "incoming")
+            aki.send_json(
+                {
+                    "type": "out",
+                    "serial": incoming["serial"],
+                    "t": incoming["t"] + 1,
+                    "x": 0.5,
+                    "angle": 0,
+                }
+            )
+            assert until(ben, "incoming")["x"] == 0.5
+            assert until(wall, "pass")["to"] == "b"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"type": "hit"},
+        {"type": "out", "serial": 1, "t": "soon", "x": 0.5, "angle": 0},
+        {"type": "out", "serial": 1, "t": 1.0, "x": float("nan"), "angle": 0},
+        {"type": "miss"},
+    ],
+)
+def test_a_bad_frame_from_a_phone_closes_it(frame: Frame):
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(rr.make_app()) as client:
+        with client.websocket_connect("/ws/player?id=a&name=Aki") as aki:
+            aki.send_text(__import__("json").dumps(frame))
+            with pytest.raises(WebSocketDisconnect) as closed:
+                while True:
+                    aki.receive_json()
+            assert closed.value.code == 1003
+
+
+def test_the_pages_and_clock_js_are_served():
+    from fastapi.testclient import TestClient
+
+    with TestClient(rr.make_app()) as client:
+        assert "<!doctype html>" in client.get("/wall").text.lower()
+        assert "<!doctype html>" in client.get("/play").text.lower()
+        assert "export function connect" in client.get("/ohra/clock.js").text
+        url = client.get("/join").json()["url"]
+        assert url.startswith("http://") and url.endswith(":80/play")
+
+
+def test_the_join_url_falls_back_to_localhost(monkeypatch: pytest.MonkeyPatch):
+    import socket
+
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("no network")
+
+    monkeypatch.setattr(socket, "socket", broken)
+    assert rr.lan_url(8000) == "http://127.0.0.1:8000/play"

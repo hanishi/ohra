@@ -1,21 +1,39 @@
 """Relay Rally: phones are the courts and the paddles, a big screen is the scoreboard, and the
-puck is passed from phone to phone at random, every phone on the server's clock.
+puck is passed from phone to phone at random. Every page is on the server's clock with
+``synced`` and ``clock.js``: the server says when the puck drops onto a phone, and the phone
+draws it from ``conn.now()``, so nothing is streamed.
 
-``rally`` is the game, the one place its state lives.
+    uv run --extra web uvicorn examples.fastapi_relay_rally:app --host 0.0.0.0 --port 8000
+
+then open http://localhost:8000/wall on a big screen and scan its code with phones on the same
+Wi-Fi. Press START with two or more players: each has 5 lives, a miss costs one, and after 3:00
+(or when one player is left) the most lives win.
+
+``rally`` is the game, the one place its state lives; ``player`` and ``wall`` are one actor per
+connection, relaying between it and the page. The phones are trusted for their hits and misses:
+it is a party game.
 """
 
+import json
 import math
 import random
+import socket
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from fastapi import FastAPI, Query, Request, WebSocket  # noqa: E402
+from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
+
 from ohra import ActorContext, ActorRef, Behavior, Behaviors  # noqa: E402
+from ohra.ext.fastapi import CLOCK_JS, Actors, synced  # noqa: E402
+
+PAGES = Path(__file__).resolve().parent / "relay_rally"
 
 LIVES = 5
 GAME_S = 180.0
@@ -323,3 +341,153 @@ def rally(
         return Behaviors.receive_message(on_message)
 
     return Behaviors.setup(setup)
+
+
+# --- one actor per connection -------------------------------------------------------------------
+
+
+def _number(frame: dict[str, object], key: str) -> float:
+    v = frame.get(key)
+    if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v):
+        raise ValueError(f"{key} must be a finite number, not {v!r}")
+    return float(v)
+
+
+def _serial(frame: dict[str, object]) -> int:
+    v = frame.get("serial")
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ValueError(f"serial must be an integer, not {v!r}")
+    return v
+
+
+def _object(text: str) -> dict[str, object]:
+    doc: object = json.loads(text)
+    if not isinstance(doc, dict):
+        raise ValueError("expected an object")
+    return cast(dict[str, object], doc)
+
+
+def decode_player(text: str) -> Frame:
+    """``{"type": "out", "serial", "t", "x", "angle"}`` or ``{"type": "miss", "serial"}``.
+    Anything else raises ValueError, which closes the socket with 1003."""
+    frame = _object(text)
+    match frame.get("type"):
+        case "out":
+            return {
+                "type": "out",
+                "serial": _serial(frame),
+                **{k: _number(frame, k) for k in ("t", "x", "angle")},
+            }
+        case "miss":
+            return {"type": "miss", "serial": _serial(frame)}
+        case other:
+            raise ValueError(f"unknown frame type: {other!r}")
+
+
+def decode_wall(text: str) -> Frame:
+    """``{"type": "start"}``; anything else raises ValueError."""
+    if _object(text).get("type") != "start":
+        raise ValueError("a wall only starts the game")
+    return {"type": "start"}
+
+
+def player(id: str, name: str, rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
+    """A phone's frames go to rally; rally's go to the phone."""
+
+    def setup(ctx: ActorContext[Frame]) -> Behavior[Frame]:
+        rally.tell(Join(id, name, ctx.self))
+
+        def on_message(frame: Frame) -> Behavior[Frame]:
+            match frame["type"]:
+                case "out":
+                    rally.tell(Out(id, frame["serial"], frame["t"], frame["x"], frame["angle"]))
+                case "miss":
+                    rally.tell(Miss(id, frame["serial"]))
+                case _:
+                    out.tell(frame)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    return Behaviors.setup(setup)
+
+
+def wall(rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
+    def setup(ctx: ActorContext[Frame]) -> Behavior[Frame]:
+        rally.tell(WatchWall(ctx.self))
+
+        def on_message(frame: Frame) -> Behavior[Frame]:
+            if frame["type"] == "start":
+                rally.tell(Start())
+            else:
+                out.tell(frame)
+            return Behaviors.same
+
+        return Behaviors.receive_message(on_message)
+
+    return Behaviors.setup(setup)
+
+
+# --- the app ------------------------------------------------------------------------------------
+
+
+def lan_url(port: int) -> str:
+    """Where phones join: this machine's address on the LAN, even when the wall page was opened
+    at localhost. Connecting a UDP socket sends nothing; it only picks the outgoing interface."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            host = s.getsockname()[0]
+    except OSError:
+        host = "127.0.0.1"
+    return f"http://{host}:{port}/play"
+
+
+def make_app(
+    clock: Callable[[], float] = time.monotonic, rng: random.Random | None = None
+) -> FastAPI:
+    actors = Actors(rally(clock, rng), "rally")
+    app = FastAPI(lifespan=actors.lifespan, exception_handlers=actors.exception_handlers)
+
+    @app.get("/")
+    async def index() -> RedirectResponse:
+        return RedirectResponse("/wall")
+
+    @app.get("/wall")
+    async def wall_page() -> FileResponse:
+        return FileResponse(PAGES / "wall.html")
+
+    @app.get("/play")
+    async def phone_page() -> FileResponse:
+        return FileResponse(PAGES / "phone.html")
+
+    @app.get("/ohra/clock.js")
+    async def clock_js() -> FileResponse:
+        return FileResponse(CLOCK_JS, media_type="text/javascript")
+
+    @app.get("/join")
+    async def join(request: Request) -> dict[str, str]:
+        return {"url": lan_url(request.url.port or 80)}
+
+    @app.websocket("/ws/player")
+    async def player_socket(
+        ws: WebSocket,
+        id: str = Query(min_length=1, max_length=64),
+        name: str = Query(default="", max_length=64),
+    ) -> None:
+        def props(out: ActorRef[Frame]) -> Behavior[Frame]:
+            return player(id, name, actors.system, out)
+
+        await actors.websocket(ws, *synced(props, decode_player, clock))
+
+    @app.websocket("/ws/wall")
+    async def wall_socket(ws: WebSocket) -> None:
+        def props(out: ActorRef[Frame]) -> Behavior[Frame]:
+            return wall(actors.system, out)
+
+        await actors.websocket(ws, *synced(props, decode_wall, clock))
+
+    return app
+
+
+app = make_app()

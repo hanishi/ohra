@@ -56,6 +56,7 @@ class Game:
     rally: ActorRef[Any]
     wall: TestProbe[Frame]
     phones: list[TestProbe[Frame]]
+    last_state: Frame | None = None
 
     def now(self) -> float:
         return self.manual.scheduler.current_time
@@ -76,7 +77,10 @@ class Game:
     async def state(self) -> Frame:
         """The last state the wall was told."""
         await self.settle()
-        return of(await drain(self.wall), "state")[-1]
+        for frame in of(await drain(self.wall), "state"):
+            self.last_state = frame
+        assert self.last_state is not None
+        return self.last_state
 
     async def start(self) -> tuple[int, Frame]:
         """Start, and the phone that got the first serve, with its incoming."""
@@ -195,3 +199,144 @@ async def test_a_miss_costs_a_life_and_serves_again_at_base_speed():
         await g.settle(1.0)
         _, served = await g.puck()
         assert speed(served) == pytest.approx(10.0)
+
+
+# --- Task 4: the end, the watchdog, leaving and coming back -------------------------------------
+
+
+async def puck_to(g: Game, target: int, i: int, incoming: Frame) -> Frame:
+    """Pass until the puck heads to phone ``target``; its incoming."""
+    while i != target:
+        g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
+        i, incoming = await g.puck()
+    return incoming
+
+
+async def test_the_game_ends_when_time_is_up_and_most_lives_win():
+    async with game() as g:
+        i, incoming = await g.start()
+        g.rally.tell(rr.Miss(player_id(i), incoming["serial"]))
+        await g.settle(180.0)
+        state = await g.state()
+        assert state["phase"] == "over"
+        assert state["winners"] == [player_id(1 - i)]
+
+
+async def test_a_tie_is_shared():
+    async with game() as g:
+        await g.start()
+        await g.settle(180.0)
+        state = await g.state()
+        assert state["phase"] == "over"
+        assert sorted(state["winners"]) == ["a", "b"]
+
+
+async def test_the_game_ends_when_one_player_has_lives():
+    async with game() as g:
+        i, incoming = await g.start()
+        for _ in range(5):
+            incoming = await puck_to(g, 1, i, incoming)
+            g.rally.tell(rr.Miss("b", incoming["serial"]))
+            await g.settle(1.0)
+            if (await g.state())["phase"] == "over":
+                break
+            i, incoming = await g.puck()
+        state = await g.state()
+        assert state["phase"] == "over"
+        assert state["winners"] == ["a"]
+
+
+async def test_back_to_the_lobby_after_fifteen_seconds():
+    async with game() as g:
+        await g.start()
+        await g.settle(180.0)
+        assert (await g.state())["phase"] == "over"
+        await g.settle(15.0)
+        state = await g.state()
+        assert state["phase"] == "lobby"
+        assert all(not p["in_game"] for p in state["players"])
+
+
+async def test_the_watchdog_serves_again_without_a_life():
+    async with game() as g:
+        i, incoming = await g.start()
+        await g.settle(15.0)
+        _, again = await g.puck()
+        assert again["serial"] > incoming["serial"]
+        assert all(p["lives"] == 5 for p in (await g.state())["players"])
+
+
+async def test_a_stale_report_is_ignored():
+    async with game() as g:
+        i, incoming = await g.start()
+        await g.settle(15.0)
+        await g.puck()
+        g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
+        g.rally.tell(rr.Miss(player_id(i), incoming["serial"]))
+        assert all(not of(fs, "incoming") for fs in await g.frames())
+        wall = await drain(g.wall)
+        assert not of(wall, "pass")
+        assert all(p["lives"] == 5 for f in of(wall, "state") for p in f["players"])
+
+
+async def test_a_disconnect_serves_again_and_keeps_the_lives():
+    async with game(players=3) as g:
+        i, _ = await g.start()
+        g.phones[i].stop()
+        await g.settle()
+        state = await g.state()
+        gone = {p["id"]: p for p in state["players"]}[player_id(i)]
+        assert gone["connected"] is False and gone["lives"] == 5
+        assert state["phase"] == "playing"
+        others = [p for k, p in enumerate(g.phones) if k != i]
+        await g.settle()
+        got = [of(await drain(p), "incoming") for p in others]
+        assert sum(len(x) for x in got) == 1
+
+
+async def test_a_reconnect_with_the_same_id_keeps_the_lives():
+    async with game(players=3) as g:
+        i, incoming = await g.start()
+        g.rally.tell(rr.Miss(player_id(i), incoming["serial"]))
+        await g.settle()
+        g.phones[i].stop()
+        await g.settle()
+        again = g.join(player_id(i), "ignored")
+        await g.settle()
+        frames = await drain(again)
+        assert of(frames, "you")[0]["name"] == "Player" + player_id(i).upper()
+        back = {p["id"]: p for p in (await g.state())["players"]}[player_id(i)]
+        assert back["connected"] is True and back["lives"] == 4
+
+
+async def test_the_older_tab_closing_does_not_disconnect_the_newer():
+    async with game() as g:
+        g.join("a", "PlayerA")
+        await g.settle()
+        g.phones[0].stop()
+        await g.settle()
+        a = {p["id"]: p for p in (await g.state())["players"]}["a"]
+        assert a["connected"] is True
+
+
+async def test_everyone_but_one_leaving_ends_the_game():
+    async with game() as g:
+        await g.start()
+        g.phones[1].stop()
+        await g.settle()
+        state = await g.state()
+        assert state["phase"] == "over"
+        assert state["winners"] == ["a"]
+
+
+async def test_a_player_who_joins_mid_game_waits():
+    async with game() as g:
+        i, incoming = await g.start()
+        late = g.join("c", "Chi")
+        await g.settle()
+        c = {p["id"]: p for p in (await g.state())["players"]}["c"]
+        assert c["in_game"] is False
+        for _ in range(6):
+            g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
+            i, incoming = await g.puck()
+        assert not of(await drain(late), "incoming")

@@ -12,12 +12,18 @@ This is one data point. A coding agent (Claude, in Claude Code) built a multipla
 
 [Relay Rally](../../examples/fastapi_relay_rally.py) is a party game. Players scan a QR code on a big screen, and their phones become small courts with a paddle at the bottom. A puck drops onto one phone; hit it back up and it flies off the top and drops onto another random player's phone, at the same moment, 0.6 seconds later. Miss and you lose one of five lives. After three minutes the most lives win. The big screen is the scoreboard: hearts, a countdown, and a streak of light for every pass.
 
+<p align="center">
+  <img src="img/relay-rally-wall.png" width="560" alt="The wall mid-game: four players around a 2:48 countdown, a pass streaking from CPU 1 to CPU 2">
+  <img src="img/relay-rally-phone.png" width="150" alt="A phone's court: five hearts, the clock, and the puck falling toward the paddle">
+</p>
+
 Two pieces make it work:
 
 - **Devices on one clock.** The server never streams the puck. It sends one message, *the puck enters your court at `x` with this velocity at time `t`*, on the server's clock, and every page works out what `t` means on its own clock. That is the new [`synced()` and `clock.js`](../book/09-fastapi.md#devices-on-one-clock) in `ohra.ext.fastapi`, generalised from a signage project where three tablets show one fish swimming across them.
 - **One actor owns the game.** `rally` holds the players, the lives, the puck, the 3:00 timer and a watchdog. Every phone and the wall get an actor of their own through `actors.websocket`, which turns frames into messages for `rally` and its messages into frames.
+- **A computer player is a player with no socket.** +CPU on the wall adds an actor that gets the frames a phone gets and answers as a phone would, when a phone would, so one person can play, or nobody. Once it is seated, `rally` treats it as any other player; the only new code in `rally` adds and removes seats.
 
-The game actor is about 180 lines; the example, its pages and its tests about 1,600.
+The game actor is about 200 lines; the example, its pages and its tests about 1,800.
 
 ## Where the bugs were
 
@@ -58,7 +64,7 @@ async with ActorTestKit(manual_time=True) as kit:
     await manual.time_passes(180.0)  # the whole game, at once
 ```
 
-The example's 34 tests play out game after game this way: misses, the clock running out, a watchdog serving again after a silent phone, a phone dropping mid-game and coming back with its lives, a ninth player turned away. They run in about six seconds, two of them a deliberate real-time wait, and give the same result every time. When the reviewer reported that the game might not end at 0:00 on a clock running slightly slow, the agent wrote that clock into a test, watched the game fail to end, fixed it, and watched it end.
+The example's 43 tests play out game after game this way: misses, the clock running out, three computer players with nobody else, a watchdog serving again after a silent phone, a phone dropping mid-game and coming back with its lives, a ninth player turned away. They run in about six seconds, two of them a deliberate real-time wait, and give the same result every time. When the reviewer reported that the game might not end at 0:00 on a clock running slightly slow, the agent wrote that clock into a test, watched the game fail to end, fixed it, and watched it end.
 
 For timing bugs, this is the difference between reasoning about them and checking them. People benefit from it too; for an agent, which can run tests far more easily than it can watch a screen, it decides what it can verify at all.
 

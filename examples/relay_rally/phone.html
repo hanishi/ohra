@@ -57,6 +57,7 @@
   let flash = 0; // until when the miss flash shows, on the page clock
   let trail = [];
   let view = null; // court units to canvas pixels: {s, ox, oy}
+  let full = false; // 8 are playing: clock.js reconnects, and we get in when one leaves
 
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -69,8 +70,12 @@
 
   function onMessage(m) {
     switch (m.type) {
+      case "full":
+        full = true;
+        break;
       case "you":
         me = m;
+        full = false;
         break;
       case "state":
         state = m;
@@ -169,6 +174,7 @@
     view = { s, ox: (w - W * s) / 2, oy: (h - (H + 2) * s) / 2 + 2 * s };
     const color = me?.color ?? GREEN;
     const px = Math.max(2, Math.round(s / 6));
+    if (full) return gameFull(w, h, px);
     if (!state) return text(ctx, "CONNECTING", w / 2, h / 2, px, color, "center");
     if (state.phase === "lobby") return lobby(w, h, px, color);
     if (state.phase === "over") return over(w, h, px, color);
@@ -226,6 +232,13 @@
     });
     if (Math.floor(performance.now() / 600) % 2 === 0) {
       text(ctx, "WAITING FOR START", w / 2, h * 0.88, px, GREEN, "center");
+    }
+  }
+
+  function gameFull(w, h, px) {
+    text(ctx, "GAME FULL", w / 2, h * 0.4, px * 2, GREEN, "center");
+    if (Math.floor(performance.now() / 600) % 2 === 0) {
+      text(ctx, "WAITING FOR A SPOT", w / 2, h * 0.55, px, GREEN, "center");
     }
   }
 

@@ -6,8 +6,8 @@ draws it from ``conn.now()``, so nothing is streamed.
     uv run --extra web uvicorn examples.fastapi_relay_rally:app --host 0.0.0.0 --port 8000
 
 then open http://localhost:8000/wall on a big screen and scan its code with phones on the same
-Wi-Fi. Press START with two or more players: each has 5 lives, a miss costs one, and after 3:00
-(or when one player is left) the most lives win.
+Wi-Fi, up to 8 of them. Press START with two or more players: each has 5 lives, a miss costs
+one, and after 3:00 (or when one player is left) the most lives win.
 
 ``rally`` is the game, the one place its state lives; ``player`` and ``wall`` are one actor per
 connection, relaying between it and the page. The phones are trusted for their hits and misses:
@@ -49,6 +49,8 @@ WATCHDOG_S = 15.0  # no out or miss from the phone with the puck: serve again
 LOBBY_AFTER_S = 15.0
 NAME_MAX = 12
 MIN_PLAYERS = 2
+MAX_PLAYERS = 8  # one tint each
+FULL_HOLD_S = 2.0  # a full phone stays connected this long: clock.js shows nothing before it syncs
 COLORS = ["#39ff6a", "#ffb000", "#4fd8ff", "#ff5c8a", "#c38bff", "#f4ff52", "#ff7a3d", "#7dffd8"]
 
 type Frame = dict[str, Any]
@@ -264,6 +266,11 @@ def rally(
             match msg:
                 case Join(id, name, ref):
                     p = players.get(id)
+                    if p is None and len(players) >= MAX_PLAYERS:
+                        ref.tell(
+                            {"type": "full"}
+                        )  # its phone retries, and gets in when one leaves
+                        return Behaviors.same
                     if p is None:
                         n = next(joins)
                         name = name.strip()[:NAME_MAX] or f"P{n + 1}"
@@ -333,6 +340,8 @@ def rally(
                     if p is None or p.ref != ref:
                         return Behaviors.same  # an older tab of a player who is still here
                     p.ref = None
+                    if game.phase == "lobby":
+                        del players[id]  # nothing to come back to yet: free the spot
                     if ended():
                         return Behaviors.same
                     tell_everyone(state())
@@ -407,6 +416,11 @@ def player(id: str, name: str, rally: ActorRef[RallyMsg], out: ActorRef[Frame]) 
                     rally.tell(Out(id, frame["serial"], frame["t"], frame["x"], frame["angle"]))
                 case "miss":
                     rally.tell(Miss(id, frame["serial"]))
+                case "full":
+                    out.tell(frame)
+                    ctx.timers.start_single_timer("full", {"type": "_bye"}, FULL_HOLD_S)
+                case "_bye":  # never from the phone: decode_player rejects it
+                    return Behaviors.stopped()  # closes the socket; the page retries
                 case _:
                     out.tell(frame)
             return Behaviors.same

@@ -96,7 +96,7 @@ class Game:
 
 
 def player_id(i: int) -> str:
-    return "abc"[i]
+    return "abcdefgh"[i]
 
 
 @asynccontextmanager
@@ -491,3 +491,55 @@ def test_the_books_clock_js_route_sets_its_media_type():
     book = Path(__file__).resolve().parents[1] / "docs" / "book" / "09-fastapi.md"
     (line,) = [x for x in book.read_text().splitlines() if "FileResponse(CLOCK_JS" in x]
     assert 'media_type="text/javascript"' in line
+
+
+# --- at most 8 players --------------------------------------------------------------------------
+
+
+async def test_a_ninth_player_is_told_the_game_is_full():
+    async with game(players=8) as g:
+        ninth = g.join("i", "Ivy")
+        await g.settle()
+        assert of(await drain(ninth), "full")
+        assert [p["id"] for p in (await g.state())["players"]] == list("abcdefgh")
+
+
+async def test_a_player_who_leaves_the_lobby_frees_the_spot():
+    async with game(players=8) as g:
+        g.phones[0].stop()
+        await g.settle()
+        ninth = g.join("i", "Ivy")
+        await g.settle()
+        frames = await drain(ninth)
+        assert of(frames, "you") and not of(frames, "full")
+        assert "a" not in [p["id"] for p in (await g.state())["players"]]
+
+
+async def test_a_player_away_mid_game_keeps_the_spot():
+    async with game(players=8) as g:
+        await g.start()
+        g.phones[0].stop()
+        await g.settle()
+        ninth = g.join("i", "Ivy")
+        await g.settle()
+        assert of(await drain(ninth), "full")
+
+
+def test_a_full_phone_stays_connected_long_enough_to_sync_and_see_it():
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(rr.make_app()) as client:
+        phones = [client.websocket_connect(f"/ws/player?id={i}&name=P") for i in range(8)]
+        for p in phones:
+            p.__enter__()
+            until(p, "you")
+        with client.websocket_connect("/ws/player?id=late&name=Late") as late:
+            assert late.receive_json() == {"type": "full"}
+            late.send_json({"type": "ping", "c": 0})  # clock.js shows nothing before its pong
+            assert until(late, "pong")["c"] == 0
+            with pytest.raises(WebSocketDisconnect):  # then it closes: the page retries
+                while True:
+                    late.receive_json()
+        for p in phones:
+            p.__exit__(None, None, None)

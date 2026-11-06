@@ -208,41 +208,197 @@ async def chat(ws: WebSocket, system: ActorSystem[Say] = actors.depends()) -> No
 
 ## Devices on one clock
 
-Some apps need several browsers to act at the same moment: a row of screens that one picture crosses, phones that flash together, a quiz that reveals on every device at once. Sending each one a message "now" doesn't do it, since every socket has its own delay. The server says *when* instead, on its own clock, and each page works out what that means on its clock. `synced` is the server half:
+Some apps need several screens to act at the same instant: a row of displays that one picture moves across, phones that flash together, a quiz that shows its answer on every device at once.
+
+### Why "now" is not enough
+
+The obvious way is to send each page a message and have it act as soon as the message arrives. The pages then drift apart, because messages don't arrive together. A laptop on a cable may get its frame 5 ms after the server sends it, and a phone on busy Wi-Fi 200 ms after, and the gap changes from one message to the next. Each page acts when its own message lands, so the screens are apart by as much as the slowest connection.
+
+Sending a time instead, *flash at 12:00:00.500*, removes the delay, but now the pages need to agree on what time it is, and their clocks don't. A phone's clock can be seconds off a laptop's. The clock a page should time things with, `performance.now()`, doesn't even tell the time of day: it counts from when the page loaded, so it reads differently on every page.
+
+So the server names the moment on **its** clock, the one clock every page can share. Each page measures how far its own clock is from the server's, its *offset*, and turns the server's time into its own. A message can then arrive early or late: as long as it arrives before the moment it names, every page acts at that moment.
+
+### How a page learns its offset
+
+The page asks the server for the time, and times how long the answer took:
+
+```mermaid
+sequenceDiagram
+    participant P as Page
+    participant S as Server
+    P->>S: ping, c = 100.000 (the page's clock when it sent it)
+    S->>P: pong, c = 100.000, s = 5012.040 (the server's clock when it answered)
+    Note over P: r = 100.080 (the page's clock when the pong arrived)
+```
+
+The round trip took `r - c` = 80 ms. If the way there took as long as the way back, the server read its clock halfway through, at page time `(c + r) / 2` = 100.040. The server's clock said 5012.040 at that moment, so the offset is 5012.040 − 100.040 = 4912.000 s, and from then on the server's time is the page's time plus 4912.000.
+
+The two halves of a trip are rarely exactly equal, but the error can't be more than half the round trip, so a fast ping gives a good offset. `clock.js` sends five pings when it connects and one every 10 s after that, and uses the fastest of the last six.
+
+### An example: every screen flashes at once
+
+Open the page on a few devices and tap the button on any of them: every screen flashes at the same moment, half a second later.
+
+The server has two kinds of actor. `hub` is the guardian. It knows every connected screen, and on a tap it picks the moment, on the server's clock, and tells every screen. `screen` is the actor of one connection: it passes taps on to the hub, and turns flashes into frames for its page.
 
 ```python
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 
-from ohra.ext.fastapi import CLOCK_JS, synced
+from ohra import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Signal, Terminated
+from ohra.ext.fastapi import CLOCK_JS, Actors, synced
+
+type Frame = dict[str, str | float]
+
+
+@dataclass(frozen=True)
+class Tap:
+    pass
+
+
+@dataclass(frozen=True)
+class Flash:
+    t: float  # on the server's clock
+
+
+@dataclass(frozen=True)
+class Join:
+    screen: ActorRef[Flash]
+
+
+type HubMsg = Join | Tap
+
+
+def hub(screens: frozenset[ActorRef[Flash]] = frozenset()) -> Behavior[HubMsg]:
+    @Behaviors.receive
+    def on_message(ctx: ActorContext[HubMsg], msg: HubMsg) -> Behavior[HubMsg]:
+        match msg:
+            case Join(screen):
+                ctx.watch(screen)  # its actor stops when its socket closes
+                return hub(screens | {screen})
+            case Tap():
+                t = time.monotonic() + 0.5  # half a second from now, on the server's clock
+                for screen in screens:
+                    screen.tell(Flash(t))
+                return Behaviors.same
+
+    def on_signal(ctx: ActorContext[HubMsg], sig: Signal) -> Behavior[HubMsg]:
+        if isinstance(sig, Terminated):
+            return hub(screens - {sig.ref})
+        return Behaviors.unhandled
+
+    return on_message.receive_signal(on_signal)
+
+
+def screen(hub: ActorRef[HubMsg], out: ActorRef[Frame]) -> Behavior[Tap | Flash]:
+    @Behaviors.setup
+    def setup(ctx: ActorContext[Tap | Flash]) -> Behavior[Tap | Flash]:
+        hub.tell(Join(ctx.self))
+
+        @Behaviors.receive_message
+        def on_message(msg: Tap | Flash) -> Behavior[Tap | Flash]:
+            match msg:
+                case Tap():
+                    hub.tell(msg)
+                case Flash(t):
+                    out.tell({"type": "flash", "t": t})  # the same t for every page
+            return Behaviors.same
+
+        return on_message
+
+    return setup
+
+
+def decode(text: str) -> Tap:
+    return Tap()  # the page sends nothing but taps (and pings, which synced answers)
+
+
+actors = Actors(hub(), "flash")
+app = FastAPI(lifespan=actors.lifespan, exception_handlers=actors.exception_handlers)
 
 app.get("/ohra/clock.js")(lambda: FileResponse(CLOCK_JS, media_type="text/javascript"))
+app.get("/")(lambda: FileResponse(Path(__file__).with_name("flash.html")))
 
 
 @app.websocket("/ws")
-async def screen(ws: WebSocket) -> None:
-    await actors.websocket(ws, *synced(echo, Said))  # time.monotonic is the clock by default
+async def connection(ws: WebSocket, system: ActorSystem[HubMsg] = actors.depends()) -> None:
+    await actors.websocket(ws, *synced(lambda out: screen(system, out), decode))
 ```
 
-- **`synced(props, decode, clock=time.monotonic)`** returns the `props` and `decode` that `actors.websocket` takes. A `{"type": "ping", "c": n}` frame is answered with `{"type": "pong", "c": n, "s": clock()}` and never reaches your actor; every other frame goes to your `decode` and on to your actor, as without it. A ping whose `c` is not a finite number closes the socket with 1003.
-- **Your actor stamps times with the same `clock`**, as `{"type": "show", "t": clock() + 0.5}`: half a second from now, on every page. `synced` never reads `t`; it is a convention between your app and the page.
-- **The server keeps nothing per connection.** The page holds what it receives until it knows its offset, so a slow page can't make frames pile up on the server.
+Save the server as `app.py`, and the page as `flash.html` next to it:
 
-`clock.js` is the page half, an ES module shipped in the wheel:
+```html
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<button id="tap">Flash every screen</button>
+<script type="module">
+  import { connect } from "/ohra/clock.js";
+
+  const conn = connect("/ws", (msg) => {
+    if (msg.type === "flash") conn.at(msg.t, flash); // msg.t is on the server's clock
+  });
+
+  function flash() {
+    document.body.style.background = "gold";
+    setTimeout(() => (document.body.style.background = ""), 150);
+  }
+
+  document.getElementById("tap").onclick = () => conn.send({ type: "tap" });
+</script>
+```
+
+Run it with `uvicorn app:app --host 0.0.0.0` and open the server's address on each device. Here is what is passed around, and what each part does with it:
+
+| | What is passed | Who handles it, and how |
+|---|---|---|
+| 1 | The page connects, and `clock.js` sends `{"type": "ping", "c": 100.0}`: its own clock. | `synced` answers inside `actors.websocket` with `{"type": "pong", "c": 100.0, "s": 5012.04}`, `s` being `time.monotonic()`. It never reads `c`, only sends it back, and the `screen` actor never sees a ping. |
+| 2 | The pong. | `clock.js` works out the offset, as above. It holds back any other message that comes before the first pong, so no time is read against a clock that isn't synced yet. |
+| 3 | A tap: the page sends `{"type": "tap"}`. | Not a ping, so `synced` hands it to `decode`, which makes it a `Tap`. The `screen` actor tells the hub. |
+| 4 | `Flash(t)`, with `t = time.monotonic() + 0.5`. | The hub tells it to every screen, and each `screen` tells its `out` `{"type": "flash", "t": t}`. Every page gets the same `t`. |
+| 5 | The flash frame, which reaches each page at a different moment. | `conn.at(msg.t, flash)` turns `t` into the page's own time with its offset and sets a timer, so every page runs `flash` at server time `t`. |
+
+The hub stamps `t` with `time.monotonic`, the clock `synced` answers pings with by default. The two have to match: a `t` on any other clock means nothing to the pages. Half a second is the head start: every page needs its frame before `t` comes. On a LAN that is plenty.
+
+### `synced`, the server half
+
+- **`synced(props, decode, clock=time.monotonic)`** returns the `props` and `decode` that `actors.websocket` takes, wrapped. A `{"type": "ping", "c": n}` frame is answered with `{"type": "pong", "c": n, "s": clock()}` and never reaches your actor. Every other frame goes to your `decode` and on to your actor, as it would without `synced`. A ping whose `c` is not a finite number closes the socket with 1003.
+- **`t` is yours.** `synced` never reads the times your actor sends: putting them in a field `t`, on the same `clock`, is a convention between your app and your page.
+- **The server keeps nothing per connection.** It doesn't know any page's offset; each page works out its own. A page that is slow to sync holds its own messages, so nothing piles up on the server.
+
+### `clock.js`, the page half
+
+`clock.js` is an ES module shipped in the wheel, served from `CLOCK_JS` as in the example. `connect(path, onMessage)` opens the socket and returns:
 
 ```js
-import { connect } from "/ohra/clock.js";
-const conn = connect("/ws", (msg) => conn.at(msg.t, () => show(msg)));
-conn.send({ type: "hello" }); // JSON; dropped while disconnected
-conn.now();                   // the server's clock now, in seconds
-conn.cancelAll();             // drop every pending at()
+conn.send({ type: "tap" }); // JSON; dropped while disconnected
+conn.now();                 // the server's clock now, in seconds
+conn.at(t, fn);             // run fn at server time t
+conn.cancelAll();           // drop every pending at()
 ```
 
-- **The offset** comes from the ping with the shortest round trip among the last six, one every 10 s: the server's time minus the page's time halfway through it. Not the fastest of all time, because a device's clock drifts against the server's.
-- **Messages wait for the first pong** of each connection, and come in order right after it. It reconnects on its own, with backoff, and syncs again first.
-- **`at(t, fn)`** runs `fn` at server time `t`, at once if that has passed, or if it is more than 5 s away: a `t` that far ahead means the offset is wrong, and acting beats waiting forever.
-- **Draw motion from events, not streams.** Send where something starts, its velocity and its `t0`; every page draws it each frame from `conn.now()`. Nothing is streamed, and every page agrees on where it is.
+- **The offset** comes from the fastest ping of the last six, not the fastest ever: a device's clock drifts against the server's, so an old sample goes stale.
+- **`onMessage` gets messages in order**, starting right after the first pong of each connection. The socket reconnects on its own, with backoff, and syncs again before it delivers anything.
+- **`at(t, fn)`** runs `fn` at server time `t`. It runs it at once if `t` has passed, and also if `t` is more than 5 s away: that far ahead means the offset is wrong, and acting now beats waiting forever.
 
-`examples/fastapi_relay_rally.py` is a game built this way: phones are the courts, a big screen is the scoreboard, and the puck is passed from phone to phone, dropping in on the next one at the moment the server named.
+### Moving things: send events, not positions
+
+For something that moves, don't stream its position. Send where it starts, its velocity, and the server time `t0` it starts at, once. Every page then draws it each frame from `conn.now()`:
+
+```js
+function draw() {
+  const dt = conn.now() - puck.t0; // seconds since it started, on the server's clock
+  place(puck.x + puck.vx * dt, puck.y + puck.vy * dt);
+  requestAnimationFrame(draw);
+}
+```
+
+Nothing is streamed, and every page agrees on where the puck is, because every page computes it from the same numbers and the same clock.
+
+`examples/fastapi_relay_rally.py` is a game built this way: phones are the courts, a big screen is the scoreboard, and the puck is passed from phone to phone, dropping onto the next one at the moment the server named.
 
 ---
 

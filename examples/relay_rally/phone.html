@@ -37,6 +37,7 @@
   // The court, in court units: 9 wide, 16 tall, the paddle near the bottom.
   const W = 9, H = 16, PADDLE_Y = H - 1.4, PADDLE_HALF = 0.9, PUCK = 0.45;
   const MAX_ANGLE = Math.PI / 3; // 60 degrees off vertical, at the paddle's edge
+  const BASE_SPEED = 10; // the server's: the speed of a serve, which every rally starts from
 
   const canvas = document.getElementById("court");
   const ctx = canvas.getContext("2d");
@@ -59,6 +60,9 @@
   let paddle = W / 2;
   let flash = 0; // until when the miss flash shows, on the page clock
   let trail = [];
+  let sparks = []; // {x, y, vx, vy}, court units, thrown off by the last hit, at sparked
+  let sparked = 0; // when the last hit threw them, on the page clock (ms)
+  let shake = 0; // until when a miss shakes the court, on the page clock (ms)
   let view = null; // court units to canvas pixels: {s, ox, oy}
   let full = false; // 8 are playing: clock.js reconnects, and we get in when one leaves
 
@@ -136,15 +140,23 @@
         puck.done = true;
         conn.send({ type: "miss", serial: puck.serial });
         flash = performance.now() + 400;
+        shake = performance.now() + 250;
         blip(110, 0.4, 0.2);
+        navigator.vibrate?.([80, 40, 120]); // Android; iPhones let no page vibrate
         return;
       }
       // where it meets the paddle sets the angle: straight up in the middle, 60 at the edges
       const angle = Math.max(-1, Math.min(1, (x - paddle) / PADDLE_HALF)) * MAX_ANGLE;
       puck.up = { t1: tc, x1: x, vx: puck.speed * Math.sin(angle), vy: -puck.speed * Math.cos(angle) };
       puck.bounces = 0;
-      blip(660, 0.05);
+      blip(660 * Math.min(2, puck.speed / BASE_SPEED), 0.05); // higher as the rally speeds up
       navigator.vibrate?.(15);
+      sparks = Array.from({ length: 14 }, () => {
+        const a = (Math.random() - 0.5) * Math.PI * 0.9; // a fan, upwards
+        const v = 4 + Math.random() * 6;
+        return { x, y: PADDLE_Y, vx: v * Math.sin(a), vy: -v * Math.cos(a) };
+      });
+      sparked = performance.now();
       return;
     }
     const up = puck.up;
@@ -243,6 +255,12 @@
     const now = conn.now();
     step(now);
     const { ox, oy } = view;
+    const shaking = (shake - performance.now()) / 250; // 1 at the miss, down to 0
+    ctx.save();
+    if (shaking > 0) {
+      const d = 3 * px * shaking;
+      ctx.translate((Math.random() - 0.5) * 2 * d, (Math.random() - 0.5) * 2 * d);
+    }
 
     glow(ctx, color, 8); // the side walls
     ctx.globalAlpha = 0.6;
@@ -282,7 +300,18 @@
       ctx.globalAlpha = 1;
       text(ctx, "V", ox + puck.x0 * s, oy + 0.6 * s, px, color, "center");
     }
-    ctx.restore();
+    const age = (performance.now() - sparked) / 1000;
+    if (age < 0.4) { // the sparks of a hit fly, fall and fade
+      glow(ctx, color, 10);
+      ctx.globalAlpha = 1 - age / 0.4;
+      for (const k of sparks) {
+        const x = k.x + k.vx * age, y = k.y + k.vy * age + 12 * age * age;
+        ctx.fillRect(ox + x * s - px / 2, oy + y * s - px / 2, px, px);
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore(); // the clip
+    ctx.restore(); // the shake
 
     if (mine && mine.lives === 0) text(ctx, "OUT", w / 2, oy + (H * s) / 2, px * 2, color, "center");
     if (performance.now() < flash) {

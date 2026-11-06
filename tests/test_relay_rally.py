@@ -489,6 +489,12 @@ def test_the_wall_does_not_wait_for_the_qr_library():
     assert " async" in tag  # defer would still hold the module script back behind it
 
 
+def test_the_phone_knows_the_servers_base_speed():
+    page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
+    (line,) = [x for x in page.splitlines() if "const BASE_SPEED = " in x]
+    assert float(line.split("=")[1].split(";")[0]) == rr.BASE_SPEED  # the hit's pitch follows it
+
+
 def test_the_phone_uses_no_api_that_needs_https():
     page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
     assert "randomUUID" not in page  # the join URL is plain http on the LAN

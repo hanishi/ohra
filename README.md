@@ -133,7 +133,7 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 
 ## Articles
 
-- [Abstractions are for the AI, too](https://github.com/hanishi/ohra/blob/main/docs/articles/abstractions-for-ai.md) ([日本語](https://github.com/hanishi/ohra/blob/main/docs/articles/abstractions-for-ai.ja.md)): a coding agent builds a multiplayer game on ohra, and where its bugs were, and were not
+- [Abstractions Matter Even More When AI Writes the Code](https://github.com/hanishi/ohra/blob/main/docs/articles/abstractions-for-ai.md) ([日本語](https://github.com/hanishi/ohra/blob/main/docs/articles/abstractions-for-ai.ja.md)): a coding agent builds a multiplayer game on ohra, and where its bugs were, and were not
 
 ## Examples
 

@@ -413,7 +413,7 @@ def test_a_bad_frame_from_a_phone_closes_it(frame: Frame):
 def test_the_pages_and_clock_js_are_served():
     from fastapi.testclient import TestClient
 
-    with TestClient(rr.make_app()) as client:
+    with TestClient(rr.make_app(), base_url="http://localhost") as client:
         assert "<!doctype html>" in client.get("/wall").text.lower()
         assert "<!doctype html>" in client.get("/play").text.lower()
         assert "export function connect" in client.get("/ohra/clock.js").text
@@ -422,6 +422,13 @@ def test_the_pages_and_clock_js_are_served():
         assert arcade.headers["content-type"].startswith("text/javascript")
         url = client.get("/join").json()["url"]
         assert url.startswith("http://") and url.endswith(":80/play")
+
+
+def test_the_join_url_is_the_address_the_wall_was_opened_at():
+    from fastapi.testclient import TestClient
+
+    with TestClient(rr.make_app(), base_url="https://rally.example.com") as client:
+        assert client.get("/join").json()["url"] == "https://rally.example.com/play"
 
 
 def test_the_join_url_falls_back_to_localhost(monkeypatch: pytest.MonkeyPatch):

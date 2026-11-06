@@ -17,6 +17,8 @@
   form input { width: 12ch; }
   form button { cursor: pointer; }
   form[hidden] { display: none; }
+  #tilt { position: fixed; left: 8px; bottom: 6px; z-index: 6; pointer-events: none;
+    font: 11px ui-monospace, monospace; color: #39ff6a99; }
 </style>
 </head>
 <body>
@@ -27,6 +29,7 @@
   <button>JOIN</button>
 </form>
 <canvas id="court"></canvas>
+<div id="tilt"></div>
 <script type="module">
   import { connect } from "/ohra/clock.js";
   import { blip, crt, fit, glow, heart, text, unlock, DIM, GREEN } from "/arcade.js";
@@ -62,6 +65,7 @@
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     unlock(); // a tap: browsers allow audio from here on
+    startTilt(); // and motion, once the player allows it
     const name = nameInput.value.trim().slice(0, 12);
     store?.setItem("rr-name", name);
     form.hidden = true;
@@ -156,14 +160,65 @@
 
   // --- the paddle follows the finger, here on the phone: no round trip -------------------------
 
+  const inCourt = (x) => Math.max(PADDLE_HALF, Math.min(W - PADDLE_HALF, x));
+  let touching = false; // a finger on the court wins over the tilt
+
   function pointer(e) {
     if (!view) return;
     const rect = canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) * (canvas.width / rect.width);
-    paddle = Math.max(PADDLE_HALF, Math.min(W - PADDLE_HALF, (px - view.ox) / view.s));
+    paddle = inCourt((px - view.ox) / view.s);
   }
   canvas.addEventListener("pointermove", pointer);
-  canvas.addEventListener("pointerdown", pointer);
+  canvas.addEventListener("pointerdown", (e) => {
+    touching = true;
+    pointer(e);
+  });
+  for (const end of ["pointerup", "pointercancel"]) {
+    canvas.addEventListener(end, () => {
+      touching = false;
+      anchor = null; // the tilt picks up from where the finger left the paddle
+    });
+  }
+
+  // --- or the tilt of the phone, where the browser allows it: on https only --------------------
+
+  const TILT_SPAN = 25; // degrees of tilt from the middle of the court to an edge
+  let anchor = null; // the tilt that keeps the paddle where it is, taken from the next reading
+
+  const tiltStatus = document.getElementById("tilt");
+  const showTilt = (s) => (tiltStatus.textContent = `TILT: ${s}`);
+  let readings = 0;
+
+  function tilt(e) {
+    if (e.gamma === null) return;
+    if (readings++ === 0) showTilt("ON");
+    if (touching) return;
+    anchor ??= e.gamma - ((paddle - W / 2) / (W / 2)) * TILT_SPAN;
+    const target = inCourt(W / 2 + ((e.gamma - anchor) / TILT_SPAN) * (W / 2));
+    paddle += (target - paddle) * 0.5; // smooths the sensor's jitter
+  }
+
+  // iOS asks the player first, and only from a tap: the JOIN tap calls this
+  function startTilt() {
+    const D = globalThis.DeviceOrientationEvent;
+    if (!D) return showTilt("NO SENSOR");
+    if (!isSecureContext) return showTilt("NEEDS HTTPS"); // plain http on the LAN: the finger it is
+    const listen = () => {
+      showTilt("WAITING");
+      addEventListener("deviceorientation", tilt);
+      setTimeout(() => readings || showTilt("NO READINGS"), 2000);
+    };
+    if (typeof D.requestPermission === "function") {
+      showTilt("ASKING");
+      D.requestPermission().then(
+        (answer) => (answer === "granted" ? listen() : showTilt(String(answer).toUpperCase())),
+        (err) => showTilt(`ERROR ${err?.name ?? err}`),
+      );
+    } else {
+      listen();
+    }
+  }
 
   // --- drawing ---------------------------------------------------------------------------------
 

@@ -589,7 +589,10 @@ def make_app(
 
     @app.get("/join")
     async def join(request: Request) -> dict[str, str]:
-        return {"url": lan_url(request.url.port or 80)}
+        if request.url.hostname in ("localhost", "127.0.0.1", "::1"):
+            return {"url": lan_url(request.url.port or 80)}
+        # opened at a real address (the LAN IP, or a host behind a proxy): phones use the same one
+        return {"url": f"{request.url.scheme}://{request.url.netloc}/play"}
 
     @app.websocket("/ws/player")
     async def player_socket(

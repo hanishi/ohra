@@ -182,9 +182,7 @@ ohraには、テスト側から時間を進められるManualTimeがあります
 ```python
 async with ActorTestKit(manual_time=True) as kit:
     manual = ManualTime(kit.system)
-    rally = kit.spawn(
-        rr.rally(clock=lambda: manual.scheduler.current_time)
-    )
+    rally = kit.spawn(rr.rally(clock=lambda: manual.scheduler.current_time))
     ...
     await manual.time_passes(180.0)
 ```

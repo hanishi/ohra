@@ -17,14 +17,18 @@ const local = () => performance.now() / 1000;
 // freeze the offset, and a device's clock drifts against the server's.
 export const SAMPLE_WINDOW = 6;
 
-// A t further ahead than this means the offset is wrong: run it at once rather than never.
-const MAX_AHEAD_MS = 5000;
-
 // The server clock minus the page clock, from the fastest of the last SAMPLE_WINDOW pings. A
 // sample is {c: sent, r: received} on the page clock and {s} on the server clock.
 export function offsetFrom(samples) {
   const best = samples.slice(-SAMPLE_WINDOW).reduce((a, b) => (b.r - b.c < a.r - a.c ? b : a));
   return best.s - (best.c + (best.r - best.c) / 2);
+}
+
+// How long to wait, in ms, for server time t, with the page's clock at nowLocal: none once t has
+// passed, however far ahead it is otherwise. Messages wait for the first pong, so the offset is
+// synced by the time anything asks.
+export function delayFor(t, offset, nowLocal) {
+  return Math.max(0, (t - offset - nowLocal) * 1000);
 }
 
 export function connect(path, onMessage) {
@@ -75,11 +79,10 @@ export function connect(path, onMessage) {
     send,
     now: () => local() + offset,
     at(t, fn) {
-      const ms = (t - offset - local()) * 1000;
       const id = setTimeout(() => {
         pending.delete(id);
         fn();
-      }, ms > MAX_AHEAD_MS ? 0 : Math.max(0, ms));
+      }, delayFor(t, offset, local()));
       pending.add(id);
     },
     cancelAll() {

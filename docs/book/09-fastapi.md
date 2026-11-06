@@ -386,7 +386,7 @@ conn.cancelAll();           // drop every pending at()
 
 - **The offset** comes from the fastest ping of the last six, not the fastest ever: a device's clock drifts against the server's, so an old sample goes stale.
 - **`onMessage` gets messages in order**, starting right after the first pong of each connection. The socket reconnects on its own, with backoff, and syncs again before it delivers anything.
-- **`at(t, fn)`** runs `fn` at server time `t`. It runs it at once if `t` has passed, and also if `t` is more than 5 s away: that far ahead means the offset is wrong, and acting now beats waiting forever.
+- **`at(t, fn)`** runs `fn` at server time `t`, however far ahead that is, and at once if `t` has passed. A `t` is never read against an unsynced clock, since messages wait for the first pong.
 
 ### Moving things: send events, not positions
 

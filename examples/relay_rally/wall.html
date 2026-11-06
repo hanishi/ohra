@@ -242,8 +242,35 @@
 
   function over(w, h, px) {
     const winners = state.players.filter((p) => state.winners.includes(p.id));
-    text(ctx, winners.length > 1 ? "SHARED WIN" : "WINNER", w / 2, h * 0.22, px * 3, GREEN, "center");
-    winners.forEach((p, i) => text(ctx, p.name, w / 2, h * 0.4 + i * 14 * px, px * 3, p.color, "center"));
+    text(ctx, winners.length > 1 ? "SHARED WIN" : "WINNER", w / 2, h * 0.08, px * 3, GREEN, "center");
+
+    // the podium, lives first and then returns: first in the middle, second left, third right
+    const ranked = state.players.filter((p) => p.in_game)
+      .sort((a, b) => b.lives - a.lives || b.returns - a.returns).slice(0, 3);
+    const floor = h * 0.78, half = w * 0.11;
+    ranked.forEach((p, i) => {
+      const cx = w * [0.5, 0.25, 0.75][i], top = h * [0.42, 0.52, 0.6][i];
+      ctx.globalAlpha = 0.18;
+      glow(ctx, p.color, 0);
+      ctx.fillRect(cx - half, top, 2 * half, floor - top); // the step
+      ctx.globalAlpha = 1;
+      glow(ctx, p.color, 14);
+      ctx.fillRect(cx - half, top, 2 * half, px); // its lit edge
+      text(ctx, String(i + 1), cx, top + 5 * px, px * 3, p.color, "center");
+      text(ctx, `${p.returns} RETURNS`, cx, top + 24 * px, px, p.color, "center");
+      text(ctx, p.name, cx, top - 20 * px, px * 2, p.color, "center");
+      for (let k = 0; k < 5; k++) heart(ctx, cx - 17 * px + k * 7 * px, top - 8 * px, px, p.color, k < p.lives);
+    });
+
+    // the game's moments: its longest rally, and the fastest puck anyone sent back
+    const fastest = state.players.filter((p) => p.in_game && p.returns > 0)
+      .reduce((a, b) => (b.best > (a?.best ?? 0) ? b : a), null);
+    const lines = [`LONGEST RALLY ${state.longest}`];
+    if (fastest) {
+      const times = serveSpeed ? ` ${(fastest.best / serveSpeed).toFixed(1)}X` : "";
+      lines.push(`FASTEST SAVE ${fastest.name}${times}`);
+    }
+    lines.forEach((s, i) => text(ctx, s, w / 2, h * 0.84 + i * 9 * px, px * 1.5, GREEN, "center"));
   }
 
   requestAnimationFrame(frame);

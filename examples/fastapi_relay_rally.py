@@ -175,6 +175,8 @@ class _Player:
     lives: int = LIVES
     in_game: bool = False
     cpu: bool = False
+    returns: int = 0  # this game's
+    best: float = 0.0  # the fastest puck returned this game
 
 
 @dataclass
@@ -191,6 +193,7 @@ class _Game:
     ends_at: float | None = None
     winners: list[str] = field(default_factory=list[str])
     puck: _Puck | None = None
+    longest: int = 0  # the longest rally this game, in passes
 
 
 def rally(
@@ -222,11 +225,14 @@ def rally(
                         "connected": p.ref is not None,
                         "in_game": p.in_game,
                         "cpu": p.cpu,
+                        "returns": p.returns,
+                        "best": p.best,
                     }
                     for p in players.values()
                 ],
                 "ends_at": game.ends_at,
                 "winners": game.winners,
+                "longest": game.longest,
             }
 
         def tell_everyone(frame: Frame) -> None:
@@ -321,8 +327,9 @@ def rally(
                     for id in [id for id, p in players.items() if p.ref is None]:
                         del players[id]
                     for p in here:
-                        p.lives, p.in_game = LIVES, True
+                        p.lives, p.in_game, p.returns, p.best = LIVES, True, 0, 0.0
                     game.phase, game.ends_at, game.winners = "playing", clock() + GAME_S, []
+                    game.longest = 0
                     timers.start_single_timer("time-up", _TimeUp(), GAME_S)
                     tell_everyone(state())
                     serve()
@@ -354,6 +361,10 @@ def rally(
                     x = min(max(x, 0.0), 1.0)
                     angle = min(max(angle, -MAX_ANGLE), MAX_ANGLE)
                     t = max(t, clock())  # a late report (a phone that stalled): land in the future
+                    me = players[id]
+                    me.returns += 1
+                    me.best = max(me.best, now.speed)
+                    game.longest = max(game.longest, now.rally + 1)
                     send_puck(to, t + FLIGHT_S, x, angle, now.speed * SPEEDUP, now.rally + 1)
                     for w in walls:
                         w.tell(

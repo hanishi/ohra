@@ -246,6 +246,36 @@ async def test_the_game_ends_when_time_is_up_and_most_lives_win():
         assert state["winners"] == [player_id(1 - i)]
 
 
+async def test_the_state_counts_returns_fastest_saves_and_the_longest_rally():
+    async with game() as g:
+        i, incoming = await g.start()
+        g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
+        j, passed = await g.puck()
+        g.rally.tell(rr.Out(player_id(j), passed["serial"], g.now(), 0.5, 0.0))
+        k, again = await g.puck()
+        g.rally.tell(rr.Miss(player_id(k), again["serial"]))
+        state = await g.state()
+        stats = {p["id"]: (p["returns"], p["best"]) for p in state["players"]}
+        assert stats == {
+            player_id(i): (1, pytest.approx(10.0)),  # the serve
+            player_id(j): (1, pytest.approx(10.0 * 1.06)),  # the pass, faster
+        }
+        assert state["longest"] == 2
+
+
+async def test_a_new_game_counts_from_zero():
+    async with game() as g:
+        i, incoming = await g.start()
+        g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
+        await g.settle(180.0)
+        assert (await g.state())["longest"] == 1
+        await g.settle(rr.LOBBY_AFTER_S)
+        g.rally.tell(rr.Start())
+        state = await g.state()
+        assert state["longest"] == 0
+        assert {(p["returns"], p["best"]) for p in state["players"]} == {(0, 0.0)}
+
+
 async def test_a_tie_is_shared():
     async with game() as g:
         await g.start()

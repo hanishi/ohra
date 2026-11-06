@@ -123,7 +123,7 @@ async def chat(ws: WebSocket) -> None:
 
 - **One actor per connection.** `actors.websocket(ws, echo, Said)` accepts the socket, spawns `echo(out)`, tells it `Said(text)` for every frame that comes in, and sends every message it tells `out` as JSON. It returns when the connection is over.
 - **The two lives are tied.** A closed socket stops the actor, after the frames it already has. An actor that stops, by returning `Behaviors.stopped()` or by failing, closes the socket once the frames it told `out` are sent, and so does the system shutting down: `terminate()` drains every open connection in the coordinated shutdown's `service-stop` phase, up to the phase's timeout, and closes it with 1000.
-- **`out` holds 16 frames** (`buffer_size`). A client that falls further behind is closed with code 1008 under the default `OverflowStrategy.fail`, even one that has stopped reading so that a send never returns. The drop strategies drop frames instead.
+- **`out` holds 16 frames** (`buffer_size`). A client that falls further behind is closed with code 1008 under the default `OverflowStrategy.fail`, even one that has stopped reading so that a send never returns. The drop strategies drop frames instead. Either way it is a buffer with a policy, not backpressure: `tell` never waits, so a slow client never slows the actor down, and it is closed or loses frames instead. Backpressure, where the producer waits for the consumer, is what streams do ([chapter 13](13-streams.md)).
 - **A connection that arrives while the system shuts down** is closed with 1001 (going away).
 - **`decode` is the trust boundary.** A frame it rejects by raising closes the socket with 1003 (unsupported data), logged with its traceback on `ohra.ext.fastapi`, and stops the actor. Frames the actor tells after that close are dropped: they have nowhere to go, and they are not the route's error.
 
@@ -234,6 +234,8 @@ sequenceDiagram
 The round trip took `r - c` = 80 ms. If the way there took as long as the way back, the server read its clock halfway through, at page time `(c + r) / 2` = 100.040. The server's clock said 5012.040 at that moment, so the offset is 5012.040 − 100.040 = 4912.000 s, and from then on the server's time is the page's time plus 4912.000.
 
 The two halves of a trip are rarely exactly equal, but the error can't be more than half the round trip, so a fast ping gives a good offset. `clock.js` sends five pings when it connects and one every 10 s after that, and uses the fastest of the last six.
+
+That makes it an estimate, not a guarantee. A page's offset is off by at most half its fastest recent round trip, and its timers fire a few milliseconds late: on a LAN, close enough that people watching see one moment. Three things make it worse: a route that is slow one way and fast the other, which skews the offset by up to half the round trip; a busy page, whose timers fire later; and a tab in the background, whose timers the browser holds back, often by a second or more. Nothing reports how far off a page is, so this is for things people watch together, not for anything that needs a bound.
 
 ### An example: every screen flashes at once
 
@@ -362,6 +364,8 @@ Run it with `uvicorn app:app --host 0.0.0.0` and open the server's address on ea
 | 5 | The flash frame, which reaches each page at a different moment. | `conn.at(msg.t, flash)` turns `t` into the page's own time with its offset and sets a timer, so every page runs `flash` at server time `t`. |
 
 The hub stamps `t` with `time.monotonic`, the clock `synced` answers pings with by default. The two have to match: a `t` on any other clock means nothing to the pages. Half a second is the head start: every page needs its frame before `t` comes. On a LAN that is plenty.
+
+**One clock means one process.** `time.monotonic` counts from a point that differs from machine to machine, so a `t` means something only to a page whose pings the same process answers. In this example the hub and every connection share one process. In a cluster, where the hub might be a singleton on another node, have the hub send a delay, `Flash(0.5)`, and each `screen` actor stamp it as `clock() + delay` on its own node: the pages then land apart by however long the hub's message took to reach each node. Or give every node `synced(..., clock=time.time)`, and the nodes agree as closely as NTP keeps their clocks.
 
 ### `synced`, the server half
 

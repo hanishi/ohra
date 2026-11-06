@@ -22,6 +22,7 @@ class SpawnChild:
     reply_to: ActorRef[ActorRef[str]]
 
 
+@Behaviors.receive
 def parent(ctx: ActorContext[SpawnChild], msg: SpawnChild) -> Behavior[SpawnChild]:
     msg.reply_to.tell(ctx.spawn(Behaviors.ignore, msg.name))
     return Behaviors.same
@@ -29,7 +30,7 @@ def parent(ctx: ActorContext[SpawnChild], msg: SpawnChild) -> Behavior[SpawnChil
 
 async def test_system_address_shapes_paths():
     port = free_port()
-    async with ActorSystem(Behaviors.receive(parent), "a", address=("127.0.0.1", port)) as system:
+    async with ActorSystem(parent, "a", address=("127.0.0.1", port)) as system:
         assert system.path == f"ohra://a@127.0.0.1:{port}/user"
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
         assert child.path == f"ohra://a@127.0.0.1:{port}/user/child"
@@ -41,9 +42,7 @@ async def test_system_address_shapes_paths():
 
 
 async def test_resolve_local_path_returns_the_local_ref():
-    async with ActorSystem(
-        Behaviors.receive(parent), "a", address=("127.0.0.1", free_port())
-    ) as system:
+    async with ActorSystem(parent, "a", address=("127.0.0.1", free_port())) as system:
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
         assert system.resolve(child.path) is child
         assert system.resolve(system.path) is system._root.ref  # pyright: ignore[reportPrivateUsage]
@@ -79,7 +78,7 @@ async def test_resolve_unknown_local_path_raises():
 
 
 async def test_system_without_address_cannot_resolve_remote_paths():
-    async with ActorSystem(Behaviors.receive(parent), "a") as system:
+    async with ActorSystem(parent, "a") as system:
         child = await system.ask(lambda r: SpawnChild("child", r), timeout=1)
         assert system.resolve(child.path) is child  # local resolution works without remoting
         with pytest.raises(LookupError):
@@ -125,12 +124,13 @@ class NotRemotable:
 
 
 def greeter(log: list[str]) -> Behavior[Greet]:
+    @Behaviors.receive_message
     def on_message(msg: Greet) -> Behavior[Greet]:
         log.append(msg.name)
         msg.reply_to.tell(Greeted(f"hello {msg.name}"))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def node(behavior: Behavior[Greet], name: str, port: int) -> ActorSystem[Greet]:
@@ -168,6 +168,7 @@ async def test_actor_asks_remote_with_ctx_ask():
     seen: list[str] = []
 
     def asker(target_path: str) -> Behavior[str | Answer]:
+        @Behaviors.receive
         def on_message(
             ctx: ActorContext[str | Answer], msg: str | Answer
         ) -> Behavior[str | Answer]:
@@ -187,7 +188,7 @@ async def test_actor_asks_remote_with_ctx_ask():
                     seen.append("unexpected")
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message
 
     async with node(greeter(log), "a", free_port()) as a:
         async with ActorSystem(asker(a.path), "b", address=("127.0.0.1", free_port())) as b:
@@ -213,6 +214,7 @@ Counter = EntityTypeKey[CounterCmd]("Counter")
 
 def counter_entity(_entity: EntityContext[CounterCmd]) -> Behavior[CounterCmd]:
     def active(total: int) -> Behavior[CounterCmd]:
+        @Behaviors.receive_message
         def on_message(msg: CounterCmd) -> Behavior[CounterCmd]:
             match msg:
                 case Add(n):
@@ -221,7 +223,7 @@ def counter_entity(_entity: EntityContext[CounterCmd]) -> Behavior[CounterCmd]:
                     reply_to.tell(total)
                     return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     return active(0)
 
@@ -337,6 +339,7 @@ async def test_adapter_reply_refs_survive_garbage_collection():
     seen: list[str] = []
 
     def asker(target_path: str) -> Behavior[str | Greeted]:
+        @Behaviors.receive
         def on_message(
             ctx: ActorContext[str | Greeted], msg: str | Greeted
         ) -> Behavior[str | Greeted]:
@@ -349,7 +352,7 @@ async def test_adapter_reply_refs_survive_garbage_collection():
                     seen.append(text)
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message
 
     async with node(greeter(log), "a", free_port()) as a:
         async with ActorSystem(asker(a.path), "b", address=("127.0.0.1", free_port())) as b:
@@ -367,6 +370,7 @@ class Ping:
     reply_to: ActorRef[Add]
 
 
+@Behaviors.receive_message
 def ponger(msg: Ping) -> Behavior[Ping]:
     msg.reply_to.tell(Add(1))
     return Behaviors.same
@@ -376,9 +380,7 @@ async def test_entity_ref_is_rebuilt_on_the_other_node():
     """An EntityRef crosses the wire as region path plus id; the other node sends straight to the
     region."""
     region = Sharding.init(Entity(Counter, counter_entity))
-    async with ActorSystem(
-        Behaviors.receive_message(ponger), "a", address=("127.0.0.1", free_port())
-    ) as a:
+    async with ActorSystem(ponger, "a", address=("127.0.0.1", free_port())) as a:
         async with ActorSystem(region, "b", address=("127.0.0.1", free_port())) as b:
             remote_ponger: ActorRef[Ping] = b.resolve(a.path)
             for entity_id in ("x", "y", "x"):
@@ -448,10 +450,11 @@ async def test_oversize_message_raises_at_tell():
 async def test_guardian_stopping_closes_remoting():
     port = free_port()
 
+    @Behaviors.receive_message
     def quitter(_msg: str) -> Behavior[str]:
         return Behaviors.stopped()
 
-    system = ActorSystem(Behaviors.receive_message(quitter), "a", address=("127.0.0.1", port))
+    system = ActorSystem(quitter, "a", address=("127.0.0.1", port))
     async with system:
         assert _port_open(port)
         system.tell("quit")
@@ -552,18 +555,20 @@ async def test_tells_to_a_peer_that_stopped_reading_are_dead_letters_past_the_bo
     monkeypatch.setattr(remoting_module, "SHUTDOWN_FLUSH_TIMEOUT", 0.05)
     dead: list[DeadLetter] = []
 
+    @Behaviors.setup
     def recorder(ctx: ActorContext[DeadLetter]) -> Behavior[DeadLetter]:
         ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, ctx.self))
 
+        @Behaviors.receive_message
         def on_message(d: DeadLetter) -> Behavior[DeadLetter]:
             dead.append(d)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     async with (
         stalled_peer() as (port, _),
-        ActorSystem(Behaviors.setup(recorder), "a", address=("127.0.0.1", free_port())) as a,
+        ActorSystem(recorder, "a", address=("127.0.0.1", free_port())) as a,
     ):
         remote = a.resolve(f"ohra://b@127.0.0.1:{port}/user")
         remote.tell(Greeted("first"))

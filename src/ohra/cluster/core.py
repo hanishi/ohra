@@ -692,6 +692,7 @@ def _stop_message() -> object:
 
 
 def _core(cluster: Cluster) -> Behavior[_Msg]:
+    @Behaviors.setup
     async def setup(ctx: ActorContext[_Msg]) -> Behavior[_Msg]:
         remoting = ctx.system.remoting
         assert remoting is not None
@@ -699,17 +700,18 @@ def _core(cluster: Cluster) -> Behavior[_Msg]:
         await remoting.listening.wait()
         return _CoreDaemon(ctx, cluster).start()
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def _heartbeat_receiver(self_unique_address: UniqueAddress) -> Behavior[Heartbeat]:
     """ClusterHeartbeatReceiver: answers every heartbeat."""
 
+    @Behaviors.receive_message
     def on_heartbeat(hb: Heartbeat) -> Behavior[Heartbeat]:
         hb.reply_to.tell(HeartbeatRsp(self_unique_address, hb.seq, hb.created_ns))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_heartbeat)
+    return on_heartbeat
 
 
 class _CoreDaemon:
@@ -812,6 +814,7 @@ class _CoreDaemon:
         return Behaviors.same
 
     def trying_to_join(self, join_with: Address, deadline: float) -> Behavior[_Msg]:
+        @Behaviors.receive
         def receive(_ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
                 case Welcome(from_, gossip):
@@ -847,7 +850,7 @@ class _CoreDaemon:
                     pass
             return Behaviors.same
 
-        return Behaviors.receive(receive).receive_signal(self._on_signal)
+        return receive.receive_signal(self._on_signal)
 
     def _initialized(self, _ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
         match msg:

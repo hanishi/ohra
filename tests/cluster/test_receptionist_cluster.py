@@ -53,11 +53,13 @@ class Spawn:
     reply_to: ActorRef[ActorRef[Any]]
 
 
+@Behaviors.receive
 def spawner(ctx: ActorContext[Spawn], msg: Spawn) -> Behavior[Spawn]:
     msg.reply_to.tell(ctx.spawn(msg.behavior, msg.name))
     return Behaviors.same
 
 
+@Behaviors.receive_message
 def greeter(msg: SayHello | str) -> Behavior[SayHello | str]:
     if msg == "stop":
         return Behaviors.stopped()
@@ -67,11 +69,12 @@ def greeter(msg: SayHello | str) -> Behavior[SayHello | str]:
 
 
 def recorder(into: list[Any]) -> Behavior[Any]:
+    @Behaviors.receive_message
     def on_message(msg: Any) -> Behavior[Any]:
         into.append(msg)
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def node(port: int, seeds: list[int], **settings: Any) -> ActorSystem[Any]:
@@ -80,7 +83,7 @@ def node(port: int, seeds: list[int], **settings: Any) -> ActorSystem[Any]:
         seed_nodes=seed_nodes, **{**FAST, "receptionist_resend_interval": 0.05, **settings}
     )
     return ActorSystem(
-        Behaviors.receive(spawner),
+        spawner,
         "c",
         address=("127.0.0.1", port),
         cluster=cfg,
@@ -121,7 +124,7 @@ async def test_find_on_another_node_returns_a_working_remote_ref():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        svc = await spawn(a, Behaviors.receive_message(greeter), "svc")
+        svc = await spawn(a, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc))
         await eventually_async(lambda: instances_seen_on(b, 1))
         listing = await find(b)
@@ -140,7 +143,7 @@ async def test_subscriber_on_another_node_sees_the_service_appear_and_leave():
         sub = await spawn(b, recorder(events), "sub")
         Receptionist(b).ref.tell(Subscribe(GREETER, sub))
         await eventually(lambda: events == [Listing(GREETER, frozenset(), frozenset(), True)])
-        svc = await spawn(a, Behaviors.receive_message(greeter), "svc")
+        svc = await spawn(a, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc))
         await eventually(
             lambda: len(events) == 2 and len(events[-1].service_instances) == 1, timeout=3
@@ -157,8 +160,8 @@ async def test_registrations_on_two_nodes_both_reach_a_third():
     async with AsyncExitStack() as stack:
         a, b, c = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2, p3)]
         await eventually(lambda: all(all_up(n, 3) for n in (a, b, c)), timeout=5)
-        svc_a = await spawn(a, Behaviors.receive_message(greeter), "svc")
-        svc_b = await spawn(b, Behaviors.receive_message(greeter), "svc")
+        svc_a = await spawn(a, greeter, "svc")
+        svc_b = await spawn(b, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc_a))
         Receptionist(b).ref.tell(Register(GREETER, svc_b))
         await eventually_async(lambda: instances_seen_on(c, 2), timeout=2)
@@ -185,13 +188,13 @@ async def test_a_terminated_service_with_no_bindings_publishes_no_row():
 
         remoting._handle = recording_rows  # pyright: ignore[reportPrivateUsage]
         try:
-            first = await spawn(a, Behaviors.receive_message(greeter), "first")
+            first = await spawn(a, greeter, "first")
             Receptionist(a).ref.tell(Register(GREETER, first))
             await eventually_async(lambda: instances_seen_on(b, 1))
             before = max(versions)
-            unbound = await spawn(a, Behaviors.receive_message(greeter), "unbound")
+            unbound = await spawn(a, greeter, "unbound")
             Receptionist(a).ref.tell(_ActorTerminated(unbound))  # no keys: nothing changed
-            second = await spawn(a, Behaviors.receive_message(greeter), "second")
+            second = await spawn(a, greeter, "second")
             Receptionist(a).ref.tell(Register(GREETER, second))
             await eventually_async(lambda: instances_seen_on(b, 2))
         finally:
@@ -210,7 +213,7 @@ async def test_a_row_from_a_not_yet_member_is_hidden_until_it_joins():
         assert (await find(b)).all_service_instances == frozenset()
         seen: list[Listing[SayHello]] = []
         Receptionist(b).ref.tell(Subscribe(GREETER, await spawn(b, recorder(seen), "seen")))
-        svc = await spawn(c, Behaviors.receive_message(greeter), "svc")
+        svc = await spawn(c, greeter, "svc")
         row = ReceptionistRow(Cluster(c).self_unique_address, 5, ((GREETER.id, svc),))
         # over the wire, from c
         c.resolve(f"{Cluster(b).self_address.root}/system/receptionist").tell(row)
@@ -228,7 +231,7 @@ async def test_a_left_node_takes_its_services_with_it():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        svc = await spawn(a, Behaviors.receive_message(greeter), "svc")
+        svc = await spawn(a, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc))
         events: list[Listing[SayHello]] = []
         sub = await spawn(b, recorder(events), "sub")
@@ -247,7 +250,7 @@ async def test_a_crashed_node_keeps_services_in_all_instances_until_downed():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        svc = await spawn(a, Behaviors.receive_message(greeter), "svc")
+        svc = await spawn(a, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc))
         events: list[Listing[SayHello]] = []
         sub = await spawn(b, recorder(events), "sub")
@@ -273,15 +276,11 @@ async def test_a_restarted_node_replaces_its_old_row():
         a = await stack.enter_async_context(node(p1, [p1], retry_unsuccessful_join_after=0.1))
         b = await stack.enter_async_context(node(p2, [p1], retry_unsuccessful_join_after=0.1))
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        Receptionist(b).ref.tell(
-            Register(GREETER, await spawn(b, Behaviors.receive_message(greeter), "old"))
-        )
+        Receptionist(b).ref.tell(Register(GREETER, await spawn(b, greeter, "old")))
         await eventually_async(lambda: instances_seen_on(a, 1))
         await crash(b)
         b2 = await stack.enter_async_context(node(p2, [p1], retry_unsuccessful_join_after=0.1))
-        Receptionist(b2).ref.tell(
-            Register(GREETER, await spawn(b2, Behaviors.receive_message(greeter), "new"))
-        )
+        Receptionist(b2).ref.tell(Register(GREETER, await spawn(b2, greeter, "new")))
         await eventually(lambda: all_up(a, 2) and all_up(b2, 2), timeout=8)
         await eventually_async(lambda: instances_seen_on(a, 1), timeout=5)
         assert {r.path.rsplit("/", 1)[1] for r in (await find(a)).all_service_instances} == {"new"}
@@ -299,7 +298,7 @@ async def test_find_from_another_node_over_the_wire():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        svc = await spawn(a, Behaviors.receive_message(greeter), "svc")
+        svc = await spawn(a, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc))
         listing: Listing[SayHello] = await ask(
             b.resolve(receptionist_path(a)), lambda r: Find(GREETER, r), timeout=2
@@ -324,9 +323,7 @@ async def test_a_late_joiner_gets_existing_rows_within_one_exchange():
     async with AsyncExitStack() as stack:
         a = await stack.enter_async_context(node(p1, [p1], receptionist_resend_interval=10.0))
         await eventually(lambda: all_up(a, 1), timeout=3)
-        Receptionist(a).ref.tell(
-            Register(GREETER, await spawn(a, Behaviors.receive_message(greeter), "svc"))
-        )
+        Receptionist(a).ref.tell(Register(GREETER, await spawn(a, greeter, "svc")))
         b = await stack.enter_async_context(node(p2, [p1], receptionist_resend_interval=10.0))
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
         # the member-event push, not a resend
@@ -338,9 +335,7 @@ async def test_a_service_comes_back_when_its_node_is_reachable_again():
     async with AsyncExitStack() as stack:
         a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        Receptionist(a).ref.tell(
-            Register(GREETER, await spawn(a, Behaviors.receive_message(greeter), "svc"))
-        )
+        Receptionist(a).ref.tell(Register(GREETER, await spawn(a, greeter, "svc")))
         events: list[Listing[SayHello]] = []
         Receptionist(b).ref.tell(Subscribe(GREETER, await spawn(b, recorder(events), "sub")))
         await eventually(

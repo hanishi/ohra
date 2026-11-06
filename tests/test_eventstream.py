@@ -77,12 +77,13 @@ async def test_a_full_mailbox_drops_into_dead_letters():
         testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, dead.ref))
         await dead.expect_no_message(0.01)  # the subscription is in place
 
+        @Behaviors.receive_message
         async def slow(_msg: str) -> Behavior[str]:
             await asyncio.sleep(0.05)
             return Behaviors.same
 
         cell = testkit.system._root.spawn_child(  # pyright: ignore[reportPrivateUsage]
-            Behaviors.receive_message(slow), "slow", MailboxSelector.bounded(1)
+            slow, "slow", MailboxSelector.bounded(1)
         )
         for m in ("a", "b", "c"):
             cell.ref.tell(m)  # the mailbox holds one: "a"
@@ -93,6 +94,7 @@ async def test_a_full_mailbox_drops_into_dead_letters():
 
 
 async def test_a_full_backoff_stash_drops():
+    @Behaviors.setup
     def failing(_ctx: object) -> Behavior[str]:
         @Behaviors.receive_message
         def on_message(msg: str) -> Behavior[str]:
@@ -104,7 +106,7 @@ async def test_a_full_backoff_stash_drops():
         dropped: TestProbe[Dropped] = testkit.create_test_probe()
         testkit.system.event_stream.tell(EventStream.Subscribe(Dropped, dropped.ref))
         strategy = SupervisorStrategy.restart_with_backoff(10, 10).with_stash_capacity(1)
-        ref = testkit.spawn(Behaviors.supervise(Behaviors.setup(failing)).on_failure(strategy))
+        ref = testkit.spawn(Behaviors.supervise(failing).on_failure(strategy))
         for m in ("boom", "kept", "dropped"):
             ref.tell(m)
         d = await dropped.receive_message()
@@ -210,6 +212,7 @@ async def test_an_adapter_subscriber_is_removed_when_its_actor_stops():
     def saw(d: DeadLetter) -> str:
         return f"saw {d.message}"
 
+    @Behaviors.setup
     def listener(ctx: ActorContext[str]) -> Behavior[str]:
         ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, ctx.message_adapter(saw)))
         return Behaviors.ignore
@@ -217,7 +220,7 @@ async def test_an_adapter_subscriber_is_removed_when_its_actor_stops():
     async with ActorTestKit() as testkit:
         others: TestProbe[DeadLetter] = testkit.create_test_probe()
         testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, others.ref))
-        await testkit.stop(testkit.spawn(Behaviors.setup(listener)))
+        await testkit.stop(testkit.spawn(listener))
         ref = testkit.spawn(Behaviors.ignore)
         await testkit.stop(ref)
         ref.tell("late")
@@ -254,11 +257,12 @@ async def test_a_dead_letter_to_an_adapter_carries_the_message_sent():
         adapters: TestProbe[ActorRef[str]] = testkit.create_test_probe()
         testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, dead.ref))
 
+        @Behaviors.setup
         def owner(ctx: ActorContext[str]) -> Behavior[str]:
             adapters.ref.tell(ctx.message_adapter(lambda s: s.upper()))
             return Behaviors.ignore
 
-        ref = testkit.spawn(Behaviors.setup(owner))
+        ref = testkit.spawn(owner)
         adapter = await adapters.receive_message()
         await testkit.stop(ref)
         adapter.tell("late")
@@ -269,22 +273,24 @@ async def test_an_adapter_subscriber_that_cannot_take_a_dead_letter_does_not_loo
     gate = asyncio.Event()
     busy = asyncio.Event()
 
+    @Behaviors.receive_message
     async def wait(_m: str) -> Behavior[str]:
         busy.set()
         await gate.wait()
         return Behaviors.same
 
+    @Behaviors.setup
     def listener(ctx: ActorContext[str]) -> Behavior[str]:
         adapter = ctx.message_adapter(lambda d: f"saw {d.message}")
         ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, adapter))
-        return Behaviors.receive_message(wait)
+        return wait
 
     async with ActorTestKit() as testkit:
         try:
             others: TestProbe[DeadLetter] = testkit.create_test_probe()
             testkit.system.event_stream.tell(EventStream.Subscribe(DeadLetter, others.ref))
             full = testkit.system._root.spawn_child(  # pyright: ignore[reportPrivateUsage]
-                Behaviors.setup(listener), "full", MailboxSelector.bounded(1)
+                listener, "full", MailboxSelector.bounded(1)
             )
             full.ref.tell("busy")
             await busy.wait()

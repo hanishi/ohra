@@ -26,6 +26,7 @@ from .util import eventually
 
 
 def recorder(name: str, events: list[str], children: tuple[str, ...] = ()) -> Behavior[str]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[str]) -> Behavior[str]:
         for c in children:
             ctx.spawn(recorder(f"{name}/{c}", events), c)
@@ -37,17 +38,18 @@ def recorder(name: str, events: list[str], children: tuple[str, ...] = ()) -> Be
 
         return Behaviors.receive(lambda _c, m: Behaviors.same).receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_stopping_parent_stops_descendants_first():
     events: list[str] = []
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         ctx.spawn(recorder("a", events, ("x", "y")), "a")
         return Behaviors.ignore
 
-    system = ActorSystem(Behaviors.setup(guardian), "t")
+    system = ActorSystem(guardian, "t")
     system.terminate()
     await system.when_terminated()
     assert events[-1] == "stopped a"
@@ -75,9 +77,11 @@ type ParentCmd = Spawn | StopChild | Events
 async def test_watch_delivers_terminated_and_ctx_stop_drops_pending():
     events: list[str] = []
 
+    @Behaviors.setup
     def parent(ctx: ActorContext[ParentCmd]) -> Behavior[ParentCmd]:
         child: list[ActorRef[str]] = []
 
+        @Behaviors.receive_message
         def on_message(msg: ParentCmd) -> Behavior[ParentCmd]:
             match msg:
                 case Spawn():
@@ -99,9 +103,9 @@ async def test_watch_delivers_terminated_and_ctx_stop_drops_pending():
                 events.append(f"terminated {sig.ref.path.rsplit('/', 1)[-1]}")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    async with ActorSystem(Behaviors.setup(parent), "t") as system:
+    async with ActorSystem(parent, "t") as system:
         system.tell(Spawn())
         system.tell(StopChild())
         await system.ask(Events, timeout=1)
@@ -111,11 +115,13 @@ async def test_watch_delivers_terminated_and_ctx_stop_drops_pending():
 async def test_child_failure_gives_child_failed_and_unhandled_terminated_is_a_death_pact():
     seen: list[Signal] = []
 
+    @Behaviors.receive_message
     def boom(_m: str) -> Behavior[str]:
         raise ValueError("boom")
 
+    @Behaviors.setup
     def handles_it(ctx: ActorContext[str]) -> Behavior[str]:
-        c = ctx.spawn(Behaviors.receive_message(boom), "c")
+        c = ctx.spawn(boom, "c")
         ctx.watch(c)
         c.tell("go")
 
@@ -125,27 +131,30 @@ async def test_child_failure_gives_child_failed_and_unhandled_terminated_is_a_de
 
         return Behaviors.receive(lambda _c, _m: Behaviors.same).receive_signal(on_signal)
 
-    async with ActorSystem(Behaviors.setup(handles_it), "t"):
+    async with ActorSystem(handles_it, "t"):
         await eventually(lambda: any(isinstance(s, ChildFailed) for s in seen))
     failed = [s for s in seen if isinstance(s, ChildFailed)]
     assert isinstance(failed[0].cause, ValueError)
 
+    @Behaviors.setup
     def ignores_it(ctx: ActorContext[str]) -> Behavior[str]:
-        c = ctx.spawn(Behaviors.receive_message(boom), "c")
+        c = ctx.spawn(boom, "c")
         ctx.watch(c)
         c.tell("go")
         return Behaviors.ignore  # no signal handler -> DeathPactError -> guardian stops
 
-    system = ActorSystem(Behaviors.setup(ignores_it), "t2")
+    system = ActorSystem(ignores_it, "t2")
     await asyncio.wait_for(system.when_terminated(), 1)
 
 
 async def test_watch_with_and_watching_an_already_dead_actor():
     got: list[str] = []
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         c = ctx.spawn(Behaviors.stopped(), "dies-immediately")
 
+        @Behaviors.receive_message
         def on_message(m: str) -> Behavior[str]:
             got.append(m)
             if m == "first-gone":
@@ -153,9 +162,9 @@ async def test_watch_with_and_watching_an_already_dead_actor():
             return Behaviors.same
 
         ctx.watch_with(c, "first-gone")
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    async with ActorSystem(Behaviors.setup(guardian), "t"):
+    async with ActorSystem(guardian, "t"):
         await eventually(lambda: len(got) == 2)
     assert got == ["first-gone", "watched-dead"]
 
@@ -185,10 +194,12 @@ async def test_stopping_an_already_stopped_child_does_nothing():
     async with ActorTestKit() as testkit:
         acks: TestProbe[str] = testkit.create_test_probe()
 
+        @Behaviors.setup
         def parent(ctx: ActorContext[str]) -> Behavior[str]:
             child = ctx.spawn(Behaviors.ignore, "child")
             ctx.watch(child)
 
+            @Behaviors.receive_message
             def on_message(_msg: str) -> Behavior[str]:
                 ctx.stop(child)
                 acks.ref.tell("stopped")
@@ -199,9 +210,9 @@ async def test_stopping_an_already_stopped_child_does_nothing():
                     acks.ref.tell("terminated")
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message).receive_signal(on_signal)
+            return on_message.receive_signal(on_signal)
 
-        ref = testkit.spawn(Behaviors.setup(parent))
+        ref = testkit.spawn(parent)
         ref.tell("stop")
         await acks.expect_message("stopped")
         await acks.expect_message("terminated")
@@ -214,6 +225,7 @@ async def test_stopping_an_actor_that_is_not_a_child_raises():
         outcomes: TestProbe[str] = testkit.create_test_probe()
         stranger = testkit.spawn(Behaviors.ignore)
 
+        @Behaviors.receive
         def on_message(ctx: ActorContext[ActorRef[Any]], ref: ActorRef[Any]) -> Behavior[Any]:
             try:
                 ctx.stop(ref)
@@ -221,7 +233,7 @@ async def test_stopping_an_actor_that_is_not_a_child_raises():
                 outcomes.ref.tell("ValueError")
             return Behaviors.same
 
-        ref: ActorRef[ActorRef[Any]] = testkit.spawn(Behaviors.receive(on_message))
+        ref: ActorRef[ActorRef[Any]] = testkit.spawn(on_message)
         ref.tell(stranger)
         await outcomes.expect_message("ValueError")
         ref.tell(ref)
@@ -233,19 +245,21 @@ async def test_watch_with_the_same_message_twice_is_one_watch():
     async with ActorTestKit() as testkit:
         got: TestProbe[str] = testkit.create_test_probe()
 
+        @Behaviors.setup
         def watcher(ctx: ActorContext[str]) -> Behavior[str]:
             child = ctx.spawn(Behaviors.ignore, "child")
             ctx.watch_with(child, "gone")
             ctx.watch_with(child, "gone")
             ctx.stop(child)
 
+            @Behaviors.receive_message
             def on_message(msg: str) -> Behavior[str]:
                 got.ref.tell(msg)
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        testkit.spawn(Behaviors.setup(watcher))
+        testkit.spawn(watcher)
         await got.expect_message("gone")
         await got.expect_no_message(0.05)
 
@@ -270,12 +284,13 @@ async def test_watching_again_with_another_message_fails_the_watcher(
     async with ActorTestKit() as testkit:
         target = testkit.spawn(Behaviors.ignore)
 
+        @Behaviors.receive
         def on_message(ctx: ActorContext[str], _msg: str) -> Behavior[str]:
             watch(ctx, target, first)
             watch(ctx, target, second)
             return Behaviors.same
 
-        ref = testkit.spawn(Behaviors.receive(on_message))
+        ref = testkit.spawn(on_message)
         probe: TestProbe[str] = testkit.create_test_probe()
         ref.tell("watch twice")
         await probe.expect_terminated(ref)
@@ -286,6 +301,7 @@ async def test_unwatch_then_watch_with_another_message():
     async with ActorTestKit() as testkit:
         got: TestProbe[str] = testkit.create_test_probe()
 
+        @Behaviors.setup
         def watcher(ctx: ActorContext[str]) -> Behavior[str]:
             child = ctx.spawn(Behaviors.ignore, "child")
             ctx.watch_with(child, "first")
@@ -293,11 +309,12 @@ async def test_unwatch_then_watch_with_another_message():
             ctx.watch_with(child, "second")
             ctx.stop(child)
 
+            @Behaviors.receive_message
             def on_message(msg: str) -> Behavior[str]:
                 got.ref.tell(msg)
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        testkit.spawn(Behaviors.setup(watcher))
+        testkit.spawn(watcher)
         await got.expect_message("second")

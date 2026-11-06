@@ -78,26 +78,29 @@ async def test_pending_batch_is_flushed_on_stop():
 
 
 def blocker(gate: asyncio.Event, seen: list[int]) -> Behavior[int]:
+    @Behaviors.receive_message
     async def on_message(msg: int) -> Behavior[int]:
         if msg == 0:
             await gate.wait()
         seen.append(msg)
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def guardian(gate: asyncio.Event, seen: list[int], mailbox: MailboxSelector) -> Behavior[int]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[int]) -> Behavior[int]:
         child = ctx.spawn(blocker(gate, seen), "child", mailbox)
 
+        @Behaviors.receive_message
         def forward(msg: int) -> Behavior[int]:
             child.tell(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(forward)
+        return forward
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_bounded_mailbox_drops_new_messages_by_default():

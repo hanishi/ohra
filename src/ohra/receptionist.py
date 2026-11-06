@@ -144,6 +144,7 @@ class Receptionist:
 
 
 def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[_Msg]) -> Behavior[_Msg]:
         services_per_actor: dict[ActorRef[Any], set[ServiceKey[Any]]] = {}
         registry: dict[ServiceKey[Any], set[ActorRef[Any]]] = {}
@@ -194,6 +195,7 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                 watched_ref(s) == actor for s in subscriptions_per_actor
             )
 
+        @Behaviors.receive
         def on_message(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
                 case Register(key, service, reply_to):
@@ -261,9 +263,9 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                     pass
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 class _Replication:

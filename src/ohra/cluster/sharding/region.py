@@ -241,6 +241,7 @@ class _Region:
     # --- the behavior ----------------------------------------------------------------------------
 
     def behavior(self) -> Behavior[Any]:
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             if isinstance(msg, ShardingEnvelope):
                 envelope = cast(ShardingEnvelope[Any], msg)
@@ -365,7 +366,7 @@ class _Region:
                 self.exiting_done()
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     def send_graceful_shutdown_to_coordinator(self) -> None:
         if self.graceful_shutdown_in_progress and self.coordinator is not None:

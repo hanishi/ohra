@@ -114,6 +114,7 @@ def event_stream(
     """The stream's actor, at ``/system/eventStream``. It watches its subscribers and forgets
     each one that stops, as Pekko's EventStreamUnsubscriber does."""
 
+    @Behaviors.receive
     def on_message(
         ctx: ActorContext[EventStream.Command], msg: EventStream.Command
     ) -> Behavior[EventStream.Command]:
@@ -149,4 +150,4 @@ def event_stream(
             return event_stream({r: t for r, t in subscribers.items() if _watched(r) != sig.ref})
         return Behaviors.same
 
-    return Behaviors.receive(on_message).receive_signal(on_signal)
+    return on_message.receive_signal(on_signal)

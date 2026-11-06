@@ -90,6 +90,7 @@ _test_actor_id = itertools.count(1)
 def _test_actor[M](
     queue: asyncio.Queue[M], terminations: asyncio.Queue[Terminated]
 ) -> Behavior[M]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[M], msg: M) -> Behavior[M]:
         match msg:
             case _WatchActor(ref):
@@ -106,7 +107,7 @@ def _test_actor[M](
             terminations.put_nowait(sig)
         return Behaviors.same
 
-    return Behaviors.receive(on_message).receive_signal(on_signal)
+    return on_message.receive_signal(on_signal)
 
 
 async def _poll[X](queue: asyncio.Queue[X], max: float) -> X | None:

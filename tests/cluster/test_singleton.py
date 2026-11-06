@@ -57,11 +57,13 @@ class Crash: ...
 def counter(log: Log, port: int) -> Behavior[Hit | Crash]:
     """The singleton under test: counts hits, records its start and stop with the hosting port."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Hit | Crash]) -> Behavior[Hit | Crash]:
         loop = asyncio.get_running_loop()
         log.append(("start", port, loop.time()))
         count = 0
 
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[Hit | Crash], msg: Hit | Crash) -> Behavior[Hit | Crash]:
             nonlocal count
             match msg:
@@ -77,9 +79,9 @@ def counter(log: Log, port: int) -> Behavior[Hit | Crash]:
                 log.append(("stop", port, loop.time()))
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def node(

@@ -117,11 +117,12 @@ async def test_system_scheduler_is_used_by_timers():
     scheduler: Scheduler = fake
 
     def guardian() -> Behavior[str]:
+        @Behaviors.setup
         def setup(ctx: ActorContext[str]) -> Behavior[str]:
             ctx.timers.start_single_timer("k", "tick", 5.0)
             return Behaviors.ignore
 
-        return Behaviors.setup(setup)
+        return setup
 
     async with ActorSystem(guardian(), "sched", scheduler=scheduler) as system:
         assert system.scheduler is fake

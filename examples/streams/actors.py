@@ -102,6 +102,7 @@ class Checkout:
 def shop(price_list: dict[str, int]) -> Behavior[Checkout]:
     """Opens a till for each checkout; the checkout's ledger replies with the total."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Checkout]) -> Behavior[Checkout]:
         prices = ctx.spawn(pricing(price_list), "pricing")
 
@@ -116,7 +117,7 @@ def shop(price_list: dict[str, int]) -> Behavior[Checkout]:
 
         return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def main() -> None:

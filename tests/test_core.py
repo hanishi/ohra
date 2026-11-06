@@ -45,6 +45,7 @@ type Command = Increment | GetTotal | Stop
 
 
 def counter(total: int = 0) -> Behavior[Command]:
+    @Behaviors.receive_message
     def on_message(msg: Command) -> Behavior[Command]:
         match msg:
             case Increment(by):
@@ -55,7 +56,7 @@ def counter(total: int = 0) -> Behavior[Command]:
             case Stop():
                 return Behaviors.stopped()
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def test_state_lives_in_the_behavior():
@@ -68,11 +69,12 @@ async def test_state_lives_in_the_behavior():
 async def test_setup_runs_once_per_incarnation():
     calls: list[str] = []
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[Command]) -> Behavior[Command]:
         calls.append(ctx.self.path)
         return counter()
 
-    async with ActorSystem(Behaviors.setup(guardian), "t") as system:
+    async with ActorSystem(guardian, "t") as system:
         system.tell(Increment(1))
         assert await system.ask(GetTotal, timeout=1) == 1
     assert calls == ["ohra://t/user"]
@@ -82,13 +84,14 @@ async def test_async_handler_keeps_messages_serialized():
     """The point of actors under asyncio: no interleaving across awaits."""
     log: list[str] = []
 
+    @Behaviors.receive_message
     async def on_message(msg: str) -> Behavior[str]:
         log.append(f"start {msg}")
         await asyncio.sleep(0.01)
         log.append(f"end {msg}")
         return Behaviors.same
 
-    async with ActorSystem(Behaviors.receive_message(on_message), "t") as system:
+    async with ActorSystem(on_message, "t") as system:
         system.tell("a")
         system.tell("b")
         await asyncio.sleep(0.05)
@@ -103,6 +106,7 @@ async def test_stopped_delivers_post_stop_and_dead_letters_later_messages():
             events.append("post-stop")
         return Behaviors.same
 
+    @Behaviors.receive
     def on_message(_ctx: ActorContext[Command], msg: Command) -> Behavior[Command]:
         events.append(type(msg).__name__)
         return (
@@ -111,7 +115,7 @@ async def test_stopped_delivers_post_stop_and_dead_letters_later_messages():
             else Behaviors.same
         )
 
-    system = ActorSystem(Behaviors.receive(on_message).receive_signal(on_signal), "t")
+    system = ActorSystem(on_message.receive_signal(on_signal), "t")
     system.tell(Increment(1))
     system.tell(Stop())
     system.tell(Increment(2))
@@ -125,11 +129,12 @@ async def test_stopped_delivers_post_stop_and_dead_letters_later_messages():
 async def test_ask_timeout_and_late_reply_is_dropped():
     held: list[ActorRef[int]] = []
 
+    @Behaviors.receive_message
     def on_message(msg: GetTotal) -> Behavior[GetTotal]:
         held.append(msg.reply_to)  # never answers in time
         return Behaviors.same
 
-    async with ActorSystem(Behaviors.receive_message(on_message), "t") as system:
+    async with ActorSystem(on_message, "t") as system:
         with pytest.raises(AskTimeoutError):
             await ask(system, GetTotal, timeout=0.02)
         held[0].tell(42)  # late reply: must not raise or leave anything pending
@@ -161,6 +166,7 @@ async def fake_http(url: str) -> str:
 
 
 def fetcher() -> Behavior[FetcherCmd]:
+    @Behaviors.receive
     def on_message(ctx: ActorContext[FetcherCmd], msg: FetcherCmd) -> Behavior[FetcherCmd]:
         match msg:
             case Fetch(url, reply_to):
@@ -171,7 +177,7 @@ def fetcher() -> Behavior[FetcherCmd]:
                 reply_to.tell(f"error: {e!r}")
         return Behaviors.same
 
-    return Behaviors.receive(on_message)
+    return on_message
 
 
 async def test_pipe_to_self_success_and_failure():
@@ -192,6 +198,7 @@ type AnswerCmd = Fetch | _Answer
 
 
 async def test_pipe_to_self_as_a_decorator():
+    @Behaviors.receive
     def on_message(ctx: ActorContext[AnswerCmd], msg: AnswerCmd) -> Behavior[AnswerCmd]:
         match msg:
             case Fetch(url, reply_to):
@@ -208,7 +215,7 @@ async def test_pipe_to_self_as_a_decorator():
                 reply_to.tell(text)
         return Behaviors.same
 
-    async with ActorSystem(Behaviors.receive(on_message), "t") as system:
+    async with ActorSystem(on_message, "t") as system:
         ok = await system.ask(lambda r: Fetch("good", r), timeout=1)
         bad = await system.ask(lambda r: Fetch("bad", r), timeout=1)
     assert ok == "body of good"
@@ -223,11 +230,12 @@ async def test_pipe_to_self_is_cancelled_when_actor_stops():
         await asyncio.sleep(3600)
         return "never"
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         ctx.pipe_to_self(forever(), lambda r: "done")
         return Behaviors.ignore
 
-    system = ActorSystem(Behaviors.setup(guardian), "t")
+    system = ActorSystem(guardian, "t")
     await started.wait()
     system.terminate()
     await system.when_terminated()  # the autouse fixture checks the pipe task is gone
@@ -239,11 +247,12 @@ async def test_pipe_to_self_closes_work_the_actor_stopped_before_it_started():
 
     coro = work()
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         ctx.pipe_to_self(coro, lambda r: "done")
         return Behaviors.stopped()
 
-    async with ActorSystem(Behaviors.setup(guardian), "t") as system:
+    async with ActorSystem(guardian, "t") as system:
         await system.when_terminated()
     assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
 
@@ -289,13 +298,14 @@ async def test_ctx_ask_sends_its_request_before_a_later_tell():
                 done.set()
         return Behaviors.same
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         t = ctx.spawn(target, "target")
         ctx.ask(t, Asked, lambda r: "answered", timeout=1)
         t.tell("told after")
         return Behaviors.ignore
 
-    async with ActorSystem(Behaviors.setup(guardian), "t"):
+    async with ActorSystem(guardian, "t"):
         await done.wait()
     assert seen == ["asked", "told after"]
 
@@ -306,6 +316,7 @@ async def test_ctx_ask_fails_the_handler_when_the_request_cannot_be_made():
     def bad_request(_reply_to: ActorRef[str]) -> Asked:
         raise ValueError("bad request")
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         try:
             ctx.ask(ctx.self, bad_request, lambda r: "answered", timeout=1)
@@ -313,7 +324,7 @@ async def test_ctx_ask_fails_the_handler_when_the_request_cannot_be_made():
             failures.append(e)
         return Behaviors.stopped()
 
-    async with ActorSystem(Behaviors.setup(guardian), "t") as system:
+    async with ActorSystem(guardian, "t") as system:
         await system.when_terminated()
     assert [str(e) for e in failures] == ["bad request"]
 
@@ -332,12 +343,14 @@ type ReporterCmd = Report | _GotTotal
 
 
 async def test_ctx_ask_and_message_adapter():
+    @Behaviors.setup
     def reporter(ctx: ActorContext[ReporterCmd]) -> Behavior[ReporterCmd]:
         c = ctx.spawn(counter(), "counter")
         c.tell(Increment(7))
         totals = ctx.message_adapter(_GotTotal)  # ActorRef[int] -> _GotTotal
         waiting: list[ActorRef[str]] = []
 
+        @Behaviors.receive_message
         def on_message(msg: ReporterCmd) -> Behavior[ReporterCmd]:
             match msg:
                 case Report(reply_to):
@@ -347,15 +360,17 @@ async def test_ctx_ask_and_message_adapter():
                     waiting.pop(0).tell(f"total={total}")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    async with ActorSystem(Behaviors.setup(reporter), "t") as system:
+    async with ActorSystem(reporter, "t") as system:
         assert await system.ask(Report, timeout=1) == "total=7"
 
+    @Behaviors.setup
     def asker(ctx: ActorContext[ReporterCmd]) -> Behavior[ReporterCmd]:
         c = ctx.spawn(counter(3), "counter")
         waiting: list[ActorRef[str]] = []
 
+        @Behaviors.receive_message
         def on_message(msg: ReporterCmd) -> Behavior[ReporterCmd]:
             match msg:
                 case Report(reply_to):
@@ -370,17 +385,19 @@ async def test_ctx_ask_and_message_adapter():
                     waiting.pop(0).tell(f"total={total}")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    async with ActorSystem(Behaviors.setup(asker), "t2") as system:
+    async with ActorSystem(asker, "t2") as system:
         assert await system.ask(Report, timeout=1) == "total=3"
 
 
 async def test_ctx_ask_as_a_decorator():
+    @Behaviors.setup
     def asker(ctx: ActorContext[ReporterCmd]) -> Behavior[ReporterCmd]:
         c = ctx.spawn(counter(5), "counter")
         waiting: list[ActorRef[str]] = []
 
+        @Behaviors.receive_message
         def on_message(msg: ReporterCmd) -> Behavior[ReporterCmd]:
             match msg:
                 case Report(reply_to):
@@ -398,7 +415,7 @@ async def test_ctx_ask_as_a_decorator():
                     waiting.pop(0).tell(f"total={total}")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    async with ActorSystem(Behaviors.setup(asker), "t") as system:
+    async with ActorSystem(asker, "t") as system:
         assert await system.ask(Report, timeout=1) == "total=5"

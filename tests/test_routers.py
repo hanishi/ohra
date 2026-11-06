@@ -25,7 +25,9 @@ type Cmd = Work | Quit
 
 
 def routee(seen: list[tuple[str, int]]) -> Behavior[Cmd]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Work(key):
@@ -34,9 +36,9 @@ def routee(seen: list[tuple[str, int]]) -> Behavior[Cmd]:
                 case Quit():
                     return Behaviors.stopped()
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_round_robin_spreads_messages_evenly():
@@ -87,17 +89,19 @@ async def test_routees_are_children_of_the_router():
     seen: list[tuple[str, int]] = []
     names: list[ActorRef[Cmd]] = []
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         pool = ctx.spawn(Routers.pool(3, routee(seen)), "pool")
         names.append(pool)
 
+        @Behaviors.receive_message
         def forward(msg: Cmd) -> Behavior[Cmd]:
             pool.tell(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(forward)
+        return forward
 
-    async with ActorSystem(Behaviors.setup(guardian), "t") as system:
+    async with ActorSystem(guardian, "t") as system:
         system.tell(Work(7))
         await eventually(lambda: len(seen) == 1)
     assert seen[0][0].startswith("ohra://t/user/pool/$")

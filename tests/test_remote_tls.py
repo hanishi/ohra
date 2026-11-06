@@ -164,13 +164,14 @@ class Hail:
 
 
 def recorder(log: list[str]) -> Behavior[Hail]:
+    @Behaviors.receive_message
     def on_message(msg: Hail) -> Behavior[Hail]:
         log.append(msg.text)
         if msg.reply_to is not None:
             msg.reply_to.tell(Hail(f"ack {msg.text}"))
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def tls_node(

@@ -244,10 +244,12 @@ def _flow[In, Out](
     # child and is still stopped behind the frames it has
     clock = _clock_of(props)
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[In | _Close]) -> Behavior[In | _Close]:
         actor = ctx.spawn(props(out), "flowActor")
         ctx.watch(actor)
 
+        @Behaviors.receive_message
         def on_message(msg: In | _Close) -> Behavior[In | _Close]:
             if isinstance(msg, _Close):
                 ctx.stop(actor, after_pending=True)
@@ -262,9 +264,9 @@ def _flow[In, Out](
                 return Behaviors.stopped()
             return Behaviors.unhandled
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- synced: pages on the server's clock ---------------------------------------------------------

@@ -62,10 +62,12 @@ type TimerCmd = Tick | Start | Cancel | Busy | Fail | IsActive
 
 
 def ticker(ticks: list[str], setup_timers: tuple[str, ...] = ()) -> Behavior[TimerCmd]:
+    @Behaviors.with_timers
     def with_timers(timers: TimerScheduler[TimerCmd]) -> Behavior[TimerCmd]:
         for name in setup_timers:
             timers.start_timer_with_fixed_delay(name, Tick(name), 0.005)
 
+        @Behaviors.receive_message
         async def on_message(msg: TimerCmd) -> Behavior[TimerCmd]:
             match msg:
                 case Tick(name):
@@ -86,9 +88,9 @@ def ticker(ticks: list[str], setup_timers: tuple[str, ...] = ()) -> Behavior[Tim
                     reply_to.tell(timers.is_timer_active(name))
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.with_timers(with_timers)
+    return with_timers
 
 
 async def test_single_timer_fires_once():
@@ -201,6 +203,7 @@ type StashCmd = Authed | Add | Get
 
 def gate(capacity: int, seen: list[int]) -> Behavior[StashCmd]:
     def with_stash(buffer: StashBuffer[StashCmd]) -> Behavior[StashCmd]:
+        @Behaviors.receive_message
         def waiting(msg: StashCmd) -> Behavior[StashCmd]:
             match msg:
                 case Authed():
@@ -209,7 +212,8 @@ def gate(capacity: int, seen: list[int]) -> Behavior[StashCmd]:
                     buffer.stash(msg)
                     return Behaviors.same
 
-        async def on_active(msg: StashCmd) -> Behavior[StashCmd]:
+        @Behaviors.receive_message
+        async def active(msg: StashCmd) -> Behavior[StashCmd]:
             match msg:
                 case Add(n):
                     await asyncio.sleep(0)  # an await inside the replay must not reorder anything
@@ -220,8 +224,7 @@ def gate(capacity: int, seen: list[int]) -> Behavior[StashCmd]:
                     pass
             return Behaviors.same
 
-        active = Behaviors.receive_message(on_active)
-        return Behaviors.receive_message(waiting)
+        return waiting
 
     return Behaviors.with_stash(capacity, with_stash)
 
@@ -266,6 +269,7 @@ async def test_unstash_inside_setup_is_allowed():
     def with_stash(buffer: StashBuffer[StashCmd]) -> Behavior[StashCmd]:
         buffer.stash(Add(7))
 
+        @Behaviors.receive_message
         def on_message(msg: StashCmd) -> Behavior[StashCmd]:
             match msg:
                 case Add(n):
@@ -276,7 +280,7 @@ async def test_unstash_inside_setup_is_allowed():
                     pass
             return Behaviors.same
 
-        return buffer.unstash_all(Behaviors.receive_message(on_message))
+        return buffer.unstash_all(on_message)
 
     async with ActorSystem(Behaviors.with_stash(10, with_stash), "t") as system:
         assert await system.ask(Get, timeout=1) == [7]

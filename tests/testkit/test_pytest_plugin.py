@@ -35,6 +35,7 @@ def echo() -> Behavior[Echo]:
 
 
 def reminder(delay: float, probe: ActorRef[str]) -> Behavior[str]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[str]) -> Behavior[str]:
         ctx.timers.start_single_timer("k", "remind", delay)
 
@@ -45,7 +46,7 @@ def reminder(delay: float, probe: ActorRef[str]) -> Behavior[str]:
 
         return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 """
 
 

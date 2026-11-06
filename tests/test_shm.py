@@ -88,9 +88,11 @@ type Cmd = Scale | Scaled
 
 
 def scaler(pool: ProcessPoolExecutor) -> Behavior[Cmd]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         loop = asyncio.get_running_loop()
 
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Scale(data, reply_to):
@@ -105,9 +107,9 @@ def scaler(pool: ProcessPoolExecutor) -> Behavior[Cmd]:
                     reply_to.tell(float("nan"))
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_actor_hands_an_array_to_a_process_and_gets_one_back():

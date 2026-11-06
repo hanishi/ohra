@@ -169,6 +169,7 @@ async def test_then_run_runs_after_the_write_in_order():
 
     @Behaviors.persisted(store)
     def runner(total: int) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add(n, _):
@@ -183,7 +184,7 @@ async def test_then_run_runs_after_the_write_in_order():
                     pass
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     store.gate.set()
     async with ActorSystem(runner.recover("r", empty=0), "s") as system:
@@ -206,11 +207,13 @@ def watcher(
 ) -> Behavior[str]:
     """Spawns the child, watches it, and records how it ended."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[str]) -> Behavior[str]:
         ref = ctx.spawn(child_behavior, "child")
         ctx.watch(ref)
         holder.append(ref)
 
+        @Behaviors.receive_signal
         def on_signal(_ctx: ActorContext[str], sig: Signal) -> Behavior[str]:
             if isinstance(sig, ChildFailed):
                 log.append(f"failed {type(sig.cause).__name__}")
@@ -218,9 +221,9 @@ def watcher(
                 log.append("terminated")
             return Behaviors.same
 
-        return Behaviors.receive_signal(on_signal)
+        return on_signal
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_failed_write_fails_the_actor_before_any_reply():
@@ -313,10 +316,12 @@ class GatedLoadStore(GatedStore):
 def failures(child_behavior: Behavior[Cmd], seen: list[BaseException]) -> Behavior[Cmd]:
     """Spawns the child, forwards to it, and records the cause it failed with."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         child = ctx.spawn(child_behavior, "child")
         ctx.watch(child)
 
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             child.tell(msg)
             return Behaviors.same
@@ -326,9 +331,9 @@ def failures(child_behavior: Behavior[Cmd], seen: list[BaseException]) -> Behavi
                 seen.append(sig.cause)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_commands_during_recovery_run_after_it_in_order():
@@ -463,6 +468,7 @@ async def test_persist_from_another_factory_fails_the_actor():
 
     @Behaviors.persisted(store_a)
     def confused(total: int) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add():
@@ -474,7 +480,7 @@ async def test_persist_from_another_factory_fails_the_actor():
                     pass
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     async with ActorSystem(watcher(confused.recover("c", empty=0), log, holder), "s"):
         await eventually(lambda: bool(holder))
@@ -488,6 +494,7 @@ async def test_child_of_a_persisted_actor_cannot_use_its_incarnation():
 
     @Behaviors.persisted(store)
     def parent(total: int) -> Behavior[Cmd]:
+        @Behaviors.receive
         def on_message(ctx: ActorContext[Cmd], msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add():
@@ -504,7 +511,7 @@ async def test_child_of_a_persisted_actor_cannot_use_its_incarnation():
                 log.append(f"child failed {type(sig.cause).__name__}")
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     async with ActorSystem(parent.recover("p", empty=0), "s") as system:
         system.tell(Add(1))
@@ -524,6 +531,7 @@ async def test_effect_failure_after_the_write_does_not_roll_back_memory(
 
     @Behaviors.persisted(store)
     def fragile(total: int) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add(n, _):
@@ -534,7 +542,7 @@ async def test_effect_failure_after_the_write_does_not_roll_back_memory(
                     pass
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     async with ActorSystem(fragile.recover("f", empty=0), "s") as system:
         system.tell(Add(1))
@@ -554,6 +562,7 @@ async def test_factory_failure_after_the_write_sends_no_reply():
         if total == 2:
             raise ValueError("cannot be two")
 
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add(n, reply_to) if reply_to is not None:
@@ -564,7 +573,7 @@ async def test_factory_failure_after_the_write_sends_no_reply():
                     pass
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     async with ActorSystem(watcher(picky.recover("p", empty=0), log, holder), "s"):
         await eventually(lambda: bool(holder))
@@ -690,6 +699,7 @@ async def test_messages_a_user_stash_replays_into_a_write_run_after_it():
 
     def with_stash(stash: StashBuffer[HoldCmd]) -> Behavior[HoldCmd]:
         def idle(total: int) -> Behavior[HoldCmd]:
+            @Behaviors.receive_message
             def on_message(msg: HoldCmd) -> Behavior[HoldCmd]:
                 match msg:
                     case Add(n, reply_to) if reply_to is not None:
@@ -699,9 +709,10 @@ async def test_messages_a_user_stash_replays_into_a_write_run_after_it():
                     case _:
                         return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         def busy(total: int) -> Behavior[HoldCmd]:
+            @Behaviors.receive_message
             def on_message(msg: HoldCmd) -> Behavior[HoldCmd]:
                 match msg:
                     case Release(reply_to):
@@ -710,7 +721,7 @@ async def test_messages_a_user_stash_replays_into_a_write_run_after_it():
                         stash.stash(msg)
                         return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
         saved = Behaviors.persisted(store)(idle)
         return saved.recover("h", empty=0)
@@ -738,6 +749,7 @@ async def test_terminated_during_a_write_is_delivered_after_it():
 
     @Behaviors.persisted(store)
     def watching(total: int) -> Behavior[WatchCmd]:
+        @Behaviors.receive
         def on_message(ctx: ActorContext[WatchCmd], msg: WatchCmd) -> Behavior[WatchCmd]:
             match msg:
                 case WatchIt(ref):
@@ -753,7 +765,7 @@ async def test_terminated_during_a_write_is_delivered_after_it():
                 probe_box[0].ref.tell(-1)
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     async with ActorTestKit() as testkit:
         probe: TestProbe[int] = testkit.create_test_probe()
@@ -775,6 +787,7 @@ async def test_post_stop_during_a_write_reaches_the_pre_write_behavior():
 
     @Behaviors.persisted(store)
     def stopping(total: int) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Add(n, reply_to) if reply_to is not None:
@@ -787,7 +800,7 @@ async def test_post_stop_during_a_write_reaches_the_pre_write_behavior():
                 probe_box[0].ref.tell(-total - 100)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     async with ActorTestKit() as testkit:
         probe: TestProbe[int] = testkit.create_test_probe()
@@ -807,10 +820,12 @@ class StopChild:
 def stopper(child_behavior: Behavior[Cmd], events: list[str]) -> Behavior[Cmd | StopChild]:
     """Forwards to its child, stops it after pending on StopChild, and records its end."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd | StopChild]) -> Behavior[Cmd | StopChild]:
         child = ctx.spawn(child_behavior, "child")
         ctx.watch(child)
 
+        @Behaviors.receive_message
         def on_message(msg: Cmd | StopChild) -> Behavior[Cmd | StopChild]:
             match msg:
                 case StopChild():
@@ -826,9 +841,9 @@ def stopper(child_behavior: Behavior[Cmd], events: list[str]) -> Behavior[Cmd | 
                 events.append("terminated")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_an_after_pending_stop_during_a_write_finishes_it_first():
@@ -877,6 +892,7 @@ async def test_an_after_pending_stop_during_recovery_delivers_the_held_signals_f
 
         return Behaviors.receive_message(lambda _m: Behaviors.same).receive_signal(on_signal)
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         kids.append(ctx.spawn(Behaviors.stopped(), "kid"))
         ctx.watch(kids[0])
@@ -885,7 +901,7 @@ async def test_an_after_pending_stop_during_recovery_delivers_the_held_signals_f
     async with ActorTestKit() as testkit:
         probe: TestProbe[None] = testkit.create_test_probe()
         unhandled = testkit.create_unhandled_message_probe()
-        parent = testkit.spawn(stopper(Behaviors.setup(setup), events))
+        parent = testkit.spawn(stopper(setup, events))
         await eventually(lambda: bool(kids))
         await probe.expect_terminated(kids[0])  # so the recovering child holds its Terminated
         parent.tell(StopChild())
@@ -964,9 +980,11 @@ def watching_counter(
     """A counter at "c" that watches a peer on ``WatchPeer`` and tells ``gone`` when one
     terminates."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd | WatchPeer]) -> Behavior[Cmd | WatchPeer]:
         @Behaviors.persisted(store)
         def counting(total: int) -> Behavior[Cmd | WatchPeer]:
+            @Behaviors.receive_message
             def on_message(msg: Cmd | WatchPeer) -> Behavior[Cmd | WatchPeer]:
                 match msg:
                     case WatchPeer(peer):
@@ -985,11 +1003,11 @@ def watching_counter(
                     gone.ref.tell(sig.ref)
                 return Behaviors.same
 
-            return Behaviors.receive_message(on_message).receive_signal(on_signal)
+            return on_message.receive_signal(on_signal)
 
         return counting.recover("c", empty=0)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_a_terminated_held_during_a_failed_write_under_backoff_survives_the_restart():
@@ -1075,11 +1093,12 @@ async def test_a_late_load_from_before_a_restart_never_reaches_the_user_behavior
 
     @Behaviors.persisted(store)
     def spy(total: int) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             seen.append(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     supervised = Behaviors.supervise(spy.recover("c", empty=0, recovery_timeout=1)).on_failure(
         SupervisorStrategy.restart_with_backoff(0.5, 0.5, 0)
@@ -1121,6 +1140,7 @@ async def test_a_restart_during_a_write_keeps_the_stashed_commands_and_held_sign
 
     @Behaviors.persisted(store)
     def w(total: int) -> Behavior[WatchCmd]:
+        @Behaviors.receive
         def on_message(ctx: ActorContext[WatchCmd], msg: WatchCmd) -> Behavior[WatchCmd]:
             match msg:
                 case WatchIt(ref):
@@ -1136,7 +1156,7 @@ async def test_a_restart_during_a_write_keeps_the_stashed_commands_and_held_sign
                 events.append("terminated")
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     supervised = Behaviors.supervise(w.recover("c", empty=0)).on_failure(
         SupervisorStrategy.restart()

@@ -198,6 +198,7 @@ def rally(
     """``clock`` stamps every ``t``: it must be the clock the connections answer pings with."""
     rand = rng if rng is not None else random.Random()
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[RallyMsg]) -> Behavior[RallyMsg]:
         players: dict[str, _Player] = {}
         walls: list[ActorRef[Frame]] = []
@@ -283,6 +284,7 @@ def rally(
             tell_everyone(state())
             return True
 
+        @Behaviors.receive_message
         def on_message(msg: RallyMsg) -> Behavior[RallyMsg]:
             match msg:
                 case Join(id, name, ref):
@@ -389,9 +391,9 @@ def rally(
                     walls.remove(ref)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- a computer player -------------------------------------------------------------------------
@@ -404,10 +406,12 @@ def cpu(
     would, when the phone would. The puck falls COURT_H to the paddle, and a return goes back up
     as far; the side walls only fold x, so they do not change the times."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Frame]) -> Behavior[Frame]:
         def at(t: float, frame: Frame) -> None:
             ctx.timers.start_single_timer("puck", frame, max(0.0, t - clock()))
 
+        @Behaviors.receive_message
         def on_message(frame: Frame) -> Behavior[Frame]:
             match frame["type"]:
                 case "incoming":
@@ -437,9 +441,9 @@ def cpu(
                     pass  # you, state: a CPU needs nothing from them
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- one actor per connection -------------------------------------------------------------------
@@ -494,9 +498,11 @@ def decode_wall(text: str) -> Frame:
 def player(id: str, name: str, rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
     """A phone's frames go to rally; rally's go to the phone."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Frame]) -> Behavior[Frame]:
         rally.tell(Join(id, name, ctx.self))
 
+        @Behaviors.receive_message
         def on_message(frame: Frame) -> Behavior[Frame]:
             match frame["type"]:
                 case "out":
@@ -512,15 +518,17 @@ def player(id: str, name: str, rally: ActorRef[RallyMsg], out: ActorRef[Frame]) 
                     out.tell(frame)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def wall(rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Frame]) -> Behavior[Frame]:
         rally.tell(WatchWall(ctx.self))
 
+        @Behaviors.receive_message
         def on_message(frame: Frame) -> Behavior[Frame]:
             match frame["type"]:
                 case "start":
@@ -533,9 +541,9 @@ def wall(rally: ActorRef[RallyMsg], out: ActorRef[Frame]) -> Behavior[Frame]:
                     out.tell(frame)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- the app ------------------------------------------------------------------------------------

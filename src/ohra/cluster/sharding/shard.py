@@ -266,6 +266,7 @@ def shard_behavior[T](
     refs."""
     settings = entity.effective_settings
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[_ShardCmd[T]]) -> Behavior[_ShardCmd[T]]:
         entities: dict[str, ActorRef[T]] = {}
         # LocalRef hashes by identity: a stale incarnation misses
@@ -320,6 +321,7 @@ def shard_behavior[T](
             hand_off_to.tell(ShardStopped(shard_id))
             return Behaviors.stopped()
 
+        @Behaviors.receive
         def on_message(
             _ctx: ActorContext[_ShardCmd[T]], msg: _ShardCmd[T]
         ) -> Behavior[_ShardCmd[T]]:
@@ -399,9 +401,9 @@ def shard_behavior[T](
                 return Behaviors.same
             return Behaviors.unhandled
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def _aggregate_shard_states(
@@ -410,6 +412,7 @@ def _aggregate_shard_states(
     """Pekko's region query: ask every Shard, reply the union when all have answered or at the
     timeout."""
 
+    @Behaviors.setup
     def setup(
         ctx: ActorContext[CurrentShardState | _QueryTimeout],
     ) -> Behavior[CurrentShardState | _QueryTimeout]:
@@ -420,6 +423,7 @@ def _aggregate_shard_states(
             shard.tell(GetShardState(ctx.self))
         ctx.timers.start_single_timer("timeout", _QueryTimeout(), timeout)
 
+        @Behaviors.receive
         def on_message(
             _ctx: ActorContext[Any], msg: CurrentShardState | _QueryTimeout
         ) -> Behavior[Any]:
@@ -433,9 +437,9 @@ def _aggregate_shard_states(
             reply_to.tell(CurrentShardRegionState(frozenset(ids), frozenset(shard_ids)))
             return Behaviors.stopped()
 
-        return Behaviors.receive(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 type _RegionCmd[T] = ShardingEnvelope[T] | GetShardRegionState
@@ -448,6 +452,7 @@ class Sharding:
         through entity refs. Each shard id gets a child Shard actor on first use."""
         settings = entity.effective_settings
 
+        @Behaviors.setup
         def setup(ctx: ActorContext[_RegionCmd[T]]) -> Behavior[_RegionCmd[T]]:
             shards: dict[str, ActorRef[_ShardCmd[T]]] = {}
             ids_by_ref: dict[ActorRef[Any], str] = {}
@@ -462,6 +467,7 @@ class Sharding:
                     ids_by_ref[shard] = shard_id
                 return shard
 
+            @Behaviors.receive
             def on_message(
                 _ctx: ActorContext[_RegionCmd[T]], msg: _RegionCmd[T]
             ) -> Behavior[_RegionCmd[T]]:
@@ -494,9 +500,9 @@ class Sharding:
                     return Behaviors.same
                 return Behaviors.unhandled
 
-            return Behaviors.receive(on_message).receive_signal(on_signal)
+            return on_message.receive_signal(on_signal)
 
-        return Behaviors.setup(setup)
+        return setup
 
     @staticmethod
     def entity_ref_for[T](region: ActorRef[ShardingEnvelope[T]], entity_id: str) -> EntityRef[T]:

@@ -92,6 +92,7 @@ def counter(
         log.append(f"key {entity.entity_type_key.name}")
 
         def active(total: int) -> Behavior[CounterCmd]:
+            @Behaviors.receive
             async def on_message(
                 ctx: ActorContext[CounterCmd], msg: CounterCmd
             ) -> Behavior[CounterCmd]:
@@ -125,7 +126,7 @@ def counter(
                     log.append(f"stop {entity.entity_id}")
                 return Behaviors.same
 
-            return Behaviors.receive(on_message).receive_signal(on_signal)
+            return on_message.receive_signal(on_signal)
 
         return active(0)
 

@@ -42,6 +42,7 @@ class StopChild:
 
 
 def child(log: list[str], gate: asyncio.Event) -> Behavior[ChildCmd]:
+    @Behaviors.receive_message
     async def on_message(msg: ChildCmd) -> Behavior[ChildCmd]:
         match msg:
             case Work(name):
@@ -51,7 +52,7 @@ def child(log: list[str], gate: asyncio.Event) -> Behavior[ChildCmd]:
                 return Behaviors.stopped()
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def parent(
@@ -60,11 +61,13 @@ def parent(
     holder: list[ActorRef[ChildCmd]],
     mailbox: MailboxSelector | None,
 ) -> Behavior[StopChild]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[StopChild]) -> Behavior[StopChild]:
         ref = ctx.spawn(child(log, gate), "child", mailbox)
         ctx.watch(ref)
         holder.append(ref)
 
+        @Behaviors.receive
         def on_message(ctx: ActorContext[StopChild], _msg: StopChild) -> Behavior[StopChild]:
             ctx.stop(ref, after_pending=True)
             return Behaviors.same
@@ -74,9 +77,9 @@ def parent(
                 log.append("terminated")
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_stop_after_pending_runs_queued_messages_first():

@@ -27,13 +27,14 @@ def echo() -> Behavior[Echo]:
 
 
 def on_stop(events: list[str], delay: float = 0.0) -> Behavior[str]:
+    @Behaviors.receive_signal
     async def on_signal(_ctx: ActorContext[str], sig: Signal) -> Behavior[str]:
         if sig is PostStop:
             await asyncio.sleep(delay)
             events.append("stopped")
         return Behaviors.same
 
-    return Behaviors.receive_signal(on_signal)
+    return on_signal
 
 
 async def test_spawned_actor_answers():
@@ -97,11 +98,12 @@ async def test_shutdown_timeout_raises():
 
 
 def stuck(never: asyncio.Future[None]) -> Behavior[str]:
+    @Behaviors.receive_message
     async def on_message(_msg: str) -> Behavior[str]:
         await never
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def test_shutdown_of_a_stuck_actor_raises_instead_of_hanging():

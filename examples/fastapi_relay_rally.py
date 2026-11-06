@@ -182,6 +182,7 @@ class _Puck:
     holder: str  # the player it is heading to, or on the court of
     serial: int
     speed: float
+    rally: int  # passes since the serve
 
 
 @dataclass
@@ -239,12 +240,18 @@ def rally(
             """In this game, connected, with lives."""
             return [p for p in players.values() if p.in_game and p.lives > 0 and p.ref]
 
-        def send_puck(p: _Player, t: float, x: float, angle: float, speed: float) -> None:
+        def send_puck(
+            p: _Player, t: float, x: float, angle: float, speed: float, rally: int = 0
+        ) -> None:
             assert p.ref is not None
             serial = next(serials)
-            game.puck = _Puck(p.id, serial, speed)
+            game.puck = _Puck(p.id, serial, speed, rally)
             vx, vy = speed * math.sin(angle), speed * math.cos(angle)
             p.ref.tell({"type": "incoming", "serial": serial, "t": t, "x": x, "vx": vx, "vy": vy})
+            for w in walls:  # who is under fire, and until when: the wall draws it coming
+                w.tell(
+                    {"type": "drop", "to": p.id, "t": t, "vy": vy, "speed": speed, "rally": rally}
+                )
             timers.start_single_timer("watchdog", _Watchdog(serial), WATCHDOG_S)
 
         def serve() -> None:
@@ -347,7 +354,7 @@ def rally(
                     x = min(max(x, 0.0), 1.0)
                     angle = min(max(angle, -MAX_ANGLE), MAX_ANGLE)
                     t = max(t, clock())  # a late report (a phone that stalled): land in the future
-                    send_puck(to, t + FLIGHT_S, x, angle, now.speed * SPEEDUP)
+                    send_puck(to, t + FLIGHT_S, x, angle, now.speed * SPEEDUP, now.rally + 1)
                     for w in walls:
                         w.tell(
                             {"type": "pass", "from": id, "to": to.id, "t0": t, "t1": t + FLIGHT_S}

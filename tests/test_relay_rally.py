@@ -188,6 +188,30 @@ async def test_out_passes_to_another_player_faster():
         }
 
 
+async def test_the_wall_sees_every_drop_with_the_rally_so_far():
+    async with game() as g:
+        i, incoming = await g.start()
+        (first,) = of(await drain(g.wall), "drop")
+        assert first == {
+            "type": "drop",
+            "to": player_id(i),
+            "t": incoming["t"],
+            "vy": pytest.approx(incoming["vy"]),
+            "speed": pytest.approx(10.0),
+            "rally": 0,
+        }
+        g.rally.tell(rr.Out(player_id(i), incoming["serial"], g.now(), 0.5, 0.0))
+        j, passed = await g.puck()
+        (second,) = of(await drain(g.wall), "drop")
+        assert (second["to"], second["t"], second["rally"]) == (player_id(j), passed["t"], 1)
+        assert second["speed"] == pytest.approx(speed(passed))
+        g.rally.tell(rr.Miss(player_id(j), passed["serial"]))
+        await g.settle(1.0)
+        await g.puck()
+        (served,) = of(await drain(g.wall), "drop")
+        assert served["rally"] == 0  # a miss ends the rally
+
+
 async def test_a_miss_costs_a_life_and_serves_again_at_base_speed():
     async with game() as g:
         i, incoming = await g.start()
@@ -493,6 +517,14 @@ def test_the_phone_knows_the_servers_base_speed():
     page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
     (line,) = [x for x in page.splitlines() if "const BASE_SPEED = " in x]
     assert float(line.split("=")[1].split(";")[0]) == rr.BASE_SPEED  # the hit's pitch follows it
+
+
+def test_the_wall_and_the_phone_agree_on_the_paddle_line():
+    pages = Path(rr.__file__).parent / "relay_rally"
+    (wall,) = [x for x in (pages / "wall.html").read_text().splitlines() if "PADDLE_Y = " in x]
+    (phone,) = [x for x in (pages / "phone.html").read_text().splitlines() if "PADDLE_Y = " in x]
+    assert "H = 16, PADDLE_Y = H - 1.4," in phone
+    assert float(wall.split("=")[1].split(";")[0]) == pytest.approx(16 - 1.4)  # the closing ring
 
 
 def test_the_phone_uses_no_api_that_needs_https():

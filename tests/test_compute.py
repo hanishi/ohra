@@ -44,6 +44,7 @@ def worker() -> Behavior[Cmd]:
     """One computation at a time, in a thread. Everything else waits in the stash."""
 
     def with_stash(buffer: StashBuffer[Cmd]) -> Behavior[Cmd]:
+        @Behaviors.receive_message
         def idle(msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Compute(seconds, reply_to):
@@ -59,18 +60,19 @@ def worker() -> Behavior[Cmd]:
         ) -> Behavior[Cmd]:
             ctx.pipe_to_self(asyncio.to_thread(blocking_work, seconds), Done)
 
+            @Behaviors.receive_message
             def on_message(msg: Cmd) -> Behavior[Cmd]:
                 match msg:
                     case Done(result):
                         reply_to.tell(result.value if isinstance(result, Success) else "failed")
-                        return buffer.unstash_all(Behaviors.receive_message(idle))
+                        return buffer.unstash_all(idle)
                     case _:
                         buffer.stash(msg)
                         return Behaviors.same
 
-            return Behaviors.receive_message(on_message)
+            return on_message
 
-        return Behaviors.receive_message(idle)
+        return idle
 
     return Behaviors.with_stash(100, with_stash)
 
@@ -81,11 +83,12 @@ def blocking_work(seconds: float) -> str:
 
 
 def collector_of(replies: list[str]) -> Behavior[str]:
+    @Behaviors.receive_message
     def on_message(msg: str) -> Behavior[str]:
         replies.append(msg)
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 async def test_messages_during_compute_are_stashed_and_replayed_in_order():
@@ -114,21 +117,23 @@ async def test_event_loop_stays_responsive_during_parallel_compute():
             gaps.append(now - last)
             last = now
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[Compute]) -> Behavior[Compute]:
         workers = [ctx.spawn(worker(), f"w{i}") for i in range(8)]
 
+        @Behaviors.receive_message
         def on_message(msg: Compute) -> Behavior[Compute]:
             for w in workers:
                 w.tell(msg)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
     tick = asyncio.create_task(ticker())
     try:
         async with (
             ActorSystem(collector, "sink") as sink,
-            ActorSystem(Behaviors.setup(guardian), "t") as system,
+            ActorSystem(guardian, "t") as system,
         ):
             t0 = time.perf_counter()
             system.tell(Compute(0.1, sink))

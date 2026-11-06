@@ -362,6 +362,7 @@ def _probe_behavior(
     """Probe one contact point for seed nodes until told to stop, or until it has failed for
     probing_failure_timeout."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + settings.probing_failure_timeout
@@ -371,6 +372,7 @@ def _probe_behavior(
             jitter = 1.0 + random.random() * settings.probe_interval_jitter
             ctx.timers.start_single_timer("probe", _ProbeTick(), settings.probe_interval * jitter)
 
+        @Behaviors.receive_message
         def on_message(msg: Any) -> Behavior[Any]:
             nonlocal deadline
             match msg:
@@ -412,9 +414,9 @@ def _probe_behavior(
             schedule_next()
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 class _Coordinator:
@@ -571,6 +573,7 @@ class _Coordinator:
         return Behaviors.same
 
     def behavior(self) -> Behavior[Any]:
+        @Behaviors.receive_message
         def on_message(msg: Any) -> Behavior[Any]:
             match msg:
                 case _DiscoverTick():
@@ -610,7 +613,7 @@ class _Coordinator:
                     pass
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
 
 def _coordinator_behavior(

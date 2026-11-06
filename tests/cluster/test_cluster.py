@@ -517,13 +517,15 @@ class SpawnSubscriber:
     reply_to: ActorRef[ActorRef[object]]
 
 
+@Behaviors.receive
 def spawning_guardian(
     ctx: ActorContext[SpawnSubscriber], msg: SpawnSubscriber
 ) -> Behavior[SpawnSubscriber]:
+    @Behaviors.receive_message
     def subscriber(event: object) -> Behavior[object]:
         return Behaviors.stopped() if event == "stop" else Behaviors.same
 
-    msg.reply_to.tell(ctx.spawn(Behaviors.receive_message(subscriber), "subscriber"))
+    msg.reply_to.tell(ctx.spawn(subscriber, "subscriber"))
     return Behaviors.same
 
 
@@ -531,7 +533,7 @@ async def test_a_stopped_local_subscriber_is_forgotten(caplog: pytest.LogCapture
     p1, p2 = free_port(), free_port()
     seeds = (Address("c", "127.0.0.1", p1),)
     a = ActorSystem(
-        Behaviors.receive(spawning_guardian),
+        spawning_guardian,
         "c",
         address=("127.0.0.1", p1),
         cluster=ClusterSettings(seed_nodes=seeds, **FAST),
@@ -551,11 +553,13 @@ async def test_a_stopped_local_subscriber_is_forgotten(caplog: pytest.LogCapture
         assert not [r for r in caplog.records if subscriber.path in r.getMessage()]
 
 
+@Behaviors.receive
 def adapters_guardian(
     ctx: ActorContext[SpawnSubscriber], msg: SpawnSubscriber
 ) -> Behavior[SpawnSubscriber]:
     """Spawns an actor that subscribes to cluster events through two message adapters."""
 
+    @Behaviors.setup
     def subscribing(sctx: ActorContext[object]) -> Behavior[object]:
         subscriptions = Cluster(sctx.system).subscriptions
         subscriptions.tell(Subscribe(sctx.message_adapter(lambda e: ("member", e)), MemberEvent))
@@ -564,7 +568,7 @@ def adapters_guardian(
             lambda event: Behaviors.stopped() if event == "stop" else Behaviors.same
         )
 
-    msg.reply_to.tell(ctx.spawn(Behaviors.setup(subscribing), "subscriber"))
+    msg.reply_to.tell(ctx.spawn(subscribing, "subscriber"))
     return Behaviors.same
 
 
@@ -574,7 +578,7 @@ async def test_subscriptions_through_two_adapters_of_one_actor_both_end_with_it(
     p1, p2 = free_port(), free_port()
     seeds = (Address("c", "127.0.0.1", p1),)
     a = ActorSystem(
-        Behaviors.receive(adapters_guardian),
+        adapters_guardian,
         "c",
         address=("127.0.0.1", p1),
         cluster=ClusterSettings(seed_nodes=seeds, **FAST),

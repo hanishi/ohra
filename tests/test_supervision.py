@@ -41,6 +41,7 @@ type Cmd = Add | Get
 def fragile(events: list[str], total: int = 0) -> Behavior[Cmd]:
     """Fails on negative numbers."""
 
+    @Behaviors.receive_message
     def on_message(msg: Cmd) -> Behavior[Cmd]:
         match msg:
             case Add(n) if n < 0:
@@ -56,15 +57,16 @@ def fragile(events: list[str], total: int = 0) -> Behavior[Cmd]:
             events.append(f"pre-restart at {total}")
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message).receive_signal(on_signal)
+    return on_message.receive_signal(on_signal)
 
 
 def started(events: list[str]) -> Behavior[Cmd]:
+    @Behaviors.setup
     def setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         events.append("setup")
         return fragile(events)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_resume_keeps_state():
@@ -111,9 +113,11 @@ async def test_exception_type_filter():
 async def test_restart_stops_children():
     stopped: list[str] = []
 
+    @Behaviors.setup
     def parent(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         ctx.spawn(Behaviors.ignore, "kid")  # same name each incarnation
 
+        @Behaviors.receive_message
         def on_message(msg: Cmd) -> Behavior[Cmd]:
             if isinstance(msg, Add) and msg.n < 0:
                 raise ValueError
@@ -122,9 +126,9 @@ async def test_restart_stops_children():
             return Behaviors.same
 
         stopped.append(f"setup with {len(ctx.children)} child")
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    b = Behaviors.supervise(Behaviors.setup(parent)).on_failure(S.restart())
+    b = Behaviors.supervise(parent).on_failure(S.restart())
     async with ActorSystem(b, "t") as system:
         system.tell(Add(-1))
         assert await system.ask(Get, timeout=1) == 1
@@ -149,15 +153,14 @@ async def test_backoff_grows_and_survives_failing_setup():
     attempts: list[float] = []
     loop = asyncio.get_running_loop()
 
+    @Behaviors.setup
     def flaky_setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         attempts.append(loop.time())
         if len(attempts) < 4:
             raise ConnectionError("db not ready")
         return fragile([])
 
-    b = Behaviors.supervise(Behaviors.setup(flaky_setup)).on_failure(
-        S.restart_with_backoff(0.01, 1.0, 0.0)
-    )
+    b = Behaviors.supervise(flaky_setup).on_failure(S.restart_with_backoff(0.01, 1.0, 0.0))
     async with ActorSystem(b, "t") as system:
         system.tell(Add(9))
         assert await system.ask(Get, timeout=2) == 9
@@ -256,6 +259,7 @@ async def test_a_failure_out_of_restarts_during_the_replay_dead_letters_the_rest
 async def test_a_restart_failing_with_an_unsupervised_error_dead_letters_the_stash():
     starts: list[int] = []
 
+    @Behaviors.setup
     def setup(_ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         starts.append(len(starts))
         if len(starts) == 2:
@@ -265,7 +269,7 @@ async def test_a_restart_failing_with_an_unsupervised_error_dead_letters_the_sta
     async with ActorTestKit() as testkit:
         dead = testkit.create_dead_letter_probe()
         refs: TestProbe[ActorRef[Cmd]] = testkit.create_test_probe()
-        child = Behaviors.supervise(Behaviors.setup(setup)).on_failure(
+        child = Behaviors.supervise(setup).on_failure(
             S.restart_with_backoff(0.01, 0.01, 0.0), ValueError
         )
         testkit.spawn(parent_of(child, refs))
@@ -285,11 +289,13 @@ def watcher(events: list[str], gone: TestProbe[ActorRef[object]]) -> Behavior[Cm
     """Counts like ``started``, watches a peer on ``WatchPeer``, and tells ``gone`` when one
     terminates."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd | WatchPeer]) -> Behavior[Cmd | WatchPeer]:
         events.append("setup")
         return counting(ctx, 0)
 
     def counting(ctx: ActorContext[Cmd | WatchPeer], total: int) -> Behavior[Cmd | WatchPeer]:
+        @Behaviors.receive_message
         def on_message(msg: Cmd | WatchPeer) -> Behavior[Cmd | WatchPeer]:
             match msg:
                 case WatchPeer(peer):
@@ -311,9 +317,9 @@ def watcher(events: list[str], gone: TestProbe[ActorRef[object]]) -> Behavior[Cm
                 gone.ref.tell(sig.ref)
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_a_terminated_during_a_backoff_is_delivered_after_the_restart():
@@ -382,18 +388,18 @@ async def test_a_supervisor_returned_for_the_same_exception_replaces_the_current
     exception": the returned stop supervisor is the only one left, so the failure stops the actor
     instead of reaching the restart around it."""
 
+    @Behaviors.receive_message
     def switched(msg: str) -> Behavior[str]:
         raise ValueError(msg)
 
+    @Behaviors.receive_message
     def first(msg: str) -> Behavior[str]:
         if msg == "switch":
-            return Behaviors.supervise(Behaviors.receive_message(switched)).on_failure(S.stop())
+            return Behaviors.supervise(switched).on_failure(S.stop())
         return Behaviors.same
 
     async with ActorTestKit() as testkit:
-        ref = testkit.spawn(
-            Behaviors.supervise(Behaviors.receive_message(first)).on_failure(S.restart())
-        )
+        ref = testkit.spawn(Behaviors.supervise(first).on_failure(S.restart()))
         probe: TestProbe[str] = testkit.create_test_probe()
         ref.tell("switch")
         ref.tell("boom")
@@ -404,10 +410,11 @@ async def test_a_supervisor_nested_for_the_same_exception_keeps_only_the_inner_o
     """Pekko's InterceptorImpl.preStart deduplicates the started stack: the inner stop supervisor
     hides the outer restart for the same exception."""
 
+    @Behaviors.receive_message
     def fails(msg: str) -> Behavior[str]:
         raise ValueError(msg)
 
-    inner = Behaviors.supervise(Behaviors.receive_message(fails)).on_failure(S.stop())
+    inner = Behaviors.supervise(fails).on_failure(S.stop())
     async with ActorTestKit() as testkit:
         ref = testkit.spawn(Behaviors.supervise(inner).on_failure(S.restart()))
         probe: TestProbe[str] = testkit.create_test_probe()
@@ -418,17 +425,17 @@ async def test_a_supervisor_nested_for_the_same_exception_keeps_only_the_inner_o
 async def test_a_supervisor_nested_for_another_exception_stays():
     """Pekko's SupervisionSpec, "support nesting to handle different exceptions"."""
 
+    @Behaviors.receive_message
     def fails(msg: str) -> Behavior[str]:
         raise ValueError(msg)
 
     def counted(events: list[str]) -> Behavior[str]:
+        @Behaviors.setup
         def setup(_ctx: ActorContext[str]) -> Behavior[str]:
             events.append("setup")
-            return Behaviors.supervise(Behaviors.receive_message(fails)).on_failure(
-                S.stop(), exc_type=KeyError
-            )
+            return Behaviors.supervise(fails).on_failure(S.stop(), exc_type=KeyError)
 
-        return Behaviors.setup(setup)
+        return setup
 
     events: list[str] = []
     async with ActorTestKit() as testkit:
@@ -472,6 +479,7 @@ async def test_a_restart_that_fails_at_once_never_resets_the_backoff_count(
     even past reset_after."""
     attempts: list[int] = []
 
+    @Behaviors.setup
     def setup(_ctx: ActorContext[str]) -> Behavior[str]:
         attempts.append(len(attempts))
         raise ConnectionError("not ready")
@@ -479,7 +487,7 @@ async def test_a_restart_that_fails_at_once_never_resets_the_backoff_count(
     strategy = S.restart_with_backoff(0.01, 5.0, 0.0).with_reset_after(0.015)
     with caplog.at_level(logging.WARNING, logger="ohra.actor"):
         async with ActorTestKit() as testkit:
-            testkit.spawn(Behaviors.supervise(Behaviors.setup(setup)).on_failure(strategy))
+            testkit.spawn(Behaviors.supervise(setup).on_failure(strategy))
             await eventually(lambda: len(attempts) >= 5)
     delays = [
         r.getMessage().split("restarting in ")[1].split("s ")[0]

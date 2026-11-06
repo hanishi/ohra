@@ -52,6 +52,7 @@ class PoolRouter[T](Behavior[T]):
                 return random.randrange(len(routees))
             return hash(logic(msg)) % len(routees)
 
+        @Behaviors.receive_message
         def on_message(msg: T) -> Behavior[T]:
             routees[pick(msg)].tell(msg)
             return SAME
@@ -62,7 +63,7 @@ class PoolRouter[T](Behavior[T]):
                 return SAME if routees else Stopped()
             return UNHANDLED
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
 
 class Routers:

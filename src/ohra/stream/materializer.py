@@ -88,6 +88,7 @@ def _child(parent: ActorCell[Any], name: str) -> ActorCell[Any]:
 
 
 def _run(start: Callable[[], Coroutine[Any, Any, None]]) -> Behavior[_Stop]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[_Stop]) -> Behavior[_Stop]:
         drive = asyncio.ensure_future(start())
         ctx.pipe_to_self(drive, lambda _: _Stop())
@@ -106,4 +107,4 @@ def _run(start: Callable[[], Coroutine[Any, Any, None]]) -> Behavior[_Stop]:
 
         return Behaviors.receive_message(lambda _: Behaviors.stopped()).receive_signal(on_signal)
 
-    return Behaviors.setup(setup)
+    return setup

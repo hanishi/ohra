@@ -68,6 +68,7 @@ type Report = Progress | Done
 def summer(numbers: list[int], report_to: ActorRef[Report]) -> Behavior[str]:
     """Adds the numbers up, reporting progress, then stops."""
 
+    @Behaviors.setup
     async def setup(_ctx: ActorContext[str]) -> Behavior[str]:
         total = 0
         for i, n in enumerate(numbers, 1):
@@ -77,7 +78,7 @@ def summer(numbers: list[int], report_to: ActorRef[Report]) -> Behavior[str]:
         report_to.tell(Done(total))
         return Behaviors.stopped()
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def until_done(report: Report) -> FishingOutcome:
@@ -239,6 +240,7 @@ class Gone:
 def watcher(target: ActorRef[str], report_to: ActorRef[Gone]) -> Behavior[Gone]:
     """Tells report_to when target stops, then stops too."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Gone]) -> Behavior[Gone]:
         ctx.watch_with(target, Gone(target.path))
 
@@ -249,7 +251,7 @@ def watcher(target: ActorRef[str], report_to: ActorRef[Gone]) -> Behavior[Gone]:
 
         return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_the_watcher_reports_a_stop(testkit: ActorTestKit):
@@ -325,6 +327,7 @@ With `restart_with_backoff`, the restart waits. Under manual time the test moves
 def flaky(probe: ActorRef[str]) -> Behavior[str]:
     """Reports each start; fails on every message; restarts after a backoff of 1 s."""
 
+    @Behaviors.setup
     def setup(_ctx: ActorContext[str]) -> Behavior[str]:
         probe.tell("started")
 
@@ -335,7 +338,7 @@ def flaky(probe: ActorRef[str]) -> Behavior[str]:
         return on_message
 
     backoff = SupervisorStrategy.restart_with_backoff(1, 60, random_factor=0)
-    return Behaviors.supervise(Behaviors.setup(setup)).on_failure(backoff)
+    return Behaviors.supervise(setup).on_failure(backoff)
 
 
 @pytest.mark.manual_time

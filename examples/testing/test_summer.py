@@ -21,6 +21,7 @@ type Report = Progress | Done
 def summer(numbers: list[int], report_to: ActorRef[Report]) -> Behavior[str]:
     """Adds the numbers up, reporting progress, then stops."""
 
+    @Behaviors.setup
     async def setup(_ctx: ActorContext[str]) -> Behavior[str]:
         total = 0
         for i, n in enumerate(numbers, 1):
@@ -30,7 +31,7 @@ def summer(numbers: list[int], report_to: ActorRef[Report]) -> Behavior[str]:
         report_to.tell(Done(total))
         return Behaviors.stopped()
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 def until_done(report: Report) -> FishingOutcome:

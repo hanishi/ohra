@@ -389,6 +389,7 @@ def _rebalance_worker(
     """BeginHandOff to every region, wait for all acks (a terminated region counts), HandOff to the
     host, wait for ShardStopped; report _RebalanceDone to the coordinator either way."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         remaining = set(regions)
         for region in regions.values():
@@ -408,6 +409,7 @@ def _rebalance_worker(
             parent.tell(_RebalanceDone(shard, ok))
             return Behaviors.stopped()
 
+        @Behaviors.receive
         def stopping_shard(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             match msg:
                 case ShardStopped(stopped) if stopped == shard:
@@ -424,8 +426,9 @@ def _rebalance_worker(
             if remaining:
                 return Behaviors.same
             from_region.tell(HandOff(shard, ctx.self))
-            return Behaviors.receive(stopping_shard)
+            return stopping_shard
 
+        @Behaviors.receive
         def waiting_for_acks(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             match msg:
                 case BeginHandOffAck(acked_shard, from_) if acked_shard == shard:
@@ -437,9 +440,9 @@ def _rebalance_worker(
                 case _:
                     return Behaviors.same
 
-        return Behaviors.receive(waiting_for_acks)
+        return waiting_for_acks
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- the coordinator (ShardCoordinator), run as the cluster singleton's instance -----------------
@@ -677,6 +680,7 @@ class _Coordinator:
     # --- the behavior ----------------------------------------------------------------------------
 
     def behavior(self) -> Behavior[Any]:
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             match msg:
                 case Register(region, hosted):
@@ -717,7 +721,7 @@ class _Coordinator:
                         self.refs[path].tell(CoordinatorStopped(self.ctx.self))
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     def touch_gate(self) -> None:
         """The rebuild gate waits retry_interval of membership quiescence, not from the

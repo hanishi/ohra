@@ -200,7 +200,7 @@ These are all of them:
 
 - **The `Behaviors` decorators turn the name into a behavior.** That is why a factory ends with `return on_message`: `on_message` is no longer a plain function but the behavior to start with.
 - **The `ctx` decorators leave the name as your function.** The name rarely matters, so it is usually `_`. Give it a real name when you call it again, as `examples/interaction_patterns/ask_between_actors.py` does.
-- **Every decorator is also a plain call.** `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`, `@ctx.pipe_to_self(work)` is `ctx.pipe_to_self(work, adapt)`, and `@remotable` is `remotable(AddItem)`. Use whichever reads better. Adding a signal handler to a message handler is only a call: `Behaviors.receive(on_message).receive_signal(on_signal)`.
+- **Every decorator is also a plain call.** `@Behaviors.receive_message` above `def on_message` is `Behaviors.receive_message(on_message)`, `@ctx.pipe_to_self(work)` is `ctx.pipe_to_self(work, adapt)`, and `@remotable` is `remotable(AddItem)`. Use whichever reads better. A signal handler is added with a method on the decorated handler: `on_message.receive_signal(on_signal)`.
 - **Some functions take no decorator.** `ctx.message_adapter(f)` is usually given a class, as in `ctx.message_adapter(_GotTotal)`. `Behaviors.with_stash(capacity, factory)` takes the capacity first. A helper that takes `ctx` and that you call yourself has nobody to hand it to.
 
 ### Ask and reply
@@ -374,6 +374,7 @@ def printer() -> Behavior[DeadLetter]:
     return on_message
 
 
+@Behaviors.setup
 def guardian(ctx: ActorContext[str]) -> Behavior[str]:
     log = ctx.spawn(printer(), "printer")
     ctx.system.event_stream.tell(EventStream.Subscribe(DeadLetter, log))
@@ -389,7 +390,7 @@ def guardian(ctx: ActorContext[str]) -> Behavior[str]:
 
 
 async def main() -> None:
-    async with ActorSystem(Behaviors.setup(guardian), "shop"):
+    async with ActorSystem(guardian, "shop"):
         await asyncio.sleep(0.1)
 
 

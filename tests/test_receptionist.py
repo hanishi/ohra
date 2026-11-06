@@ -37,6 +37,7 @@ class Spawn:
     reply_to: ActorRef[ActorRef[Any]]
 
 
+@Behaviors.receive
 def spawner(ctx: ActorContext[Spawn], msg: Spawn) -> Behavior[Spawn]:
     msg.reply_to.tell(ctx.spawn(msg.behavior, msg.name))
     return Behaviors.same
@@ -45,13 +46,14 @@ def spawner(ctx: ActorContext[Spawn], msg: Spawn) -> Behavior[Spawn]:
 def recorder(into: list[Any]) -> Behavior[Any]:
     """Keeps what it receives; stops on "stop"."""
 
+    @Behaviors.receive_message
     def on_message(msg: Any) -> Behavior[Any]:
         if msg == "stop":
             return Behaviors.stopped()
         into.append(msg)
         return Behaviors.same
 
-    return Behaviors.receive_message(on_message)
+    return on_message
 
 
 def gone(system: ActorSystem[Any], path: str) -> bool:
@@ -63,7 +65,7 @@ def gone(system: ActorSystem[Any], path: str) -> bool:
 
 
 async def test_register_then_find_lists_the_service():
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
         rec = Receptionist(system).ref
         assert await ask(rec, lambda r: Register(GREETER, svc, r), timeout=1) == Registered(
@@ -77,7 +79,7 @@ async def test_register_then_find_lists_the_service():
 
 
 async def test_subscribe_gets_current_listing_then_each_change():
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
         other = await ask(system, lambda r: Spawn(Behaviors.ignore, "other", r), timeout=1)
         events: list[Listing[str]] = []
@@ -97,7 +99,7 @@ async def test_subscribe_gets_current_listing_then_each_change():
 
 
 async def test_deregister_removes_one_binding():
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
         rec = Receptionist(system).ref
         rec.tell(Register(GREETER, svc))
@@ -114,7 +116,7 @@ async def test_deregister_removes_one_binding():
 
 
 async def test_a_stopped_service_leaves_every_key():
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(recorder([]), "svc", r), timeout=1)
         greeter_events: list[Listing[str]] = []
         other_events: list[Listing[str]] = []
@@ -139,7 +141,7 @@ async def test_a_stopped_service_leaves_every_key():
 
 
 async def test_a_stopped_subscriber_is_dropped_from_every_key(caplog: pytest.LogCaptureFixture):
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
         sub = await ask(system, lambda r: Spawn(recorder([]), "sub", r), timeout=1)
         rec = Receptionist(system).ref
@@ -192,6 +194,7 @@ async def test_receptionist_exists_from_the_start():
 async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
     caplog: pytest.LogCaptureFixture,
 ):
+    @Behaviors.setup
     def subscribing(ctx: ActorContext[Any]) -> Behavior[Any]:
         Receptionist(ctx.system).ref.tell(
             Subscribe(GREETER, ctx.message_adapter(lambda listing: ("listing", listing)))
@@ -200,11 +203,9 @@ async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
             lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
         )
 
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
-        actor = await ask(
-            system, lambda r: Spawn(Behaviors.setup(subscribing), "subscriber", r), timeout=1
-        )
+        actor = await ask(system, lambda r: Spawn(subscribing, "subscriber", r), timeout=1)
         rec = Receptionist(system).ref
         await asyncio.sleep(0.05)
         actor.tell("stop")
@@ -220,6 +221,7 @@ async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(
 async def test_two_subscriptions_through_adapters_of_one_actor_both_end_with_it(
     caplog: pytest.LogCaptureFixture,
 ):
+    @Behaviors.setup
     def subscribing(ctx: ActorContext[Any]) -> Behavior[Any]:
         rec = Receptionist(ctx.system).ref
         rec.tell(Subscribe(GREETER, ctx.message_adapter(lambda listing: ("greeter", listing))))
@@ -228,11 +230,9 @@ async def test_two_subscriptions_through_adapters_of_one_actor_both_end_with_it(
             lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
         )
 
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         svc = await ask(system, lambda r: Spawn(Behaviors.ignore, "svc", r), timeout=1)
-        actor = await ask(
-            system, lambda r: Spawn(Behaviors.setup(subscribing), "subscriber", r), timeout=1
-        )
+        actor = await ask(system, lambda r: Spawn(subscribing, "subscriber", r), timeout=1)
         rec = Receptionist(system).ref
         # both subscriptions are in: the receptionist handles messages in order
         await ask(rec, lambda r: Find(OTHER, r), timeout=1)
@@ -248,6 +248,7 @@ async def test_two_subscriptions_through_adapters_of_one_actor_both_end_with_it(
 
 
 async def test_a_service_that_subscribes_too_leaves_its_keys_when_it_stops():
+    @Behaviors.setup
     def registering(ctx: ActorContext[Any]) -> Behavior[Any]:
         rec = Receptionist(ctx.system).ref
         rec.tell(Register(GREETER, ctx.self))
@@ -256,12 +257,10 @@ async def test_a_service_that_subscribes_too_leaves_its_keys_when_it_stops():
             lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
         )
 
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         listings: list[Listing[str]] = []
         watcher = await ask(system, lambda r: Spawn(recorder(listings), "watcher", r), timeout=1)
-        actor = await ask(
-            system, lambda r: Spawn(Behaviors.setup(registering), "both", r), timeout=1
-        )
+        actor = await ask(system, lambda r: Spawn(registering, "both", r), timeout=1)
         rec = Receptionist(system).ref
         rec.tell(Subscribe(GREETER, watcher))
         await eventually(lambda: listings[-1:] != [] and actor in listings[-1].service_instances)
@@ -273,6 +272,7 @@ async def test_a_message_adapter_registers_and_leaves_with_its_actor():
     """Pekko's LocalReceptionist registers any local ref; an adapter's actor is watched once,
     with the actor itself registered under another key."""
 
+    @Behaviors.setup
     def registering(ctx: ActorContext[Any]) -> Behavior[Any]:
         rec = Receptionist(ctx.system).ref
         rec.tell(Register(GREETER, ctx.self))
@@ -281,12 +281,10 @@ async def test_a_message_adapter_registers_and_leaves_with_its_actor():
             lambda msg: Behaviors.stopped() if msg == "stop" else Behaviors.same
         )
 
-    async with ActorSystem(Behaviors.receive(spawner), "r") as system:
+    async with ActorSystem(spawner, "r") as system:
         listings: list[Listing[str]] = []
         watcher = await ask(system, lambda r: Spawn(recorder(listings), "watcher", r), timeout=1)
-        actor = await ask(
-            system, lambda r: Spawn(Behaviors.setup(registering), "both", r), timeout=1
-        )
+        actor = await ask(system, lambda r: Spawn(registering, "both", r), timeout=1)
         rec = Receptionist(system).ref
         rec.tell(Subscribe(OTHER, watcher))
         await eventually(

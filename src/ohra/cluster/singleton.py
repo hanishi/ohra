@@ -455,6 +455,7 @@ class _Manager:
     ) -> Behavior[_ManagerMsg]:
         """A state: the state's own cases first, then Pekko's whenUnhandled."""
 
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[_ManagerMsg], msg: _ManagerMsg) -> Behavior[_ManagerMsg]:
             if isinstance(msg, ClusterDomainEvent):
                 self.track(msg)
@@ -470,7 +471,7 @@ class _Manager:
                 self.exiting_done()
             return Behaviors.same
 
-        return Behaviors.receive(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
     def unhandled(self, msg: _ManagerMsg) -> Behavior[_ManagerMsg]:
         match msg:
@@ -869,6 +870,7 @@ class _TryToIdentifySingleton: ...
 
 
 def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
+    @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         cluster = Cluster(ctx.system)
         members_by_age: list[Member] = []
@@ -901,6 +903,7 @@ def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
             while buffer:
                 target.tell(buffer.popleft())
 
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             nonlocal instance
             match msg:
@@ -950,9 +953,9 @@ def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
                         buffer.append(msg)
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 # --- the extension -------------------------------------------------------------------------------

@@ -48,9 +48,11 @@ type Cmd = Tick | Tock | CancelIt | IsActive
 def single(delay: float, probe: ActorRef[Tock]) -> Behavior[Cmd]:
     """Starts a single timer; tells the probe when it fires; CancelIt cancels it."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Cmd]) -> Behavior[Cmd]:
         ctx.timers.start_single_timer("k", Tick(), delay)
 
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[Cmd], msg: Cmd) -> Behavior[Cmd]:
             match msg:
                 case Tick():
@@ -63,9 +65,9 @@ def single(delay: float, probe: ActorRef[Tock]) -> Behavior[Cmd]:
                     ctx.timers.start_single_timer("k", Tick(), delay)
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup
 
 
 async def test_single_timer():
@@ -82,6 +84,7 @@ async def test_single_timer():
 
 async def test_repeating_timer_fires_every_interval():
     def ticker(probe: ActorRef[Tick]) -> Behavior[Tick]:
+        @Behaviors.setup
         def setup(ctx: ActorContext[Tick]) -> Behavior[Tick]:
             ctx.timers.start_timer_with_fixed_delay("k", Tick(), 0.1)
 
@@ -92,7 +95,7 @@ async def test_repeating_timer_fires_every_interval():
 
             return on_message
 
-        return Behaviors.setup(setup)
+        return setup
 
     async with ActorTestKit(manual_time=True) as testkit:
         manual_time = ManualTime(testkit.system)
@@ -117,6 +120,7 @@ async def test_cancelled_timer_message_is_dropped_under_manual_time():
 
 async def test_chain_of_timers_in_one_window():
     def chain(probe: ActorRef[Tick]) -> Behavior[Tick]:
+        @Behaviors.setup
         def setup(ctx: ActorContext[Tick]) -> Behavior[Tick]:
             ctx.timers.start_single_timer("k", Tick(1), 1)
 
@@ -129,7 +133,7 @@ async def test_chain_of_timers_in_one_window():
 
             return on_message
 
-        return Behaviors.setup(setup)
+        return setup
 
     async with ActorTestKit(manual_time=True) as testkit:
         manual_time = ManualTime(testkit.system)
@@ -179,11 +183,12 @@ async def test_ctx_ask_times_out_after_its_timeout_from_the_call():
         probe: TestProbe[str] = testkit.create_test_probe()
         silent = testkit.spawn(Behaviors.ignore)
 
+        @Behaviors.setup
         def asker(ctx: ActorContext[str]) -> Behavior[str]:
             ctx.ask(silent, Ping, lambda r: type(r).__name__, timeout=5)
             return Behaviors.receive_message(lambda m: (probe.ref.tell(m), Behaviors.same)[1])
 
-        testkit.spawn(Behaviors.setup(asker))
+        testkit.spawn(asker)
         await manual_time.time_passes(5)
         await probe.expect_message("Failure", max=0.5)
 
@@ -202,11 +207,12 @@ async def test_an_ask_that_failed_before_the_actor_stopped_logs_nothing():
         async with ActorTestKit(manual_time=True) as testkit:
             silent = testkit.spawn(Behaviors.ignore)
 
+            @Behaviors.setup
             def asker(ctx: ActorContext[str]) -> Behavior[str]:
                 ctx.ask(silent, Ping, lambda r: "answered", timeout=0)
                 return Behaviors.stopped()
 
-            ref = testkit.spawn(Behaviors.setup(asker))
+            ref = testkit.spawn(asker)
             probe: TestProbe[str] = testkit.create_test_probe()
             await probe.expect_terminated(ref)
         gc.collect()
@@ -217,6 +223,7 @@ async def test_an_ask_that_failed_before_the_actor_stopped_logs_nothing():
 
 async def test_backoff_restart_under_manual_time():
     def failing(probe: ActorRef[str]) -> Behavior[str]:
+        @Behaviors.setup
         def setup(_ctx: ActorContext[str]) -> Behavior[str]:
             probe.tell("started")
 
@@ -226,7 +233,7 @@ async def test_backoff_restart_under_manual_time():
 
             return on_message
 
-        return Behaviors.supervise(Behaviors.setup(setup)).on_failure(
+        return Behaviors.supervise(setup).on_failure(
             SupervisorStrategy.restart_with_backoff(3, 10, random_factor=0)
         )
 
@@ -244,13 +251,14 @@ async def test_backoff_restart_under_manual_time():
 async def test_time_passes_does_not_wait_forever_for_a_busy_actor():
     never: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
+    @Behaviors.receive_message
     async def stuck(_msg: str) -> Behavior[str]:
         await never
         return Behaviors.same
 
     async with ActorTestKit(manual_time=True) as testkit:
         manual_time = ManualTime(testkit.system)
-        testkit.spawn(Behaviors.receive_message(stuck)).tell("go")
+        testkit.spawn(stuck).tell("go")
         t0 = time.monotonic()
         await manual_time.time_passes(1)
         assert time.monotonic() - t0 < 0.5

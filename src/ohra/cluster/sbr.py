@@ -776,6 +776,7 @@ def split_brain_resolver(
     ``settings.tick_interval``, downs through the daemon's ``Down``, and stops when this member is
     removed."""
 
+    @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         resolver = _Resolver(
             settings,
@@ -787,6 +788,7 @@ def split_brain_resolver(
         core.tell(Subscribe(ctx.self, ClusterDomainEvent))
         ctx.timers.start_timer_with_fixed_delay("tick", _Tick(), settings.tick_interval)
 
+        @Behaviors.receive_message
         def on_message(msg: Any) -> Behavior[Any]:
             match msg:
                 case _Tick():
@@ -797,6 +799,6 @@ def split_brain_resolver(
                     pass
             return Behaviors.stopped() if resolver.stopped else Behaviors.same
 
-        return Behaviors.receive_message(on_message)
+        return on_message
 
-    return Behaviors.setup(setup)
+    return setup

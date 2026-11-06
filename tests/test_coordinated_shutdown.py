@@ -130,6 +130,7 @@ async def test_actor_termination_task_waits_for_the_actor():
     refs: list[ActorRef[str]] = []
 
     def worker() -> Behavior[str]:
+        @Behaviors.receive_message
         def on_message(msg: str) -> Behavior[str]:
             return Behaviors.stopped() if msg == "stop" else Behaviors.same
 
@@ -138,13 +139,14 @@ async def test_actor_termination_task_waits_for_the_actor():
                 stopped.append("worker")
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
+    @Behaviors.setup
     def guardian(ctx: ActorContext[str]) -> Behavior[str]:
         refs.append(ctx.spawn(worker(), "w"))
         return Behaviors.ignore
 
-    system = ActorSystem(Behaviors.setup(guardian), "cs", shutdown=FAST)
+    system = ActorSystem(guardian, "cs", shutdown=FAST)
     await asyncio.sleep(0)  # the guardian's setup has run
     cs = CoordinatedShutdown(system)
     cs.add_actor_termination_task("service-stop", "w", refs[0], "stop")

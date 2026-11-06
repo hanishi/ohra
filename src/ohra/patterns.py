@@ -97,6 +97,7 @@ def batching[T](
     Not in Pekko.
     """
 
+    @Behaviors.with_timers
     def with_timers(timers: TimerScheduler[T | _Flush]) -> Behavior[T | _Flush]:
         batch: list[T] = []
 
@@ -107,6 +108,7 @@ def batching[T](
             if inspect.isawaitable(r):
                 await r
 
+        @Behaviors.receive_message
         async def on_message(msg: T | _Flush) -> Behavior[T | _Flush]:
             if isinstance(msg, _Flush):
                 await flush()
@@ -123,9 +125,9 @@ def batching[T](
                 await flush()
             return Behaviors.same
 
-        return Behaviors.receive_message(on_message).receive_signal(on_signal)
+        return on_message.receive_signal(on_signal)
 
-    return Behaviors.with_timers(with_timers)
+    return with_timers
 
 
 class SpawnProtocol:
@@ -147,6 +149,7 @@ class SpawnProtocol:
 
     @staticmethod
     def apply() -> Behavior[Command]:
+        @Behaviors.receive
         def on_message(
             ctx: ActorContext[SpawnProtocol.Command], msg: SpawnProtocol.Command
         ) -> Behavior[SpawnProtocol.Command]:
@@ -162,4 +165,4 @@ class SpawnProtocol:
             msg.reply_to.tell(ref)
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message

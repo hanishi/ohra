@@ -78,11 +78,12 @@ COUNTER2 = EntityTypeKey[Count]("Counter2")
 
 def counter(entity: EntityContext[Count]) -> Behavior[Count]:
     def active(total: int) -> Behavior[Count]:
+        @Behaviors.receive
         def on_message(_ctx: ActorContext[Count], msg: Count) -> Behavior[Count]:
             msg.reply_to.tell(total + msg.n)
             return active(total + msg.n)
 
-        return Behaviors.receive(on_message)
+        return on_message
 
     return active(0)
 
@@ -679,11 +680,13 @@ async def test_a_shard_whose_region_terminated_during_hand_off_is_not_reallocate
     settings = replace(FAST_SHARDING, rebalance_interval=60.0)
     coordinators: list[_Coordinator] = []
 
+    @Behaviors.setup
     def coordinator(ctx: ActorContext[Any]) -> Behavior[Any]:
         coordinators.append(_Coordinator(ctx, "T", settings))
         return coordinators[0].behavior()
 
     def region(log: list[object], stop_on_hand_off: bool) -> Behavior[Any]:
+        @Behaviors.receive
         def on_message(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             log.append(msg)
             match msg:
@@ -695,13 +698,13 @@ async def test_a_shard_whose_region_terminated_during_hand_off_is_not_reallocate
                     pass
             return Behaviors.same
 
-        return Behaviors.receive(on_message)
+        return on_message
 
     p1 = free_port()
     async with node(p1, [p1]) as a:
         await eventually(lambda: all_up(a, 1), timeout=3)
         root = a._system_root  # pyright: ignore[reportPrivateUsage]
-        coord = root.spawn_child(Behaviors.setup(coordinator), "coordinator", None).ref
+        coord = root.spawn_child(coordinator, "coordinator", None).ref
         log1: list[object] = []
         log2: list[object] = []
         r1 = root.spawn_child(region(log1, True), "r1", None).ref

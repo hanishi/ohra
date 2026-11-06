@@ -40,9 +40,10 @@ AIが並行処理を完璧に実装したからではありません。
 
 大画面にはスコア、残り時間、プレイヤー間を移動するパックの軌跡が表示されます。
 
-![Relay Rallyの大画面](img/relay-rally-wall.png)
-
-![スマートフォンのゲーム画面](img/relay-rally-phone.png)
+<p align="center">
+  <img src="img/relay-rally-wall.png" width="560" alt="Relay Rallyの大画面">
+  <img src="img/relay-rally-phone.png" width="150" alt="スマートフォンのゲーム画面">
+</p>
 
 このゲームには、技術的に重要な仕組みが二つあります。
 
@@ -57,8 +58,6 @@ AIが並行処理を完璧に実装したからではありません。
 これにより、端末ごとに異なるタイミングでメッセージを受け取っても、共通の時間軸でゲームを進められます。
 
 この仕組みには、ohraのFastAPI拡張に追加した `synced()` と `clock.js` を使っています。
-
-もともとは、3台のタブレットをまたいで一匹の鯉が泳ぐデジタルサイネージのために開発した仕組みを、汎用化したものです。
 
 詳しくは[第9章](../book/09-fastapi.md#devices-on-one-clock)で説明しています。
 

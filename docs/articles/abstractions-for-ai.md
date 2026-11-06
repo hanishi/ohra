@@ -53,8 +53,6 @@ Each device translates the server timestamp into its local clock and renders the
 
 This uses `synced()` and `clock.js`, newly added to `ohra.ext.fastapi`.
 
-The mechanism was generalized from an earlier digital signage project in which a single animated fish moved across three separate tablets.
-
 The implementation is described in [chapter 9](../book/09-fastapi.md#devices-on-one-clock).
 
 ### One actor owns the game state

@@ -4,6 +4,7 @@
 //   const conn = connect("/ws/player", (msg) => { ... });
 //   conn.send({ type: "hit" });   // JSON; dropped while disconnected
 //   conn.now();                   // the server's clock now, in seconds
+//   conn.error();                 // how far off now() can be, in seconds
 //   conn.at(t, () => { ... });    // run at server time t
 //   conn.cancelAll();             // drop every pending at()
 //
@@ -17,11 +18,22 @@ const local = () => performance.now() / 1000;
 // freeze the offset, and a device's clock drifts against the server's.
 export const SAMPLE_WINDOW = 6;
 
-// The server clock minus the page clock, from the fastest of the last SAMPLE_WINDOW pings. A
-// sample is {c: sent, r: received} on the page clock and {s} on the server clock.
+// The fastest of the last SAMPLE_WINDOW pings. A sample is {c: sent, r: received} on the page
+// clock and {s} on the server clock.
+const fastest = (samples) =>
+  samples.slice(-SAMPLE_WINDOW).reduce((a, b) => (b.r - b.c < a.r - a.c ? b : a));
+
+// The server clock minus the page clock.
 export function offsetFrom(samples) {
-  const best = samples.slice(-SAMPLE_WINDOW).reduce((a, b) => (b.r - b.c < a.r - a.c ? b : a));
+  const best = fastest(samples);
   return best.s - (best.c + (best.r - best.c) / 2);
+}
+
+// How far offsetFrom can be off: the server read its clock somewhere in the round trip, and the
+// offset assumes halfway. It leaves out the server's delay in answering and late page timers.
+export function errorFrom(samples) {
+  const best = fastest(samples);
+  return (best.r - best.c) / 2;
 }
 
 // How long to wait, in ms, for server time t, with the page's clock at nowLocal: none once t has
@@ -78,6 +90,7 @@ export function connect(path, onMessage) {
   return {
     send,
     now: () => local() + offset,
+    error: () => (samples.length ? errorFrom(samples) : Infinity), // Infinity until a pong
     at(t, fn) {
       const id = setTimeout(() => {
         pending.delete(id);

@@ -19,5 +19,5 @@ def test_clock_js_ships_in_the_package():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
-def test_the_offset_comes_from_the_fastest_of_the_last_six_pings_and_at_waits_for_t():
+def test_the_offset_its_error_bound_and_the_delay_of_at():
     subprocess.run(["node", "tests/clock_js_check.mjs"], check=True, cwd=ROOT)

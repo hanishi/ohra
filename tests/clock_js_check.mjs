@@ -1,6 +1,6 @@
 // offsetFrom in src/ohra/ext/clock.js, run by tests/test_clock_js.py.
 import assert from "node:assert/strict";
-import { delayFor, offsetFrom, SAMPLE_WINDOW } from "../src/ohra/ext/clock.js";
+import { delayFor, errorFrom, offsetFrom, SAMPLE_WINDOW } from "../src/ohra/ext/clock.js";
 
 // the fastest round trip wins: its server time minus the page time halfway through it
 assert.equal(offsetFrom([{ c: 0, r: 0.2, s: 10 }, { c: 1, r: 1.02, s: 11.5 }]).toFixed(2), "10.49");
@@ -15,3 +15,7 @@ assert.equal(offsetFrom([old, ...recent]).toFixed(2), "5.00");
 assert.equal(delayFor(110, 100, 0), 10000);
 assert.equal(delayFor(100.25, 100, 0), 250);
 assert.equal(delayFor(99, 100, 0), 0);
+
+// the error bound is half the round trip of the sample the offset came from
+assert.equal(errorFrom([{ c: 0, r: 0.2, s: 10 }, { c: 1, r: 1.02, s: 11.5 }]).toFixed(3), "0.010");
+assert.equal(errorFrom([old, ...recent]).toFixed(3), "0.050");

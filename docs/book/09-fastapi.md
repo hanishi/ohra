@@ -235,7 +235,9 @@ The round trip took `r - c` = 80 ms. If the way there took as long as the way ba
 
 The two halves of a trip are rarely exactly equal, but the error can't be more than half the round trip, so a fast ping gives a good offset. `clock.js` sends five pings when it connects and one every 10 s after that, and uses the fastest of the last six.
 
-That makes it an estimate, not a guarantee. A page's offset is off by at most half its fastest recent round trip, and its timers fire a few milliseconds late: on a LAN, close enough that people watching see one moment. Three things make it worse: a route that is slow one way and fast the other, which skews the offset by up to half the round trip; a busy page, whose timers fire later; and a tab in the background, whose timers the browser holds back, often by a second or more. Nothing reports how far off a page is, so this is for things people watch together, not for anything that needs a bound.
+That makes it an estimate, not a guarantee. A page's offset is off by at most half its fastest recent round trip, and its timers fire a few milliseconds late: on a LAN, close enough that people watching see one moment. Three things make it worse: a route that is slow one way and fast the other, which skews the offset by up to half the round trip; a busy page, whose timers fire later; and a tab in the background, whose timers the browser holds back, often by a second or more. `conn.error()` gives the first of these, half the round trip, as a bound in seconds; the others it can't see. So this is for things people watch together, not for anything that needs a hard bound.
+
+An app can use `conn.error()` to choose its head start, the time between stamping `t` and `t` itself. Have each page report it now and then (it is `Infinity` until the first pong), and have the hub keep the worst: `t = clock() + max(0.2, 3 * worst)`, or hold the start until every page is under a threshold. The head start only has to get the frame to every page before `t`; a longer one doesn't make the pages agree any better.
 
 ### An example: every screen flashes at once
 
@@ -380,11 +382,12 @@ The hub stamps `t` with `time.monotonic`, the clock `synced` answers pings with 
 ```js
 conn.send({ type: "tap" }); // JSON; dropped while disconnected
 conn.now();                 // the server's clock now, in seconds
+conn.error();               // how far off now() can be, in seconds
 conn.at(t, fn);             // run fn at server time t
 conn.cancelAll();           // drop every pending at()
 ```
 
-- **The offset** comes from the fastest ping of the last six, not the fastest ever: a device's clock drifts against the server's, so an old sample goes stale.
+- **The offset** comes from the fastest ping of the last six, not the fastest ever: a device's clock drifts against the server's, so an old sample goes stale. `error()` is half that ping's round trip, and `Infinity` until the first pong of each connection.
 - **`onMessage` gets messages in order**, starting right after the first pong of each connection. The socket reconnects on its own, with backoff, and syncs again before it delivers anything.
 - **`at(t, fn)`** runs `fn` at server time `t`, however far ahead that is, and at once if `t` has passed. A `t` is never read against an unsynced clock, since messages wait for the first pong.
 

@@ -213,7 +213,7 @@ def gate(capacity: int, seen: list[int]) -> Behavior[StashCmd]:
                     return Behaviors.same
 
         @Behaviors.receive_message
-        async def on_active(msg: StashCmd) -> Behavior[StashCmd]:
+        async def active(msg: StashCmd) -> Behavior[StashCmd]:
             match msg:
                 case Add(n):
                     await asyncio.sleep(0)  # an await inside the replay must not reorder anything
@@ -224,7 +224,6 @@ def gate(capacity: int, seen: list[int]) -> Behavior[StashCmd]:
                     pass
             return Behaviors.same
 
-        active = on_active
         return waiting
 
     return Behaviors.with_stash(capacity, with_stash)

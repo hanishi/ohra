@@ -1,6 +1,6 @@
 [project]
 name = "ohra"
-version = "0.5.1"
+version = "0.6.0"
 description = "Apache Pekko Typed style actors on asyncio."
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

@@ -2,7 +2,7 @@
 // scanlines and blips. An original late-1970s arcade feel, drawn on canvas: no font files.
 
 // 3x5 glyphs, rows top to bottom, "1" a lit pixel
-const GLYPHS = {
+const GLYPHS: Record<string, string> = {
   A: "010101111101101", B: "110101110101110", C: "011100100100011", D: "110101101101110",
   E: "111100110100111", F: "111100110100100", G: "011100101101011", H: "101101111101101",
   I: "111010010010111", J: "001001001101010", K: "101101110101101", L: "100100100100111",
@@ -22,7 +22,7 @@ export const GREEN = "#39ff6a";
 export const DIM = "#0d3a1a";
 
 // Size the canvas's backing store to its box, for sharp pixels on any screen.
-export function fit(canvas) {
+export function fit(canvas: HTMLCanvasElement): { w: number; h: number } {
   const dpr = window.devicePixelRatio || 1;
   const w = Math.round(canvas.clientWidth * dpr);
   const h = Math.round(canvas.clientHeight * dpr);
@@ -30,7 +30,7 @@ export function fit(canvas) {
   return { w, h };
 }
 
-export function glow(ctx, color, blur = 12) {
+export function glow(ctx: CanvasRenderingContext2D, color: string, blur = 12): void {
   ctx.fillStyle = color;
   ctx.strokeStyle = color;
   ctx.shadowColor = color;
@@ -38,20 +38,35 @@ export function glow(ctx, color, blur = 12) {
 }
 
 // Width of str at pixel size px, for centering.
-export const textWidth = (str, px) => Math.max(0, String(str).length * 4 - 1) * px;
+export const textWidth = (str: string | number, px: number): number => Math.max(0, String(str).length * 4 - 1) * px;
 
-export function text(ctx, str, x, y, px, color, align = "left") {
+export function text(
+  ctx: CanvasRenderingContext2D,
+  str: string | number,
+  x: number,
+  y: number,
+  px: number,
+  color: string,
+  align: "left" | "center" | "right" = "left",
+): void {
   const s = String(str).toUpperCase();
   let left = align === "center" ? x - textWidth(s, px) / 2 : align === "right" ? x - textWidth(s, px) : x;
   glow(ctx, color, px * 2);
   for (const ch of s) {
-    const g = GLYPHS[ch] ?? GLYPHS["?"];
+    const g = GLYPHS[ch] ?? GLYPHS["?"]!;
     for (let i = 0; i < 15; i++) if (g[i] === "1") ctx.fillRect(left + (i % 3) * px, y + Math.floor(i / 3) * px, px, px);
     left += 4 * px;
   }
 }
 
-export function heart(ctx, x, y, px, color, full = true) {
+export function heart(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  px: number,
+  color: string,
+  full = true,
+): void {
   glow(ctx, full ? color : DIM, full ? px * 2 : 0);
   HEART.forEach((row, r) => [...row].forEach((on, c) => {
     if (on === "1") ctx.fillRect(x + c * px, y + r * px, px, px);
@@ -59,7 +74,7 @@ export function heart(ctx, x, y, px, color, full = true) {
 }
 
 // Scanlines and a soft vignette over the whole page, like an old tube.
-export function crt() {
+export function crt(): void {
   const style = document.createElement("style");
   style.textContent = `
     .crt { position: fixed; inset: 0; pointer-events: none; z-index: 10;
@@ -70,12 +85,12 @@ export function crt() {
 }
 
 // Square-wave blips with Web Audio. Browsers start audio only after a tap: call unlock() in one.
-let audio = null;
-export function unlock() {
+let audio: AudioContext | null = null;
+export function unlock(): void {
   audio ??= new AudioContext();
-  audio.resume();
+  void audio.resume();
 }
-export function blip(freq, seconds = 0.06, volume = 0.15) {
+export function blip(freq: number, seconds = 0.06, volume = 0.15): void {
   if (!audio) return;
   const osc = audio.createOscillator();
   const gain = audio.createGain();

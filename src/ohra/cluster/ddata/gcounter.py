@@ -20,7 +20,6 @@ from .replicated_data import (
     DeltaReplicatedData,
     RemovedNodePruning,
     ReplicatedDelta,
-    ReplicatedDeltaSize,
 )
 
 if TYPE_CHECKING:
@@ -32,7 +31,6 @@ if TYPE_CHECKING:
 class GCounter(
     DeltaReplicatedData["GCounter"],
     ReplicatedDelta,
-    ReplicatedDeltaSize,
     RemovedNodePruning,
     FastMerge,
 ):
@@ -88,13 +86,6 @@ class GCounter(
         if self.delta is None:
             return self
         return self._assign_ancestor(GCounter(self.state))
-
-    @property
-    @override
-    def delta_size(self) -> int:
-        # Not in Pekko's GCounter, which leaves the size to the Replicator: 1 for a delta
-        # that does not say.
-        return 1
 
     @property
     @override

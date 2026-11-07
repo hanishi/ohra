@@ -19,7 +19,6 @@ from .replicated_data import (
     DeltaReplicatedData,
     RemovedNodePruning,
     ReplicatedDelta,
-    ReplicatedDeltaSize,
 )
 
 if TYPE_CHECKING:
@@ -28,9 +27,7 @@ if TYPE_CHECKING:
 
 @remotable
 @dataclass(frozen=True)
-class PNCounter(
-    DeltaReplicatedData["PNCounter"], ReplicatedDelta, ReplicatedDeltaSize, RemovedNodePruning
-):
+class PNCounter(DeltaReplicatedData["PNCounter"], ReplicatedDelta, RemovedNodePruning):
     empty: ClassVar[PNCounter]
 
     increments: GCounter = field(default_factory=lambda: GCounter.empty)
@@ -97,13 +94,6 @@ class PNCounter(
         if self.increments.delta is None and self.decrements.delta is None:
             return self
         return PNCounter(self.increments.reset_delta(), self.decrements.reset_delta())
-
-    @property
-    @override
-    def delta_size(self) -> int:
-        # Not in Pekko's PNCounter, which leaves the size to the Replicator: 1 for a delta
-        # that does not say.
-        return 1
 
     @property
     @override

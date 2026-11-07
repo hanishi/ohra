@@ -1,0 +1,251 @@
+// Relay Rally's wall: the join code, the seats around the table, the passes in the air and
+// the podium. It runs on the server's clock, through ohra/clock.
+import { connect } from "ohra/clock";
+import { blip, crt, fit, glow, heart, text, unlock, DIM, GREEN } from "./arcade";
+import type { Drop, Frame, Pass, Player, State } from "./frames";
+
+const canvas = document.getElementById("wall") as HTMLCanvasElement;
+const ctx = canvas.getContext("2d")!;
+const [controls, start, less, more] = ["controls", "start", "less", "more"].map((id) =>
+  document.getElementById(id),
+) as [HTMLElement, HTMLButtonElement, HTMLButtonElement, HTMLButtonElement];
+crt();
+
+let state: State | null = null;
+let passes: Pass[] = []; // kept a little after they land
+let misses: { id: string; heart: number; at: number }[] = []; // {id, heart, at}: a heart just lost, on the page clock (ms)
+const MISS_MS = 1200;
+const PADDLE_Y = 14.6; // the phone's paddle line, in court units from the top
+let fire: Drop | null = null; // the last drop: who is under fire, and until when
+let serveSpeed = 0; // the speed the rally started at: the speed bar and the pitch are against it
+let best = 0; // the longest rally this game
+let bestBefore = 0; // the record when this rally started: passing it is the moment
+let record = 0; // when RECORD RALLY started to show, on the page clock (ms)
+let qr: boolean[][] | null = null; // the join code's modules, rows of booleans
+let joinUrl = "";
+
+fetch("/join").then((r) => r.json()).then(({ url }: { url: string }) => (joinUrl = url));
+
+// The code, once both the URL and the library are here. The library loads async: offline it
+// never comes, and the URL alone still works.
+function makeQr() {
+  if (qr || !joinUrl || typeof qrcode !== "function") return;
+  const code = qrcode(0, "M");
+  code.addData(joinUrl);
+  code.make();
+  const n = code.getModuleCount();
+  qr = Array.from({ length: n }, (_, r) => Array.from({ length: n }, (_, c) => code.isDark(r, c)));
+}
+
+const conn = connect("/ws/wall", (m: Frame) => {
+  if (m.type === "state") {
+    // a heart fewer than last time is a miss: flash the name, drop the heart
+    const before = new Map((state?.phase === "playing" ? state.players : []).map((p) => [p.id, p.lives]));
+    for (const p of m.phase === "playing" ? m.players : []) {
+      if (before.has(p.id) && p.lives < before.get(p.id)!) {
+        misses.push({ id: p.id, heart: p.lives, at: performance.now() });
+        blip(98, 0.5, 0.2);
+        fire = null; // the rally is over
+      }
+    }
+    state = m;
+    if (m.phase !== "playing") {
+      passes = [];
+      fire = null;
+      best = bestBefore = 0;
+    }
+    const here = m.players.filter((p) => p.connected).length;
+    controls.hidden = m.phase !== "lobby";
+    start.disabled = here < 2;
+    less.disabled = !m.players.some((p) => p.cpu);
+    more.disabled = m.players.length >= 8;
+  } else if (m.type === "pass") {
+    passes.push(m);
+  } else if (m.type === "drop") {
+    if (m.rally === 0) {
+      serveSpeed = m.speed;
+      bestBefore = best;
+    } else {
+      serveSpeed ||= m.speed; // a wall that came in mid-rally: count from here
+      // the pass lands: a blip that climbs as the rally speeds up
+      conn.at(m.t, () => blip(520 * Math.min(2, m.speed / serveSpeed), 0.05, 0.1));
+    }
+    if (m.rally === bestBefore + 1 && bestBefore >= 3) record = performance.now();
+    best = Math.max(best, m.rally);
+    fire = m;
+  }
+});
+
+start.addEventListener("click", () => {
+  unlock();
+  conn.send({ type: "start" });
+});
+less.addEventListener("click", () => conn.send({ type: "remove_cpu" }));
+more.addEventListener("click", () => conn.send({ type: "add_cpu" }));
+
+// Where each player sits on the wall: around an ellipse, in join order.
+function seats(w: number, h: number) {
+  const players = state!.players.filter((p) => p.in_game);
+  return new Map(players.map((p, i) => {
+    const a = -Math.PI / 2 + (i / players.length) * 2 * Math.PI;
+    return [p.id, { p, x: w / 2 + Math.cos(a) * w * 0.36, y: h * 0.52 + Math.sin(a) * h * 0.3 }] as const;
+  }));
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  const { w, h } = fit(canvas);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, h);
+  const px = Math.max(2, Math.round(Math.min(w, h) / 160));
+  if (!state) return text(ctx, "CONNECTING", w / 2, h / 2, px * 2, GREEN, "center");
+  if (state.phase === "lobby") return lobby(w, h, px);
+  if (state.phase === "over") return over(w, h, px);
+  playing(w, h, px);
+}
+
+function lobby(w: number, h: number, px: number) {
+  makeQr();
+  text(ctx, "RELAY RALLY", w / 2, h * 0.08, px * 3, GREEN, "center");
+  const size = Math.min(w * 0.35, h * 0.5);
+  if (qr) {
+    const m = size / (qr.length + 4); // with a quiet zone
+    const x0 = w * 0.08, y0 = h * 0.24;
+    glow(ctx, GREEN, 0);
+    ctx.fillRect(x0, y0, size, size); // a lit background, dark modules: phones read it
+    ctx.fillStyle = "#000";
+    qr.forEach((row, r) => row.forEach((dark, c) => {
+      if (dark) ctx.fillRect(x0 + (c + 2) * m, y0 + (r + 2) * m, Math.ceil(m), Math.ceil(m));
+    }));
+  }
+  text(ctx, "SCAN TO JOIN", w * 0.08 + size / 2, h * 0.24 + size + 3 * px, px, GREEN, "center");
+  ctx.font = `${3 * px}px ui-monospace, monospace`; // a URL has characters the pixel font lacks
+  glow(ctx, GREEN, 6);
+  ctx.textAlign = "center";
+  ctx.fillText(joinUrl, w * 0.08 + size / 2, h * 0.24 + size + 14 * px);
+  const x = w * 0.62;
+  text(ctx, `PLAYERS ${state!.players.filter((p) => p.connected).length}`, x, h * 0.24, px * 2, GREEN);
+  state!.players.forEach((p, i) => {
+    text(ctx, p.name, x, h * 0.24 + (i + 1.6) * 9 * px, px * 1.5, p.connected ? p.color : DIM);
+  });
+}
+
+function playing(w: number, h: number, px: number) {
+  const now = conn.now();
+  const at = seats(w, h);
+  const left = Math.max(0, Math.ceil(state!.ends_at! - now)); // set while playing
+  const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  text(ctx, clock, w / 2, h * 0.47, px * 4, left <= 10 ? "#ff5c8a" : GREEN, "center");
+
+  // the rally: how many passes, and how fast against the serve
+  if (fire && fire.rally > 0) {
+    const hot = Math.min(1, fire.speed / serveSpeed - 1); // full at twice the serve's speed
+    const color = hot > 0.6 ? "#ff5c8a" : hot > 0.3 ? "#ffb000" : GREEN;
+    text(ctx, `RALLY ${fire.rally}`, w / 2, h * 0.47 + 26 * px, px * 2, color, "center");
+    const bw = 40 * px, by = h * 0.47 + 40 * px;
+    ctx.globalAlpha = 0.3;
+    glow(ctx, color, 0);
+    ctx.fillRect(w / 2 - bw / 2, by, bw, 2 * px);
+    ctx.globalAlpha = 1;
+    glow(ctx, color, 10);
+    ctx.fillRect(w / 2 - bw / 2, by, bw * hot, 2 * px);
+  }
+  const since = performance.now() - record;
+  if (since < 1800 && Math.floor(since / 150) % 2 === 0) {
+    text(ctx, "RECORD RALLY", w / 2, h * 0.47 - 26 * px, px * 2, "#ffffff", "center");
+  }
+
+  // a phosphor streak along each pass, its head where the puck is in the air
+  passes = passes.filter((s) => now < s.t1 + 0.6);
+  for (const s of passes) {
+    const a = at.get(s.from), b = at.get(s.to);
+    if (!a || !b) continue;
+    const f = Math.max(0, Math.min(1, (now - s.t0) / (s.t1 - s.t0)));
+    const tail = Math.max(0, f - 0.35);
+    const lerp = (k: number): [number, number] => [a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k];
+    const fade = now > s.t1 ? 1 - (now - s.t1) / 0.6 : 1;
+    ctx.globalAlpha = 0.8 * fade;
+    glow(ctx, a.p.color, 18);
+    ctx.lineWidth = px * 1.5;
+    ctx.beginPath();
+    ctx.moveTo(...lerp(tail));
+    ctx.lineTo(...lerp(f));
+    ctx.stroke();
+    glow(ctx, "#ffffff", 22);
+    const [hx, hy] = lerp(f);
+    ctx.fillRect(hx - 2 * px, hy - 2 * px, 4 * px, 4 * px);
+    ctx.globalAlpha = 1;
+  }
+
+  // under fire: a ring closes on the seat as the puck nears the paddle line
+  const seat = fire && at.get(fire.to);
+  if (fire && seat) {
+    const reach = fire.t + PADDLE_Y / fire.vy;
+    const k = Math.max(0, Math.min(1, (reach - now) / (reach - fire.t))); // 1 as it drops in
+    if (now < reach + 0.15) {
+      ctx.globalAlpha = now < fire.t ? 0.35 : 1; // dim while it is still in the air
+      glow(ctx, seat.p.color, 20);
+      ctx.lineWidth = px;
+      ctx.beginPath();
+      ctx.arc(seat.x, seat.y - 2 * px, 12 * px + 18 * px * k, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  const t = performance.now();
+  misses = misses.filter((m) => t - m.at < MISS_MS);
+  for (const { p, x, y } of at.values()) {
+    const color = p.connected ? p.color : DIM;
+    const missed = misses.find((m) => m.id === p.id);
+    const flashing = missed && Math.floor((t - missed.at) / 90) % 2 === 0;
+    ctx.globalAlpha = p.lives > 0 ? 1 : 0.4;
+    text(ctx, p.name, x, y - 7 * px, px * 1.5, flashing ? "#ffffff" : color, "center");
+    for (let i = 0; i < 5; i++) heart(ctx, x - 17 * px + i * 7 * px, y + 2 * px, px, color, i < p.lives);
+    ctx.globalAlpha = 1;
+  }
+  for (const m of misses) { // the lost heart falls off the wall and fades
+    const seat = at.get(m.id);
+    if (!seat) continue;
+    const k = (t - m.at) / MISS_MS;
+    ctx.globalAlpha = 1 - k;
+    heart(ctx, seat.x - 17 * px + m.heart * 7 * px, seat.y + 2 * px + k * k * h * 0.5, px * 1.5, seat.p.color);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function over(w: number, h: number, px: number) {
+  const winners = state!.players.filter((p) => state!.winners.includes(p.id));
+  text(ctx, winners.length > 1 ? "SHARED WIN" : "WINNER", w / 2, h * 0.08, px * 3, GREEN, "center");
+
+  // the podium, lives first and then returns: first in the middle, second left, third right
+  const ranked = state!.players.filter((p) => p.in_game)
+    .sort((a, b) => b.lives - a.lives || b.returns - a.returns).slice(0, 3);
+  const floor = h * 0.78, half = w * 0.11;
+  ranked.forEach((p, i) => {
+    const cx = w * [0.5, 0.25, 0.75][i], top = h * [0.42, 0.52, 0.6][i];
+    ctx.globalAlpha = 0.18;
+    glow(ctx, p.color, 0);
+    ctx.fillRect(cx - half, top, 2 * half, floor - top); // the step
+    ctx.globalAlpha = 1;
+    glow(ctx, p.color, 14);
+    ctx.fillRect(cx - half, top, 2 * half, px); // its lit edge
+    text(ctx, String(i + 1), cx, top + 5 * px, px * 3, p.color, "center");
+    text(ctx, `${p.returns} RETURNS`, cx, top + 24 * px, px, p.color, "center");
+    text(ctx, p.name, cx, top - 20 * px, px * 2, p.color, "center");
+    for (let k = 0; k < 5; k++) heart(ctx, cx - 17 * px + k * 7 * px, top - 8 * px, px, p.color, k < p.lives);
+  });
+
+  // the game's moments: its longest rally, and the fastest puck anyone sent back
+  const fastest = state!.players.filter((p) => p.in_game && p.returns > 0)
+    .reduce<Player | null>((a, b) => (b.best > (a?.best ?? 0) ? b : a), null);
+  const lines = [`LONGEST RALLY ${state!.longest}`];
+  if (fastest) {
+    const times = serveSpeed ? ` ${(fastest.best / serveSpeed).toFixed(1)}X` : "";
+    lines.push(`FASTEST SAVE ${fastest.name}${times}`);
+  }
+  lines.forEach((s, i) => text(ctx, s, w / 2, h * 0.84 + i * 9 * px, px * 1.5, GREEN, "center"));
+}
+
+requestAnimationFrame(frame);

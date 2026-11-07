@@ -6,3 +6,5 @@ __pycache__/
 examples/*.db
 docs/superpowers/
 .superpowers/
+examples/relay_rally/node_modules/
+examples/relay_rally/dist/

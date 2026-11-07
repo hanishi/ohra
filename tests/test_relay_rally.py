@@ -464,18 +464,62 @@ def test_a_bad_frame_from_a_phone_closes_it(frame: Frame):
             assert closed.value.code == 1003
 
 
+built = pytest.mark.skipif(not (rr.PAGES / "phone.html").exists(), reason="run npm run build")
+
+
+@built
 def test_the_pages_and_clock_js_are_served():
+    import re
+
     from fastapi.testclient import TestClient
 
     with TestClient(rr.make_app(), base_url="http://localhost") as client:
         assert "<!doctype html>" in client.get("/wall").text.lower()
-        assert "<!doctype html>" in client.get("/play").text.lower()
+        play = client.get("/play").text
+        assert "<!doctype html>" in play.lower()
+        script = client.get(re.findall(r'src="(/assets/[^"]+\.js)"', play)[0])
+        assert script.status_code == 200
+        assert script.headers["content-type"].startswith("text/javascript")
         assert "export function connect" in client.get("/ohra/clock.js").text
-        arcade = client.get("/arcade.js")
-        assert "export function text" in arcade.text
-        assert arcade.headers["content-type"].startswith("text/javascript")
         url = client.get("/join").json()["url"]
         assert url.startswith("http://") and url.endswith(":80/play")
+
+
+@built
+def test_the_pages_are_revalidated_so_a_redeploy_never_leaves_stale_asset_names():
+    from fastapi.testclient import TestClient
+
+    with TestClient(rr.make_app(), base_url="http://localhost") as client:
+        for path in ("/wall", "/play"):
+            assert client.get(path).headers["cache-control"] == "no-cache"
+
+
+@built
+def test_the_build_imports_clock_js_from_the_server():
+    scripts = [f.read_text() for f in (rr.PAGES / "assets").glob("*.js")]
+    assert any('"/ohra/clock.js"' in s for s in scripts)
+    assert not any("SAMPLE_WINDOW" in s for s in scripts)  # nothing of clock.js is bundled
+
+
+@built
+def test_the_built_wall_loads_the_qr_library_async():
+    page = (rr.PAGES / "wall.html").read_text()
+    (tag,) = [line for line in page.splitlines() if "qrcode.min.js" in line]
+    assert " async" in tag
+
+
+def test_the_pages_say_to_build_when_dist_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(rr, "PAGES", tmp_path)
+    with TestClient(rr.make_app(), base_url="http://localhost") as client:
+        play = client.get("/play")
+        assert play.status_code == 503
+        assert play.text == rr.BUILD_FIRST
+        assert client.get("/assets/phone.js").status_code == 503  # not a 500
+        assert client.get("/join").status_code == 200
 
 
 def test_the_join_url_is_the_address_the_wall_was_opened_at():
@@ -544,21 +588,21 @@ def test_the_wall_does_not_wait_for_the_qr_library():
 
 
 def test_the_phone_knows_the_servers_base_speed():
-    page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
+    page = (Path(rr.__file__).parent / "relay_rally" / "src" / "phone.ts").read_text()
     (line,) = [x for x in page.splitlines() if "const BASE_SPEED = " in x]
     assert float(line.split("=")[1].split(";")[0]) == rr.BASE_SPEED  # the hit's pitch follows it
 
 
 def test_the_wall_and_the_phone_agree_on_the_paddle_line():
-    pages = Path(rr.__file__).parent / "relay_rally"
-    (wall,) = [x for x in (pages / "wall.html").read_text().splitlines() if "PADDLE_Y = " in x]
-    (phone,) = [x for x in (pages / "phone.html").read_text().splitlines() if "PADDLE_Y = " in x]
+    pages = Path(rr.__file__).parent / "relay_rally" / "src"
+    (wall,) = [x for x in (pages / "wall.ts").read_text().splitlines() if "PADDLE_Y = " in x]
+    (phone,) = [x for x in (pages / "phone.ts").read_text().splitlines() if "PADDLE_Y = " in x]
     assert "H = 16, PADDLE_Y = H - 1.4," in phone
     assert float(wall.split("=")[1].split(";")[0]) == pytest.approx(16 - 1.4)  # the closing ring
 
 
 def test_the_phone_uses_no_api_that_needs_https():
-    page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
+    page = (Path(rr.__file__).parent / "relay_rally" / "src" / "phone.ts").read_text()
     assert "randomUUID" not in page  # the join URL is plain http on the LAN
 
 

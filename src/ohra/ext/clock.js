@@ -13,7 +13,7 @@
 // last minute. Messages that arrive before a connection's first pong wait for it, so a t in them
 // is never read against a clock that is not synced yet.
 //
-// The types are JSDoc, checked by tsc in CI: the file is served as it is, with no build.
+// The types are JSDoc, checked by tsc in CI, so the source needs no build.
 
 /** A ping: sent (c) and its pong received (r) on the page clock, answered (s) on the server's.
  * @typedef {{ c: number, r: number, s: number }} Sample */

@@ -32,6 +32,7 @@ from .cluster.core import (
     Unsubscribe,
 )
 from .cluster.ddata import (
+    Clock,
     DeltaReplicatedData,
     Flag,
     FlagKey,
@@ -42,6 +43,8 @@ from .cluster.ddata import (
     Key,
     LWWRegister,
     LWWRegisterKey,
+    ManyVersionVector,
+    OneVersionVector,
     PNCounter,
     PNCounterKey,
     RemovedNodePruning,
@@ -49,7 +52,10 @@ from .cluster.ddata import (
     ReplicatedDelta,
     RequiresCausalDeliveryOfDeltas,
     SelfUniqueAddress,
+    UnspecificKey,
     VersionVector,
+    default_clock,
+    reverse_clock,
 )
 from .cluster.gossip import Member
 from .cluster.sharding import (
@@ -309,7 +315,10 @@ __all__ = [
     "RequiresCausalDeliveryOfDeltas",
     "RemovedNodePruning",
     "Key",
+    "UnspecificKey",
     "VersionVector",
+    "OneVersionVector",
+    "ManyVersionVector",
     "GCounter",
     "GCounterKey",
     "PNCounter",
@@ -318,6 +327,9 @@ __all__ = [
     "GSetKey",
     "Flag",
     "FlagKey",
+    "Clock",
+    "default_clock",
+    "reverse_clock",
     "LWWRegister",
     "LWWRegisterKey",
 ]

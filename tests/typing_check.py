@@ -13,6 +13,8 @@ from ohra import (
     ActorSystem,
     Behavior,
     Behaviors,
+    GCounter,
+    GSet,
     MailboxSelector,
     Routers,
     SpawnProtocol,
@@ -203,3 +205,7 @@ def streams_are_typed(system: ActorSystem[Any]) -> None:
     )
     del g, empty, ints, flow, wrong, zipped, switched, from_empty, merged, concat_empty
     del concatenated, either, flow_merged, not_ints
+
+
+GCounter().merge(GSet[int]())  # type: ignore[arg-type]
+GSet[str]().add(1)  # type: ignore[arg-type]

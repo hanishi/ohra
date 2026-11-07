@@ -12,7 +12,13 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2  # setup-uv publishes no major tags since v8
       - name: Check that the tag matches the version in pyproject.toml
         run: test "${GITHUB_REF_NAME#v}" = "$(uv version --short)"
-      - run: uv build
+      - run: uv build --sdist   # first, from the untouched tree: the sdist ships the readable clock.js
+      - name: Minify clock.js for the wheel, the copy browsers are served
+        run: npx --yes esbuild@0.28.2 src/ohra/ext/clock.js --minify --format=esm --outfile=src/ohra/ext/clock.js --allow-overwrite
+      - run: node tests/clock_js_check.mjs   # a broken minification fails the release here
+      - run: uv build --wheel   # from the tree, not the sdist, so it holds the minified file
+      - name: Check that the wheel's clock.js is minified
+        run: test "$(unzip -p dist/*.whl ohra/ext/clock.js | head -c 2)" != "//"
       - uses: actions/upload-artifact@v7
         with:
           name: dist

@@ -39,3 +39,7 @@ jobs:
       - run: uv run pytest examples/testing   # the book's chapter 12 tests
       - run: uv run pytest examples/streams   # the book's chapter 13 tests
       - run: npx --yes -p typescript@7.0.2 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.js   # clock.js's JSDoc types
+      # the release's minify step, rehearsed
+      - run: npx --yes esbuild@0.28.2 src/ohra/ext/clock.js --minify --format=esm --outfile=src/ohra/ext/clock.js --allow-overwrite
+      - run: node tests/clock_js_check.mjs   # the release's minified clock.js still works
+      - run: git checkout -- src/ohra/ext/clock.js   # later steps check the readable source

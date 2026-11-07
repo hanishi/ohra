@@ -1,6 +1,9 @@
 // offsetFrom in src/ohra/ext/clock.js, run by tests/test_clock_js.py.
 import assert from "node:assert/strict";
-import { delayFor, errorFrom, offsetFrom, SAMPLE_WINDOW } from "../src/ohra/ext/clock.js";
+import { connect, delayFor, errorFrom, offsetFrom, SAMPLE_WINDOW } from "../src/ohra/ext/clock.js";
+
+// every page imports connect: the release runs this on the minified file, so a lost export fails it
+assert.equal(typeof connect, "function");
 
 // the fastest round trip wins: its server time minus the page time halfway through it
 assert.equal(offsetFrom([{ c: 0, r: 0.2, s: 10 }, { c: 1, r: 1.02, s: 11.5 }]).toFixed(2), "10.49");

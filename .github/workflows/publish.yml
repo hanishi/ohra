@@ -12,13 +12,18 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2  # setup-uv publishes no major tags since v8
       - name: Check that the tag matches the version in pyproject.toml
         run: test "${GITHUB_REF_NAME#v}" = "$(uv version --short)"
-      - run: uv build --sdist   # first, from the untouched tree: the sdist ships the readable clock.js
-      - name: Minify clock.js for the wheel, the copy browsers are served
-        run: npx --yes esbuild@0.28.2 src/ohra/ext/clock.js --minify --format=esm --outfile=src/ohra/ext/clock.js --allow-overwrite
+      - name: Build clock.js from clock.ts, minified, and clock.d.ts for TypeScript pages
+        run: |
+          npx --yes esbuild@0.28.2 src/ohra/ext/clock.ts --minify --format=esm --outfile=src/ohra/ext/clock.js
+          npx --yes -p typescript@7.0.2 tsc --declaration --emitDeclarationOnly --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.ts
       - run: node tests/clock_js_check.mjs   # a broken minification fails the release here
-      - run: uv build --wheel   # from the tree, not the sdist, so it holds the minified file
-      - name: Check that the wheel's clock.js is minified
-        run: test "$(unzip -p dist/*.whl ohra/ext/clock.js | head -c 2)" != "//"
+      - run: uv build   # the sdist ships the built files too, so installing it needs no node
+      - name: Check that the sdist and the wheel ship clock.js minified, and clock.d.ts
+        run: |
+          test "$(unzip -p dist/*.whl ohra/ext/clock.js | wc -l)" -eq 1
+          test "$(tar -xOzf dist/*.tar.gz --wildcards '*/src/ohra/ext/clock.js' | wc -l)" -eq 1
+          unzip -l dist/*.whl ohra/ext/clock.d.ts
+          tar -tzf dist/*.tar.gz --wildcards '*/src/ohra/ext/clock.d.ts'
       - uses: actions/upload-artifact@v7
         with:
           name: dist

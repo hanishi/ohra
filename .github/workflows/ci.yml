@@ -33,13 +33,16 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24   # the Dockerfile's node:24-slim
+      - run: npx --yes esbuild@0.28.2 src/ohra/ext/clock.ts --format=esm --outfile=src/ohra/ext/clock.js   # the tests and the apps serve clock.js
       - run: npm ci && npm run build   # the game's type check and build; the page tests use dist/
         working-directory: examples/relay_rally
       - run: uv run pytest
       - run: uv run pytest examples/testing   # the book's chapter 12 tests
       - run: uv run pytest examples/streams   # the book's chapter 13 tests
-      - run: npx --yes -p typescript@7.0.2 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.js   # clock.js's JSDoc types
-      # the release's minify step, rehearsed
-      - run: npx --yes esbuild@0.28.2 src/ohra/ext/clock.js --minify --format=esm --outfile=src/ohra/ext/clock.js --allow-overwrite
+      - run: npx --yes -p typescript@7.0.2 tsc --noEmit --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.ts
+      # the release's build of clock.js, rehearsed
+      - name: Build clock.js from clock.ts, minified, and clock.d.ts for TypeScript pages
+        run: |
+          npx --yes esbuild@0.28.2 src/ohra/ext/clock.ts --minify --format=esm --outfile=src/ohra/ext/clock.js
+          npx --yes -p typescript@7.0.2 tsc --declaration --emitDeclarationOnly --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.ts
       - run: node tests/clock_js_check.mjs   # the release's minified clock.js still works
-      - run: git checkout -- src/ohra/ext/clock.js   # later steps check the readable source

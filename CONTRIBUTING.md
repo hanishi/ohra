@@ -18,13 +18,15 @@ Every PR has to pass these checks, and CI runs them on Python 3.12 and 3.13:
 ```
 uv run ruff format   # PEP 8 layout, lines up to 99 characters
 uv run ruff check    # PEP 8 style and naming
+npx --yes esbuild@0.28.2 src/ohra/ext/clock.ts --format=esm --outfile=src/ohra/ext/clock.js
+                     # clock.js, built from clock.ts: the tests and the apps serve it
 (cd examples/relay_rally && npm ci && npm run build)   # Relay Rally's type check and build; its page tests use dist/
 uv run pytest        # every test fails if any asyncio task outlives it (tests/conftest.py)
 uv run pytest examples/testing   # the book's chapter 12 tests, run as a reader runs them
 uv run pytest examples/streams   # the book's chapter 13 tests
 uv run pyright       # strict mode, 0 errors
-npx --yes -p typescript@7.0.2 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.js
-                     # clock.js's JSDoc types
+npx --yes -p typescript@7.0.2 tsc --noEmit --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.ts
+                     # clock.ts's types
 ```
 
 - `ruff format` leaves comments, docstrings and strings alone, so wrap those yourself. A pragma comment (`# pyright: ignore[...]`, `# type: ignore`) has to stay on the line it is about.

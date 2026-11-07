@@ -599,7 +599,8 @@ def make_app(
         path = PAGES / name
         if not path.exists():
             return PlainTextResponse(BUILD_FIRST, status_code=503)
-        return FileResponse(path)
+        # revalidated every time: a cached page would ask for the assets of an older build
+        return FileResponse(path, headers={"cache-control": "no-cache"})
 
     @app.get("/wall", response_model=None)
     async def wall_page() -> FileResponse | PlainTextResponse:

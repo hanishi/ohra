@@ -486,6 +486,15 @@ def test_the_pages_and_clock_js_are_served():
 
 
 @built
+def test_the_pages_are_revalidated_so_a_redeploy_never_leaves_stale_asset_names():
+    from fastapi.testclient import TestClient
+
+    with TestClient(rr.make_app(), base_url="http://localhost") as client:
+        for path in ("/wall", "/play"):
+            assert client.get(path).headers["cache-control"] == "no-cache"
+
+
+@built
 def test_the_build_imports_clock_js_from_the_server():
     scripts = [f.read_text() for f in (rr.PAGES / "assets").glob("*.js")]
     assert any('"/ohra/clock.js"' in s for s in scripts)

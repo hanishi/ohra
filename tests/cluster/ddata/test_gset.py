@@ -141,3 +141,17 @@ def test_have_unapply_extractor():
     assert GSetKey("key") == GSetKey("key")
     r = rt(s1)  # the wire carries the elements, not the delta
     assert r == s1 and r.delta is None and r.size == 2 and r.contains("a") and not r.is_empty
+
+
+def test_merge_with_its_own_descendant_equals_a_full_merge():
+    def pair() -> tuple[GSet[str], GSet[str]]:
+        a = rt(GSet[str]().add(user1))  # decoded: no ancestor
+        return a, a.add(user2)
+
+    a, b = pair()
+    full = rt(a).merge(rt(b))  # decoded copies carry no ancestor
+    assert b._ancestor is a
+    assert a.merge(b) is b and b == full and full.elements == {user1, user2}
+    a, b = pair()
+    assert b._ancestor is a
+    assert b.merge(a) is b and b == full

@@ -208,7 +208,14 @@ def test_have_unapply_extractor():
 
 
 def test_merge_with_its_own_descendant_equals_a_full_merge():
-    a = GCounter()._increment(node1, 2)
-    b = a._increment(node2, 5)  # b's ancestor is a
+    def pair() -> tuple[GCounter, GCounter]:
+        a = rt(GCounter()._increment(node1, 2))  # decoded: no ancestor
+        return a, a._increment(node2, 5)
+
+    a, b = pair()
     full = rt(a).merge(rt(b))  # decoded copies carry no ancestor
-    assert a.merge(b) == full and b.merge(a) == full and full.value == 7
+    assert b._ancestor is a
+    assert a.merge(b) is b and b == full and full.value == 7
+    a, b = pair()
+    assert b._ancestor is a
+    assert b.merge(a) is b and b == full

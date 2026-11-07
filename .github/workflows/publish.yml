@@ -20,8 +20,8 @@ jobs:
       - run: uv build   # the sdist ships the built files too, so installing it needs no node
       - name: Check that the sdist and the wheel ship clock.js minified, and clock.d.ts
         run: |
-          test "$(unzip -p dist/*.whl ohra/ext/clock.js | wc -l)" -le 1
-          test "$(tar -xOzf dist/*.tar.gz --wildcards '*/src/ohra/ext/clock.js' | wc -l)" -le 1
+          test "$(unzip -p dist/*.whl ohra/ext/clock.js | wc -l)" -eq 1
+          test "$(tar -xOzf dist/*.tar.gz --wildcards '*/src/ohra/ext/clock.js' | wc -l)" -eq 1
           unzip -l dist/*.whl ohra/ext/clock.d.ts
           tar -tzf dist/*.tar.gz --wildcards '*/src/ohra/ext/clock.d.ts'
       - uses: actions/upload-artifact@v7

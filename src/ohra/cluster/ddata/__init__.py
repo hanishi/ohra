@@ -10,8 +10,11 @@ from dataclasses import dataclass
 from ...remote import UniqueAddress
 from ...remote.serialization import remotable
 from .fast_merge import FastMerge
+from .flag import Flag, FlagKey
 from .gcounter import GCounter, GCounterKey
+from .gset import GSet, GSetKey
 from .key import Key, UnspecificKey
+from .lww_register import LWWRegister, LWWRegisterKey
 from .pncounter import PNCounter, PNCounterKey
 from .replicated_data import (
     DeltaReplicatedData,
@@ -35,10 +38,16 @@ class SelfUniqueAddress:
 
 __all__ = [
     "FastMerge",
+    "Flag",
+    "FlagKey",
     "GCounter",
     "GCounterKey",
+    "GSet",
+    "GSetKey",
     "DeltaReplicatedData",
     "Key",
+    "LWWRegister",
+    "LWWRegisterKey",
     "ManyVersionVector",
     "OneVersionVector",
     "PNCounter",

@@ -53,7 +53,6 @@ class Serialization:
             )
         _registry[manifest] = klass
         _manifests[klass] = manifest
-        _hints[klass] = _hints_of(klass)
 
     @staticmethod
     def encode(value: object, ref_path: Callable[[ActorRef[Any]], str]) -> Json:
@@ -126,6 +125,10 @@ class Serialization:
         if not isinstance(manifest, str) or manifest not in _registry:
             raise SerializationError(f"unknown manifest {manifest!r}")
         klass = _registry[manifest]
+        # resolved on first decode: a self-referential annotation (``delta: GSet[A]``) names the
+        # class, which does not exist yet when the decorator runs
+        if klass not in _hints:
+            _hints[klass] = _hints_of(klass)
         hints = _hints[klass]
         kwargs: dict[str, object] = {}
         for k, v in data.items():
@@ -137,7 +140,9 @@ class Serialization:
 
 def _hints_of(klass: type[Any]) -> dict[str, Any]:
     try:
-        return typing.get_type_hints(klass)
+        # a generic class's own type parameters (``class X[A]``) are not in its module's globals
+        params = {p.__name__: p for c in klass.__mro__ for p in getattr(c, "__type_params__", ())}
+        return typing.get_type_hints(klass, localns=params)
     # a locally defined class whose annotations cannot be evaluated: no tuple rebuilding
     except Exception:
         return {}

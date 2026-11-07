@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from ...remote import UniqueAddress
 
@@ -30,7 +30,8 @@ class DeltaReplicatedData[D: ReplicatedDelta](ReplicatedData):
     Every subclass declares ``delta`` as a ``compare=False`` dataclass field, so it is neither
     sent nor compared."""
 
-    delta: D | None
+    if TYPE_CHECKING:  # not an annotation at runtime: get_type_hints cannot resolve ``D``
+        delta: D | None
 
     @abstractmethod
     def merge_delta(self, that_delta: D) -> Self: ...

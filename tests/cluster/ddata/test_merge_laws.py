@@ -12,7 +12,7 @@ import pytest
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
-from ohra.cluster.ddata.lww_register import LWWRegister, default_clock
+from ohra.cluster.ddata.lww_register import LWWRegister
 from ohra.cluster.ddata.pncounter import PNCounter
 from ohra.cluster.ddata.replicated_data import ReplicatedData
 from ohra.cluster.ddata.version_vector import VersionVector
@@ -29,6 +29,11 @@ class Case(NamedTuple):
     op: Callable[[random.Random, UniqueAddress, Any], Any]
 
 
+def clock(current: int, _value: object) -> int:
+    # Deterministic, and it ties: two nodes writing from one state get the same timestamp.
+    return current + 1
+
+
 def _pn(rng: random.Random, node: UniqueAddress, s: PNCounter) -> PNCounter:
     n = rng.randint(1, 5)
     return s._increment(node, n) if rng.random() < 0.5 else s._decrement(node, n)
@@ -41,8 +46,8 @@ CASES: list[Case] = [
     Case("Flag", Flag(), lambda rng, node, s: s.switch_on() if rng.random() < 0.3 else s),
     Case(
         "LWWRegister",
-        LWWRegister._create(node1, 0, default_clock),
-        lambda rng, node, s: s._with_value(node, rng.randint(0, 9), default_clock),
+        LWWRegister._create(node1, 0, clock),
+        lambda rng, node, s: s._with_value(node, rng.randint(0, 9), clock),
     ),
     Case("VersionVector", VersionVector.empty, lambda rng, node, s: s._increment(node)),
 ]

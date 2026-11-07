@@ -124,11 +124,15 @@ def test_serialize_pncounter():
     )
     check_same_content(
         PNCounter()._increment(address1, 2)._increment(address2, 5),
-        PNCounter()._increment(address2, 5)._increment(address1, 2),
+        PNCounter()._increment(address2, 5)._increment(address1, 1)._increment(address1, 1),
     )
     check_same_content(
-        PNCounter()._increment(address1, 2)._decrement(address3, 5),
-        PNCounter()._decrement(address3, 5)._increment(address1, 2),
+        PNCounter()._increment(address1, 2)._increment(address3, 5),
+        PNCounter()._increment(address3, 5)._increment(address1, 2),
+    )
+    check_same_content(
+        PNCounter()._increment(address1, 2)._decrement(address1, 1)._increment(address3, 5),
+        PNCounter()._increment(address3, 5)._increment(address1, 2)._decrement(address1, 1),
     )
     check_serialization(PNCounterKey("id"))
 

@@ -14,7 +14,7 @@ import pytest
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
-from ohra.cluster.ddata.lww_register import LWWRegister, default_clock
+from ohra.cluster.ddata.lww_register import LWWRegister
 from ohra.cluster.ddata.pncounter import PNCounter
 from ohra.cluster.ddata.replicated_data import DeltaReplicatedData, ReplicatedData
 from ohra.remote import UniqueAddress
@@ -71,28 +71,39 @@ class ConvergenceCase(NamedTuple):
     empty: ReplicatedData
     op: Callable[[random.Random, UniqueAddress, Any], Any]
     causal: bool
-    check: Callable[[Any, list[tuple[Any, Any]]], None]
+    check: Callable[[Any, list[Any]], None]
 
 
-def _check_counter(value: Any, log: list[tuple[Any, Any]]) -> None:
-    assert value.value == sum(after.value - before.value for before, after in log)
+# A log entry is (the op applied to case.empty, the op's result on the replica). The first holds
+# only what the op itself wrote, so the checks never read merged-in data. LWWRegister reads the
+# second: a write is the whole register, its timestamp comes from the replica's clock.
 
 
-def _check_gset(value: Any, log: list[tuple[Any, Any]]) -> None:
-    assert value.elements == frozenset().union(*(a.elements for _, a in log))
+def _check_counter(value: Any, log: list[Any]) -> None:
+    assert value.value == sum(alone.value for alone, _ in log)
 
 
-def _check_flag(value: Any, log: list[tuple[Any, Any]]) -> None:
-    assert value.enabled == any(a.enabled for _, a in log)
+def _check_gset(value: Any, log: list[Any]) -> None:
+    assert value.elements == frozenset().union(*(alone.elements for alone, _ in log))
 
 
-def _check_lww(value: Any, log: list[tuple[Any, Any]]) -> None:
+def _check_flag(value: Any, log: list[Any]) -> None:
+    assert value.enabled == any(alone.enabled for alone, _ in log)
+
+
+def _check_lww(value: Any, log: list[Any]) -> None:
     # Pekko's rule: the larger timestamp wins, the lower node on a tie.
     best = min(((-a.timestamp, a.updated_by, a.value) for _, a in log), key=lambda t: t[:2])
     assert (value.timestamp, value.updated_by, value.value) == (-best[0], best[1], best[2])
 
 
 node1 = UniqueAddress("localhost", 7354, 1, "Sys")
+
+
+def clock(current: int, _value: object) -> int:
+    # Deterministic, and it ties: two nodes writing from one state get the same timestamp.
+    return current + 1
+
 
 CONVERGENCE: list[ConvergenceCase] = [
     ConvergenceCase(
@@ -114,32 +125,37 @@ CONVERGENCE: list[ConvergenceCase] = [
         _check_counter,
     ),
     ConvergenceCase(
-        "GSet", GSet(), lambda rng, node, s: s.add(rng.randint(0, 9)), False, _check_gset
+        "GSet", GSet(), lambda rng, node, s: s.add(rng.randint(0, 999)), False, _check_gset
     ),
     ConvergenceCase(
         "Flag",
         Flag(),
-        lambda rng, node, s: s.switch_on() if rng.random() < 0.5 else s,
+        lambda rng, node, s: s.switch_on() if rng.random() < 0.003 else s,
         False,
         _check_flag,
     ),
     ConvergenceCase(
         "LWWRegister",
-        LWWRegister._create(node1, 0, default_clock),
-        lambda rng, node, s: s._with_value(node, rng.randint(0, 9), default_clock),
+        LWWRegister._create(node1, 0, clock),
+        lambda rng, node, s: s._with_value(node, rng.randint(0, 9), clock),
         False,
         _check_lww,
     ),
 ]
 
 
-def run(case: ConvergenceCase, seed: int) -> tuple[list[Any], list[tuple[Any, Any]]]:
+def run(
+    case: ConvergenceCase, seed: int, stats: dict[str, int] | None = None
+) -> tuple[list[Any], list[Any]]:
     rng = random.Random(seed)
     n = rng.randint(3, 5)
     nodes = [UniqueAddress("localhost", 7354 + i, i + 1, "Sys") for i in range(n)]
     states: list[Any] = [case.empty] * n
     net = SimNetwork(rng, n)
-    log: list[tuple[Any, Any]] = []
+    log: list[Any] = []
+    stats = {} if stats is None else stats
+    stats.setdefault("sent", 0)
+    stats.setdefault("applied", 0)
     has_deltas = isinstance(case.empty, DeltaReplicatedData)
     seqs = [0] * n  # causal: the last delta number each replica sent
     last_applied = [[0] * n for _ in range(n)]  # causal: [receiver][sender]
@@ -154,9 +170,12 @@ def run(case: ConvergenceCase, seed: int) -> tuple[list[Any], list[tuple[Any, An
         v = Serialization.decode(m["v"], _no_ref)
         if not m["delta"]:
             states[dst] = states[dst].merge(v)
+            # A full state holds every delta its sender has sent so far.
+            last_applied[dst][m["src"]] = max(last_applied[dst][m["src"]], m["seq"])
         elif not case.causal or m["seq"] == last_applied[dst][m["src"]] + 1:
             # ponytail: stands in for the Replicator's causal delivery, not a copy of it
             last_applied[dst][m["src"]] = m["seq"]
+            stats["applied"] += 1
             states[dst] = states[dst].merge_delta(v)
 
     for tick in range(TICKS):
@@ -168,19 +187,26 @@ def run(case: ConvergenceCase, seed: int) -> tuple[list[Any], list[tuple[Any, An
             receive(dst, payload)
         for i in range(n):
             if rng.random() < 0.5:
-                after = case.op(rng, nodes[i], states[i])
-                log.append((states[i], after))
+                op_seed = rng.getrandbits(32)
+                after = case.op(random.Random(op_seed), nodes[i], states[i])
+                log.append((case.op(random.Random(op_seed), nodes[i], case.empty), after))
                 states[i] = after
-            dst = rng.choice([j for j in range(n) if j != i])
-            if not has_deltas or rng.random() < 0.3:
-                net.send(i, dst, pack(i, 0, False, states[i]))
-            elif states[i].delta is not None:
-                seqs[i] += 1
-                net.send(i, dst, pack(i, seqs[i], True, states[i].delta))
-                states[i] = states[i].reset_delta()
+            if has_deltas and rng.random() >= 0.3:
+                # Like the Replicator: a delta goes to every peer, then the sender resets.
+                if states[i].delta is not None:
+                    seqs[i] += 1
+                    payload = pack(i, seqs[i], True, states[i].delta)
+                    for dst in range(n):
+                        if dst != i:
+                            stats["sent"] += 1
+                            net.send(i, dst, payload)
+                    states[i] = states[i].reset_delta()
+            else:
+                dst = rng.choice([j for j in range(n) if j != i])
+                net.send(i, dst, pack(i, seqs[i], False, states[i]))
 
     # The final exchange: everyone's full state reaches everyone, with no faults.
-    payloads = [pack(i, 0, False, states[i]) for i in range(n)]
+    payloads = [pack(i, seqs[i], False, states[i]) for i in range(n)]
     for i in range(n):
         for j in range(n):
             if i != j:
@@ -195,3 +221,17 @@ def test_replicas_converge(case: ConvergenceCase, seed: int):
     norm = [s.reset_delta() if hasattr(s, "reset_delta") else s for s in states]
     assert all(s == norm[0] for s in norm), f"{case.name} seed {seed}: {norm}"
     case.check(norm[0], log)
+
+
+def test_causal_delivery_applies_most_deltas():
+    case = CONVERGENCE[0]._replace(causal=True)
+    stats: dict[str, int] = {}
+    for seed in range(20):
+        states, log = run(case, seed, stats)
+        assert all(s.reset_delta() == states[0].reset_delta() for s in states)
+        case.check(states[0], log)
+    share = stats["applied"] / stats["sent"]
+    print(f"causal deltas applied: {stats['applied']} of {stats['sent']} = {share:.3f}")
+    # Reordering, 20% loss and the partition each stall a sender's chain until a full state
+    # arrives, so most deltas are ignored: 0.15 measured. This pins that the path does work.
+    assert share >= 0.14

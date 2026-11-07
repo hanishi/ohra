@@ -518,6 +518,7 @@ def test_the_pages_say_to_build_when_dist_is_missing(
         play = client.get("/play")
         assert play.status_code == 503
         assert play.text == rr.BUILD_FIRST
+        assert client.get("/assets/phone.js").status_code == 503  # not a 500
         assert client.get("/join").status_code == 200
 
 

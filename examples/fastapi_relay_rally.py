@@ -610,8 +610,14 @@ def make_app(
     async def phone_page() -> FileResponse | PlainTextResponse:
         return page("phone.html")
 
-    # the pages' scripts; check_dir=False, so the sockets and /join still work without a build
-    app.mount("/assets", StaticFiles(directory=PAGES / "assets", check_dir=False), name="assets")
+    # the pages' scripts; without a build they say so too, and the sockets and /join still work
+    if (PAGES / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=PAGES / "assets"), name="assets")
+    else:
+
+        @app.get("/assets/{path:path}")
+        async def no_assets(path: str) -> PlainTextResponse:
+            return PlainTextResponse(BUILD_FIRST, status_code=503)
 
     @app.get("/ohra/clock.js")
     async def clock_js() -> FileResponse:

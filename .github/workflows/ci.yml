@@ -30,6 +30,9 @@ jobs:
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run pyright
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24   # the Dockerfile's node:24-slim
       - run: npm ci && npm run build   # the game's type check and build; the page tests use dist/
         working-directory: examples/relay_rally
       - run: uv run pytest

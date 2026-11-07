@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -10,6 +11,25 @@ import pytest
 from ohra import ActorRef
 from ohra.ref import FunctionRef
 from ohra.remote.serialization import Serialization, SerializationError, remotable
+
+
+def path(r: Any) -> str:
+    return r.path
+
+
+def _never(*_a: Any) -> Any:
+    raise AssertionError("resolver called")
+
+
+def rt(v: object) -> object:
+    return Serialization.decode(json.loads(json.dumps(Serialization.encode(v, path))), _never)
+
+
+@remotable
+@dataclass(frozen=True)
+class Cached:
+    n: int
+    memo: int | None = field(default=None, compare=False)
 
 
 @remotable
@@ -104,8 +124,6 @@ def test_manifest_collision_raises_unless_same_class():
 def test_unsupported_value_raises():
     with pytest.raises(SerializationError):
         Serialization.encode(object(), lambda r: r.path)
-    with pytest.raises(SerializationError):
-        Serialization.encode({1: "non-string key"}, lambda r: r.path)
 
 
 @remotable
@@ -137,3 +155,32 @@ def test_tuples_inside_unions_and_lists_are_rebuilt():
         and isinstance(back.xs, tuple)
         and isinstance(back.nested[0], tuple)
     )
+
+
+def test_a_dict_with_non_string_keys_encodes_as_map_and_round_trips():
+    value = {1: "a", ("cart", 42): "b", A(3): "c"}
+    assert Serialization.encode(value, path) == {
+        "$map": [[1, "a"], [["cart", 42], "b"], [{"$type": "A", "n": 3}, "c"]]
+    }
+    assert rt(value) == value
+
+
+def test_a_dict_with_only_string_keys_encodes_as_before():
+    assert Serialization.encode({"x": 1}, path) == {"x": 1}
+
+
+def test_tuple_keys_and_frozenset_elements_decode_hashable():
+    assert rt({("a", (1, 2)): {("b", 3): 4}}) == {("a", (1, 2)): {("b", 3): 4}}
+    back = rt(WithFrozenset(frozenset(), frozenset({("x", 1)})))
+    assert isinstance(back, WithFrozenset) and back.pairs == frozenset({("x", 1)})
+
+
+def test_a_user_dict_key_map_is_refused():
+    with pytest.raises(SerializationError):
+        Serialization.encode({"$map": []}, path)
+
+
+def test_a_field_with_compare_false_is_not_encoded_and_decodes_to_its_default():
+    assert "memo" not in Serialization.encode(Cached(1, 99), path)  # pyright: ignore[reportOperatorIssue]
+    back = rt(Cached(1, 99))
+    assert back == Cached(1) and isinstance(back, Cached) and back.memo is None

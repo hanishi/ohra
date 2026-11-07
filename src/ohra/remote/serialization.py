@@ -3,8 +3,11 @@
 A message type is sendable once registered, with ``@remotable`` on a frozen dataclass or
 ``Serialization.register(cls)``, as Pekko's serialization bindings. Encoding is self-describing
 JSON: a dataclass is ``{"$type": manifest, ...fields}``, an ``ActorRef`` is ``{"$ref": path}``,
-scalars pass through, lists and tuples become lists, string-keyed dicts become objects. Decoding
-needs no type hints, so union-typed fields and nested messages work; a field annotated
+scalars pass through, lists and tuples become lists, string-keyed dicts become objects. A dict
+with any other key becomes ``{"$map": [[key, value], ...]}``, and its decoded keys, like the
+elements of a ``frozenset[...]``, have every list turned into a tuple so they hash. A dataclass
+field declared ``compare=False`` is transient: it is not encoded and decodes to its default.
+Decoding needs no type hints, so union-typed fields and nested messages work; a field annotated
 ``tuple[...]`` or ``frozenset[...]`` is rebuilt as one.
 """
 
@@ -27,7 +30,7 @@ class SerializationError(Exception):
 
 _registry: dict[str, type] = {}
 _manifests: dict[type, str] = {}
-_RESERVED = frozenset(("$ref", "$type", "$entity", "$region"))
+_RESERVED = frozenset(("$ref", "$type", "$entity", "$region", "$map"))
 _hints: dict[type, dict[str, Any]] = {}
 
 
@@ -68,14 +71,22 @@ class Serialization:
         if isinstance(value, list | tuple | frozenset | set):
             return [Serialization.encode(v, ref_path) for v in cast(Iterable[object], value)]
         if isinstance(value, dict):
-            out: dict[str, Json] = {}
-            for k, v in cast(dict[object, object], value).items():
-                if not isinstance(k, str):
-                    raise SerializationError(f"dict keys must be str, not {type(k).__name__}")
-                if k in _RESERVED:  # decode would read the dict as a ref or a dataclass
-                    raise SerializationError(f"dict key {k!r} is reserved for refs and manifests")
-                out[k] = Serialization.encode(v, ref_path)
-            return out
+            items = list(cast(dict[object, object], value).items())
+            if all(isinstance(k, str) for k, _ in items):
+                out: dict[str, Json] = {}
+                for k, v in items:
+                    if k in _RESERVED:  # decode would read the dict as a ref or a dataclass
+                        raise SerializationError(
+                            f"dict key {k!r} is reserved for refs and manifests"
+                        )
+                    out[cast(str, k)] = Serialization.encode(v, ref_path)
+                return out
+            return {
+                "$map": [
+                    [Serialization.encode(k, ref_path), Serialization.encode(v, ref_path)]
+                    for k, v in items
+                ]
+            }
         manifest = _manifests.get(type(value))
         if manifest is None or not dataclasses.is_dataclass(value):
             raise SerializationError(
@@ -83,6 +94,8 @@ class Serialization:
             )
         encoded: dict[str, Json] = {"$type": manifest}
         for f in dataclasses.fields(value):
+            if not f.compare:  # transient, as Pekko's delta: never on the wire
+                continue
             encoded[f.name] = Serialization.encode(getattr(value, f.name), ref_path)
         return encoded
 
@@ -93,6 +106,12 @@ class Serialization:
             return [Serialization.decode(v, resolve) for v in data]
         if not isinstance(data, dict):
             return data
+        pairs = data.get("$map")
+        if len(data) == 1 and isinstance(pairs, list):
+            return {
+                _hashable(Serialization.decode(k, resolve)): Serialization.decode(v, resolve)
+                for k, v in cast(list[list[Json]], pairs)
+            }
         ref = data.get("$ref")
         if isinstance(ref, str):
             return resolve(ref)
@@ -124,6 +143,13 @@ def _hints_of(klass: type[Any]) -> dict[str, Any]:
         return {}
 
 
+def _hashable(x: object) -> object:
+    """JSON has no tuples: a decoded key or set element is hashable only with lists as tuples."""
+    if isinstance(x, list):
+        return tuple(_hashable(v) for v in cast(list[object], x))
+    return x
+
+
 def _is_tuple(hint: Any) -> bool:
     return hint is tuple or typing.get_origin(hint) is tuple
 
@@ -148,7 +174,7 @@ def _rebuild(value: object, hint: Any) -> object:
     if isinstance(value, list):
         items: list[object] = cast(list[object], value)
         if _is_frozenset(hint):
-            return frozenset(_rebuild(v, args[0]) if args else v for v in items)
+            return frozenset(_hashable(_rebuild(v, args[0]) if args else v) for v in items)
         if _is_tuple(hint):
             if args and args[-1] is Ellipsis:
                 return tuple(_rebuild(v, args[0]) for v in items)
@@ -160,8 +186,8 @@ def _rebuild(value: object, hint: Any) -> object:
             return rebuilt
         return items
     if isinstance(value, dict) and origin is dict and len(args) == 2:
-        mapping: dict[str, object] = {
-            k: _rebuild(v, args[1]) for k, v in cast(dict[str, object], value).items()
+        mapping: dict[object, object] = {
+            k: _rebuild(v, args[1]) for k, v in cast(dict[object, object], value).items()
         }
         return mapping
     return cast(object, value)

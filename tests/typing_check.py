@@ -208,3 +208,4 @@ def streams_are_typed(system: ActorSystem[Any]) -> None:
 
 
 GCounter().merge(GSet[int]())  # type: ignore[arg-type]
+GSet[str]().add(1)  # type: ignore[arg-type]

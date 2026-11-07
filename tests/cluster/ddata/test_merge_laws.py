@@ -3,6 +3,7 @@
 Not a Pekko spec. Later PRs add a Case per type.
 """
 
+import json
 import random
 from collections.abc import Callable
 from typing import Any, NamedTuple
@@ -17,6 +18,7 @@ from ohra.cluster.ddata.pncounter import PNCounter
 from ohra.cluster.ddata.replicated_data import ReplicatedData
 from ohra.cluster.ddata.version_vector import VersionVector
 from ohra.remote import UniqueAddress
+from ohra.remote.serialization import Serialization
 
 node1 = UniqueAddress("localhost", 7354, 1, "Sys")
 node2 = UniqueAddress("localhost", 7355, 2, "Sys")
@@ -53,6 +55,15 @@ CASES: list[Case] = [
 ]
 
 
+def _never(*_a: object) -> Any:
+    raise AssertionError("resolver called")
+
+
+def rt(v: Any) -> Any:
+    # a decoded copy: equal, but not the same object, so merge takes no shortcut
+    return Serialization.decode(json.loads(json.dumps(Serialization.encode(v, _never))), _never)
+
+
 def norm(v: Any) -> Any:
     return v.reset_delta() if hasattr(v, "reset_delta") else v
 
@@ -73,4 +84,4 @@ def test_merge_is_commutative_associative_and_idempotent(case: Case, seed: int):
     a, b, c = states
     assert norm(a.merge(b)) == norm(b.merge(a))
     assert norm(a.merge(b).merge(c)) == norm(a.merge(b.merge(c)))
-    assert norm(a.merge(a)) == norm(a)
+    assert norm(a.merge(rt(a))) == norm(a)

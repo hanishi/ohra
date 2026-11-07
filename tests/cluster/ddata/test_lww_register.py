@@ -93,3 +93,8 @@ def test_equal_timestamps_go_to_the_lower_node():
         a = LWWRegister._create(low, "low", same)
         b = LWWRegister._create(high, "high", same)
         assert a.merge(b).value == "low" and b.merge(a).value == "low"
+    # host outranks port: the lower host wins over a lower port
+    low_host = UniqueAddress("a.example", 7999, 9, "Sys")
+    a = LWWRegister._create(low_host, "low", same)
+    b = LWWRegister._create(low, "high", same)
+    assert a.merge(b).value == "low" and b.merge(a).value == "low"

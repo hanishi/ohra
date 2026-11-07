@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections import deque
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, NewType, Optional
 
 import pytest
 
@@ -284,3 +286,32 @@ def test_a_top_level_tuple_round_trips_as_a_tuple():
 def test_a_user_dict_key_tuple_or_frozenset_is_refused(key: str):
     with pytest.raises(SerializationError):
         Serialization.encode({key: []}, path)
+
+
+type Grid = list[tuple[int, int]]
+Legs = NewType("Legs", tuple[tuple[str, int], ...])
+
+
+@remotable
+@dataclass(frozen=True)
+class Opaque:
+    grid: Grid
+    grids: list[Grid]
+    legs: Legs
+    seq: Sequence[tuple[int, int]] | None
+    it: Iterable[tuple[int, int]] | None
+    dq: Optional[deque[tuple[int, int]]]  # a list sent where a deque is declared
+
+
+def test_hints_that_hide_their_container_encode_as_before():
+    # an alias, a NewType or an abc does not say "no hint": its inner tuples stay plain lists
+    value = Opaque([(1, 2)], [[(3, 4)]], Legs((("a", 1),)), [(5, 6)], [(7, 8)], [(9, 10)])
+    assert Serialization.encode(value, path) == {
+        "$type": "Opaque",
+        "grid": [[1, 2]],
+        "grids": [[[3, 4]]],
+        "legs": [["a", 1]],
+        "seq": [[5, 6]],
+        "it": [[7, 8]],
+        "dq": [[9, 10]],
+    }

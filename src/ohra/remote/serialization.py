@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import types
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 
 from ..ref import ActorRef
@@ -194,25 +194,37 @@ def _loose(hint: Any) -> bool:
 
 
 def _element_hints(hint: Any, n: int) -> list[Any]:
-    if hint is _UNKNOWN:
-        return [_UNKNOWN] * n
+    """The hints of a collection's elements: ``None`` (no hint) only under a loose hint or a
+    bare container. A hint this cannot see through (an alias, a NewType, an abc such as
+    ``Sequence``) gives ``_UNKNOWN``, so the elements encode as before."""
+    if _loose(hint):
+        return [None] * n
     if _is_union(hint):
-        hint = next((a for a in typing.get_args(hint) if _is_collection(a)), None)
+        hint = next((a for a in typing.get_args(hint) if _is_collection(a)), _UNKNOWN)
+    if hint is _UNKNOWN or not _is_collection(hint):
+        return [_UNKNOWN] * n
     args = typing.get_args(hint)
+    if not args:
+        return [None] * n
     if typing.get_origin(hint) is tuple and not (len(args) == 2 and args[1] is Ellipsis):
-        return list(args) if len(args) == n else [None] * n
-    return [args[0] if args else None] * n
+        return list(args) if len(args) == n else [_UNKNOWN] * n
+    return [args[0]] * n
 
 
 def _item_hints(hint: Any) -> tuple[Any, Any]:
-    if hint is _UNKNOWN:
-        return _UNKNOWN, _UNKNOWN
+    """The hints of a dict's keys and values, by the rules of ``_element_hints``."""
+    if _loose(hint):
+        return None, None
     if _is_union(hint):
-        hint = next(
-            (a for a in typing.get_args(hint) if typing.get_origin(a) in (dict, Mapping)), None
-        )
+        hint = next((a for a in typing.get_args(hint) if _is_dict(a)), _UNKNOWN)
+    if hint is _UNKNOWN or not _is_dict(hint):
+        return _UNKNOWN, _UNKNOWN
     args = typing.get_args(hint)
     return (args[0], args[1]) if len(args) == 2 else (None, None)
+
+
+def _is_dict(hint: Any) -> bool:
+    return hint is dict or typing.get_origin(hint) is dict
 
 
 def _class_hints(klass: type[Any]) -> dict[str, Any]:

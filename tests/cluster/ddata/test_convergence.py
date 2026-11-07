@@ -191,17 +191,18 @@ def run(
                 after = case.op(random.Random(op_seed), nodes[i], states[i])
                 log.append((case.op(random.Random(op_seed), nodes[i], case.empty), after))
                 states[i] = after
-            if has_deltas and rng.random() >= 0.3:
-                # Like the Replicator: a delta goes to every peer, then the sender resets.
-                if states[i].delta is not None:
+                # Like the Replicator, which takes the delta out at update time: it goes to
+                # every peer, then the sender resets. A delta left on the state would be
+                # dropped by the next incoming merge, while the sequence numbers ran on.
+                if has_deltas and after.delta is not None:
                     seqs[i] += 1
-                    payload = pack(i, seqs[i], True, states[i].delta)
+                    payload = pack(i, seqs[i], True, after.delta)
                     for dst in range(n):
                         if dst != i:
                             stats["sent"] += 1
                             net.send(i, dst, payload)
-                    states[i] = states[i].reset_delta()
-            else:
+                    states[i] = after.reset_delta()
+            if not has_deltas or rng.random() < 0.3:
                 dst = rng.choice([j for j in range(n) if j != i])
                 net.send(i, dst, pack(i, seqs[i], False, states[i]))
 
@@ -233,5 +234,19 @@ def test_causal_delivery_applies_most_deltas():
     share = stats["applied"] / stats["sent"]
     print(f"causal deltas applied: {stats['applied']} of {stats['sent']} = {share:.3f}")
     # Reordering, 20% loss and the partition each stall a sender's chain until a full state
-    # arrives, so most deltas are ignored: 0.15 measured. This pins that the path does work.
-    assert share >= 0.14
+    # arrives, so most deltas are ignored: 0.105 measured. This pins that the path does work.
+    assert share >= 0.10
+
+
+DELTA_CASES = [c for c in CONVERGENCE if isinstance(c.empty, DeltaReplicatedData)]
+
+
+@pytest.mark.parametrize("case", DELTA_CASES, ids=lambda c: c.name)
+def test_every_ops_delta_is_sent_to_every_peer(case: ConvergenceCase):
+    # A delta left on a replica is lost by the next incoming merge, which returns delta=None,
+    # while the sequence numbers run on unbroken: receivers would miss ops.
+    for seed in range(5):
+        stats: dict[str, int] = {}
+        states, log = run(case, seed, stats)
+        with_delta = sum(after.delta is not None for _, after in log)
+        assert with_delta == stats["sent"] / (len(states) - 1), f"seed {seed}"

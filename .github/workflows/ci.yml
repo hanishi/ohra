@@ -30,7 +30,9 @@ jobs:
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run pyright
+      - run: npm ci && npm run build   # the game's type check and build; the page tests use dist/
+        working-directory: examples/relay_rally
       - run: uv run pytest
       - run: uv run pytest examples/testing   # the book's chapter 12 tests
       - run: uv run pytest examples/streams   # the book's chapter 13 tests
-      - run: npx --yes -p typescript@7.0.2 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.js   # clock.js's JSDoc types; it ships as is
+      - run: npx --yes -p typescript@7.0.2 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.js   # clock.js's JSDoc types

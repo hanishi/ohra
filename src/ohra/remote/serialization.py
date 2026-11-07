@@ -140,9 +140,17 @@ class Serialization:
 
 def _hints_of(klass: type[Any]) -> dict[str, Any]:
     try:
-        # a generic class's own type parameters (``class X[A]``) are not in its module's globals
-        params = {p.__name__: p for c in klass.__mro__ for p in getattr(c, "__type_params__", ())}
-        return typing.get_type_hints(klass, localns=params)
+        try:
+            return typing.get_type_hints(klass)
+        except NameError:
+            # Python 3.12.2 does not resolve a PEP 695 class's own type parameters (``class X[A]``)
+            # in string annotations; later 3.12 and 3.13 do. Passing any localns would stop
+            # get_type_hints from looking in the class's own namespace (nested classes), so
+            # this is only the retry.
+            params = {
+                p.__name__: p for c in klass.__mro__ for p in getattr(c, "__type_params__", ())
+            }
+            return typing.get_type_hints(klass, localns=params)
     # a locally defined class whose annotations cannot be evaluated: no tuple rebuilding
     except Exception:
         return {}

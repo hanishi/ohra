@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import pytest
@@ -184,3 +185,31 @@ def test_a_field_with_compare_false_is_not_encoded_and_decodes_to_its_default():
     assert "memo" not in Serialization.encode(Cached(1, 99), path)  # pyright: ignore[reportOperatorIssue]
     back = rt(Cached(1, 99))
     assert back == Cached(1) and isinstance(back, Cached) and back.memo is None
+
+
+@remotable
+@dataclass(frozen=True)
+class Chain[A]:
+    items: frozenset[A]
+    next: Chain[A] | None = None
+
+
+def test_a_generic_class_naming_itself_rebuilds_its_frozenset():
+    # the annotation names the class, which does not exist when the decorator runs
+    c = Chain(frozenset({(1, 2), (3, 4)}), Chain(frozenset({"x"})))
+    assert rt(c) == c
+
+
+@remotable
+@dataclass(frozen=True)
+class Order:
+    class Side(Enum):
+        BUY = 1
+
+    side: Side | None
+    legs: tuple[int, ...]
+
+
+def test_an_annotation_naming_a_nested_class_still_rebuilds_tuples():
+    o = Order(None, (1, 2))
+    assert rt(o) == o

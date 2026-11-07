@@ -106,7 +106,7 @@ def test_be_able_to_work_with_deltas():
     assert merged2 == c33
 
 
-def test_be_able_to_have_its_user_set_correctly_merged_with_another_gset_with_overlapping_sets():
+def test_be_able_to_have_its_user_set_correctly_merged_with_another_gset_with_overlapping_user_sets():  # noqa: E501
     # set 1
     c10 = GSet[str]()
 

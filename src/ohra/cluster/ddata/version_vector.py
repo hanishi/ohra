@@ -145,7 +145,7 @@ class VersionVector(RemovedNodePruning):
             # compare the nodes
             a1, t1 = cast(tuple[UniqueAddress, int], nt1)
             a2, t2 = cast(tuple[UniqueAddress, int], nt2)
-            nc = 0 if a1 == a2 else -1 if a1 < a2 else 1
+            nc = -1 if a1 < a2 else 1 if a2 < a1 else 0  # Pekko's compareTo
             if nc == 0:
                 # both nodes exist, compare the timestamps
                 if t1 == t2:

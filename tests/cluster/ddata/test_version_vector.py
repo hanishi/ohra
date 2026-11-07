@@ -251,3 +251,11 @@ def test_compare_vectors_of_different_lengths_both_ways():
     tail = VersionVector.create({node1: 1, node4: 1})  # sorts after every key of long but node1
     assert long.is_concurrent(tail) and tail.is_concurrent(long)
     assert OneVersionVector(node1, 1) == ManyVersionVector({node1: 1})
+
+
+def test_compare_nodes_as_unique_address_compare_to_does():
+    # Pekko's UniqueAddress.compareTo orders by host, port and uid, not by system name
+    other_name = UniqueAddress("localhost", 7354, 1, "Other")
+    v1 = ManyVersionVector({node1: 1, node2: 1})
+    v2 = ManyVersionVector({other_name: 1, node2: 1})
+    assert v1.compare_to(v2) is VersionVector.Ordering.same

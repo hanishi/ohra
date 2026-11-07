@@ -1,3 +1,4 @@
+// @ts-check
 // The page side of ohra.ext.fastapi.synced: this page on the server's clock.
 //
 //   import { connect } from "/ohra/clock.js";
@@ -11,6 +12,11 @@
 // Pings measure the offset of this page's clock from the server's, from the fastest ping of the
 // last minute. Messages that arrive before a connection's first pong wait for it, so a t in them
 // is never read against a clock that is not synced yet.
+//
+// The types are JSDoc, checked by tsc in CI: the file is served as it is, with no build.
+
+/** A ping: sent (c) and its pong received (r) on the page clock, answered (s) on the server's.
+ * @typedef {{ c: number, r: number, s: number }} Sample */
 
 const local = () => performance.now() / 1000;
 
@@ -20,10 +26,13 @@ export const SAMPLE_WINDOW = 6;
 
 // The fastest of the last SAMPLE_WINDOW pings. A sample is {c: sent, r: received} on the page
 // clock and {s} on the server clock.
+/** @param {Sample[]} samples */
 const fastest = (samples) =>
   samples.slice(-SAMPLE_WINDOW).reduce((a, b) => (b.r - b.c < a.r - a.c ? b : a));
 
-// The server clock minus the page clock.
+/** The server clock minus the page clock.
+ * @param {Sample[]} samples
+ * @returns {number} */
 export function offsetFrom(samples) {
   const best = fastest(samples);
   return best.s - (best.c + (best.r - best.c) / 2);
@@ -31,6 +40,8 @@ export function offsetFrom(samples) {
 
 // How far offsetFrom can be off: the server read its clock somewhere in the round trip, and the
 // offset assumes halfway. It leaves out the server's delay in answering and late page timers.
+/** @param {Sample[]} samples
+ * @returns {number} */
 export function errorFrom(samples) {
   const best = fastest(samples);
   return (best.r - best.c) / 2;
@@ -39,18 +50,29 @@ export function errorFrom(samples) {
 // How long to wait, in ms, for server time t, with the page's clock at nowLocal: none once t has
 // passed, however far ahead it is otherwise. Messages wait for the first pong, so the offset is
 // synced by the time anything asks.
+/** @param {number} t @param {number} offset @param {number} nowLocal
+ * @returns {number} */
 export function delayFor(t, offset, nowLocal) {
   return Math.max(0, (t - offset - nowLocal) * 1000);
 }
 
+/** Open a socket to path on this page's host, and hand every message but the pongs to
+ * onMessage, as parsed JSON.
+ * @param {string} path
+ * @param {(msg: any) => void} onMessage */
 export function connect(path, onMessage) {
+  /** @type {WebSocket | undefined} */
   let ws;
   let offset = 0;
+  /** @type {Sample[]} */
   let samples = [];
+  /** @type {any[] | null} */
   let held = []; // messages of this connection before its first pong
   let backoff = 0.5;
+  /** @type {Set<number>} */
   let pending = new Set();
 
+  /** @param {unknown} frame */
   const send = (frame) => {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
   };
@@ -91,6 +113,7 @@ export function connect(path, onMessage) {
     send,
     now: () => local() + offset,
     error: () => (samples.length ? errorFrom(samples) : Infinity), // Infinity until a pong
+    /** @param {number} t @param {() => void} fn */
     at(t, fn) {
       const id = setTimeout(() => {
         pending.delete(id);

@@ -22,6 +22,8 @@ uv run pytest        # every test fails if any asyncio task outlives it (tests/c
 uv run pytest examples/testing   # the book's chapter 12 tests, run as a reader runs them
 uv run pytest examples/streams   # the book's chapter 13 tests
 uv run pyright       # strict mode, 0 errors
+npx --yes -p typescript@7.0.2 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.js
+                     # clock.js's JSDoc types: it ships as is, with no build
 ```
 
 - `ruff format` leaves comments, docstrings and strings alone, so wrap those yourself. A pragma comment (`# pyright: ignore[...]`, `# type: ignore`) has to stay on the line it is about.

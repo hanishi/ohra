@@ -44,7 +44,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-ohra = ["py.typed", "ext/clock.js"]
+ohra = ["py.typed", "ext/clock.ts", "ext/clock.js", "ext/clock.d.ts"]
 
 # The torch extra installs PyTorch's CPU-only build, small enough for CI. Only uv in this
 # repository uses this index; pip install ohra[torch] gets the default PyTorch build.

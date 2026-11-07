@@ -1,4 +1,3 @@
-// @ts-check
 // The page side of ohra.ext.fastapi.synced: this page on the server's clock.
 //
 //   import { connect } from "/ohra/clock.js";
@@ -13,10 +12,20 @@
 // last minute. Messages that arrive before a connection's first pong wait for it, so a t in them
 // is never read against a clock that is not synced yet.
 //
-// The types are JSDoc, checked by tsc in CI, so the source needs no build.
+// This is the source: the package serves clock.js, built from it with esbuild, minified in a
+// release, with clock.d.ts for TypeScript pages.
 
-/** A ping: sent (c) and its pong received (r) on the page clock, answered (s) on the server's.
- * @typedef {{ c: number, r: number, s: number }} Sample */
+/** A ping: sent (c) and its pong received (r) on the page clock, answered (s) on the server's. */
+export type Sample = { c: number; r: number; s: number };
+
+/** What connect returns: the socket, on the server's clock. */
+export type Connection = {
+  send(frame: unknown): void;
+  now(): number;
+  error(): number;
+  at(t: number, fn: () => void): void;
+  cancelAll(): void;
+};
 
 const local = () => performance.now() / 1000;
 
@@ -26,23 +35,18 @@ export const SAMPLE_WINDOW = 6;
 
 // The fastest of the last SAMPLE_WINDOW pings. A sample is {c: sent, r: received} on the page
 // clock and {s} on the server clock.
-/** @param {Sample[]} samples */
-const fastest = (samples) =>
+const fastest = (samples: Sample[]): Sample =>
   samples.slice(-SAMPLE_WINDOW).reduce((a, b) => (b.r - b.c < a.r - a.c ? b : a));
 
-/** The server clock minus the page clock.
- * @param {Sample[]} samples
- * @returns {number} */
-export function offsetFrom(samples) {
+/** The server clock minus the page clock. */
+export function offsetFrom(samples: Sample[]): number {
   const best = fastest(samples);
   return best.s - (best.c + (best.r - best.c) / 2);
 }
 
 // How far offsetFrom can be off: the server read its clock somewhere in the round trip, and the
 // offset assumes halfway. It leaves out the server's delay in answering and late page timers.
-/** @param {Sample[]} samples
- * @returns {number} */
-export function errorFrom(samples) {
+export function errorFrom(samples: Sample[]): number {
   const best = fastest(samples);
   return (best.r - best.c) / 2;
 }
@@ -50,30 +54,21 @@ export function errorFrom(samples) {
 // How long to wait, in ms, for server time t, with the page's clock at nowLocal: none once t has
 // passed, however far ahead it is otherwise. Messages wait for the first pong, so the offset is
 // synced by the time anything asks.
-/** @param {number} t @param {number} offset @param {number} nowLocal
- * @returns {number} */
-export function delayFor(t, offset, nowLocal) {
+export function delayFor(t: number, offset: number, nowLocal: number): number {
   return Math.max(0, (t - offset - nowLocal) * 1000);
 }
 
 /** Open a socket to path on this page's host, and hand every message but the pongs to
- * onMessage, as parsed JSON.
- * @param {string} path
- * @param {(msg: any) => void} onMessage */
-export function connect(path, onMessage) {
-  /** @type {WebSocket | undefined} */
-  let ws;
+ * onMessage, as parsed JSON. */
+export function connect(path: string, onMessage: (msg: any) => void): Connection {
+  let ws: WebSocket | undefined;
   let offset = 0;
-  /** @type {Sample[]} */
-  let samples = [];
-  /** @type {any[] | null} */
-  let held = []; // messages of this connection before its first pong
+  let samples: Sample[] = [];
+  let held: unknown[] | null = []; // messages of this connection before its first pong
   let backoff = 0.5;
-  /** @type {Set<number>} */
-  let pending = new Set();
+  let pending = new Set<number>();
 
-  /** @param {unknown} frame */
-  const send = (frame) => {
+  const send = (frame: unknown) => {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
   };
   const ping = () => send({ type: "ping", c: local() });
@@ -113,7 +108,6 @@ export function connect(path, onMessage) {
     send,
     now: () => local() + offset,
     error: () => (samples.length ? errorFrom(samples) : Infinity), // Infinity until a pong
-    /** @param {number} t @param {() => void} fn */
     at(t, fn) {
       const id = setTimeout(() => {
         pending.delete(id);

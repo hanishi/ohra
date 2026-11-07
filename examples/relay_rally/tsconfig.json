@@ -2,14 +2,12 @@
   "compilerOptions": {
     "strict": true,
     "noEmit": true,
-    "allowJs": true,
-    "checkJs": true,
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM"],
     "skipLibCheck": true,
-    "paths": { "ohra/clock": ["../../src/ohra/ext/clock.js"] }
+    "paths": { "ohra/clock": ["../../src/ohra/ext/clock.ts"] }
   },
   "include": ["src", "vite.config.ts"]
 }

@@ -480,7 +480,8 @@ def test_the_pages_and_clock_js_are_served():
         script = client.get(re.findall(r'src="(/assets/[^"]+\.js)"', play)[0])
         assert script.status_code == 200
         assert script.headers["content-type"].startswith("text/javascript")
-        assert "export function connect" in client.get("/ohra/clock.js").text
+        # built from clock.ts, readable or minified: its exports are listed at the end
+        assert re.search(r"export\s*\{[^}]*\bconnect\b", client.get("/ohra/clock.js").text)
         url = client.get("/join").json()["url"]
         assert url.startswith("http://") and url.endswith(":80/play")
 

@@ -17,6 +17,7 @@ from .replicated_data import (
     ReplicatedDeltaSize,
     RequiresCausalDeliveryOfDeltas,
 )
+from .version_vector import ManyVersionVector, OneVersionVector, VersionVector
 
 
 @remotable
@@ -27,8 +28,6 @@ class SelfUniqueAddress:
 
     unique_address: UniqueAddress
 
-
-from .version_vector import ManyVersionVector, OneVersionVector, VersionVector  # noqa: E402
 
 __all__ = [
     "DeltaReplicatedData",

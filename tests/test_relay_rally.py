@@ -544,7 +544,7 @@ def test_the_wall_does_not_wait_for_the_qr_library():
 
 
 def test_the_phone_knows_the_servers_base_speed():
-    page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
+    page = (Path(rr.__file__).parent / "relay_rally" / "src" / "phone.ts").read_text()
     (line,) = [x for x in page.splitlines() if "const BASE_SPEED = " in x]
     assert float(line.split("=")[1].split(";")[0]) == rr.BASE_SPEED  # the hit's pitch follows it
 
@@ -552,13 +552,13 @@ def test_the_phone_knows_the_servers_base_speed():
 def test_the_wall_and_the_phone_agree_on_the_paddle_line():
     pages = Path(rr.__file__).parent / "relay_rally"
     (wall,) = [x for x in (pages / "wall.html").read_text().splitlines() if "PADDLE_Y = " in x]
-    (phone,) = [x for x in (pages / "phone.html").read_text().splitlines() if "PADDLE_Y = " in x]
+    (phone,) = [x for x in (pages / "src" / "phone.ts").read_text().splitlines() if "PADDLE_Y = " in x]
     assert "H = 16, PADDLE_Y = H - 1.4," in phone
     assert float(wall.split("=")[1].split(";")[0]) == pytest.approx(16 - 1.4)  # the closing ring
 
 
 def test_the_phone_uses_no_api_that_needs_https():
-    page = (Path(rr.__file__).parent / "relay_rally" / "phone.html").read_text()
+    page = (Path(rr.__file__).parent / "relay_rally" / "src" / "phone.ts").read_text()
     assert "randomUUID" not in page  # the join URL is plain http on the LAN
 
 

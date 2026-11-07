@@ -3,6 +3,7 @@ puck is passed from phone to phone at random. Every page is on the server's cloc
 ``synced`` and ``clock.js``: the server says when the puck drops onto a phone, and the phone
 draws it from ``conn.now()``, so nothing is streamed.
 
+    cd examples/relay_rally && npm ci && npm run build && cd ../..
     uv run --extra web uvicorn examples.fastapi_relay_rally:app --host 0.0.0.0 --port 8000
 
 then open http://localhost:8000/wall on a big screen and scan its code with phones on the same
@@ -31,12 +32,17 @@ from typing import Any, Literal, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fastapi import FastAPI, Query, Request, WebSocket  # noqa: E402
-from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from ohra import ActorContext, ActorRef, Behavior, Behaviors  # noqa: E402
 from ohra.ext.fastapi import CLOCK_JS, Actors, synced  # noqa: E402
 
-PAGES = Path(__file__).resolve().parent / "relay_rally"
+# the pages, as Vite builds them from relay_rally/ (their scripts are TypeScript)
+PAGES = Path(__file__).resolve().parent / "relay_rally" / "dist"
+BUILD_FIRST = (
+    "Relay Rally's pages are not built: run npm ci && npm run build in examples/relay_rally"
+)
 
 LIVES = 5
 GAME_S = 180.0
@@ -589,17 +595,22 @@ def make_app(
     async def index() -> RedirectResponse:
         return RedirectResponse("/wall")
 
-    @app.get("/wall")
-    async def wall_page() -> FileResponse:
-        return FileResponse(PAGES / "wall.html")
+    def page(name: str) -> FileResponse | PlainTextResponse:
+        path = PAGES / name
+        if not path.exists():
+            return PlainTextResponse(BUILD_FIRST, status_code=503)
+        return FileResponse(path)
 
-    @app.get("/play")
-    async def phone_page() -> FileResponse:
-        return FileResponse(PAGES / "phone.html")
+    @app.get("/wall", response_model=None)
+    async def wall_page() -> FileResponse | PlainTextResponse:
+        return page("wall.html")
 
-    @app.get("/arcade.js")
-    async def arcade_js() -> FileResponse:
-        return FileResponse(PAGES / "arcade.js", media_type="text/javascript")
+    @app.get("/play", response_model=None)
+    async def phone_page() -> FileResponse | PlainTextResponse:
+        return page("phone.html")
+
+    # the pages' scripts; check_dir=False, so the sockets and /join still work without a build
+    app.mount("/assets", StaticFiles(directory=PAGES / "assets", check_dir=False), name="assets")
 
     @app.get("/ohra/clock.js")
     async def clock_js() -> FileResponse:

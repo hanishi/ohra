@@ -551,7 +551,7 @@ def test_the_phone_knows_the_servers_base_speed():
 
 def test_the_wall_and_the_phone_agree_on_the_paddle_line():
     pages = Path(rr.__file__).parent / "relay_rally"
-    (wall,) = [x for x in (pages / "wall.html").read_text().splitlines() if "PADDLE_Y = " in x]
+    (wall,) = [x for x in (pages / "src" / "wall.ts").read_text().splitlines() if "PADDLE_Y = " in x]
     (phone,) = [x for x in (pages / "src" / "phone.ts").read_text().splitlines() if "PADDLE_Y = " in x]
     assert "H = 16, PADDLE_Y = H - 1.4," in phone
     assert float(wall.split("=")[1].split(";")[0]) == pytest.approx(16 - 1.4)  # the closing ring

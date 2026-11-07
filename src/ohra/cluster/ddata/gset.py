@@ -8,10 +8,10 @@ Immutable: "modifying" methods return a new instance."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import ClassVar, override
 
-from ...remote.serialization import remotable
+from ...remote.serialization import remotable, transient
 from .fast_merge import FastMerge
 from .key import Key
 from .replicated_data import DeltaReplicatedData, ReplicatedDelta
@@ -23,7 +23,7 @@ class GSet[A](DeltaReplicatedData["GSet[A]"], ReplicatedDelta, FastMerge):
     empty: ClassVar[GSet[object]]
 
     elements: frozenset[A] = frozenset()
-    delta: GSet[A] | None = field(default=None, compare=False, repr=False)
+    delta: GSet[A] | None = transient()
 
     def contains(self, a: A) -> bool:
         return a in self.elements

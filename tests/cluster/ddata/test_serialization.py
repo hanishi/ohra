@@ -49,6 +49,7 @@ def wire(v: object) -> str:
 def check_serialization[T](v: T) -> T:
     back = Serialization.decode(json.loads(wire(v)), lambda p: refs[p])
     assert back == v
+    assert type(back) is type(v)  # a Key's equality is by id alone
     return back  # type: ignore[return-value]
 
 
@@ -76,6 +77,11 @@ def test_serialize_gset():
     check_serialization(GSetKey("id"))
 
 
+def test_serialize_gset_of_frozensets():
+    back = check_serialization(GSet().add(frozenset({1, 2})).add(frozenset({"a", (3, "b")})))
+    assert all(isinstance(e, frozenset) for e in back.elements)
+
+
 def test_serialize_large_gset():
     large = GSet[str]()
     for n in range(10000, 20000):
@@ -97,6 +103,13 @@ def test_serialize_lww_register():
         )
     )
     check_serialization(LWWRegisterKey("id"))
+
+
+def test_serialize_lww_register_with_a_tuple_or_frozenset_value():
+    for value in ((1, "x", (2, 3)), frozenset({1, (2, "y"), frozenset({"z"})})):
+        r = LWWRegister(address1, value, 1)
+        back = check_serialization(r)
+        assert type(back.value) is type(value) and hash(back) == hash(r)
 
 
 def test_serialize_gcounter():

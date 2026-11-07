@@ -27,8 +27,8 @@ class ReplicatedDelta(ReplicatedData):
 class DeltaReplicatedData[D: ReplicatedDelta](ReplicatedData):
     """A ``ReplicatedData`` that can ship its changes as deltas.
 
-    Every subclass declares ``delta`` as a ``compare=False`` dataclass field, so it is neither
-    sent nor compared."""
+    A subclass's ``delta`` is never sent and never compared: a ``transient()`` dataclass field,
+    or a property computed from other fields (``PNCounter``'s)."""
 
     delta: D | None
 

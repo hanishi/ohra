@@ -3,12 +3,18 @@
 A message type is sendable once registered, with ``@remotable`` on a frozen dataclass or
 ``Serialization.register(cls)``, as Pekko's serialization bindings. Encoding is self-describing
 JSON: a dataclass is ``{"$type": manifest, ...fields}``, an ``ActorRef`` is ``{"$ref": path}``,
-scalars pass through, lists and tuples become lists, string-keyed dicts become objects. A dict
-with any other key becomes ``{"$map": [[key, value], ...]}``, and its decoded keys, like the
-elements of a ``frozenset[...]``, have every list turned into a tuple so they hash. A dataclass
-field declared ``compare=False`` is transient: it is not encoded and decodes to its default.
-Decoding needs no type hints, so union-typed fields and nested messages work; a field annotated
-``tuple[...]`` or ``frozenset[...]`` is rebuilt as one.
+scalars pass through, lists become lists, string-keyed dicts become objects. A dict with any
+other key becomes ``{"$map": [[key, value], ...]}``.
+
+A tuple, frozenset or set becomes a plain list where its static hint says what it is: a field
+annotated ``tuple[...]`` or ``frozenset[...]``, or an element, key or value of a container
+hinted so. Decoding rebuilds it from the hint, with every list in a decoded key or set element
+turned into a tuple so it hashes. Where no hint says so (a TypeVar, ``Any``, ``object``, the
+top-level value, the elements of an unparametrized container), the value says it itself:
+``{"$tuple": [...]}`` or ``{"$frozenset": [...]}``. So ``LWWRegister[A]`` with a tuple value
+round-trips equal and hashable. A field declared with ``transient()`` is not encoded and
+decodes to its default, as Pekko's ``delta``. Decoding needs no other type hints, so
+union-typed fields and nested messages work.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import types
 import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, cast
 
 from ..ref import ActorRef
@@ -30,8 +36,16 @@ class SerializationError(Exception):
 
 _registry: dict[str, type] = {}
 _manifests: dict[type, str] = {}
-_RESERVED = frozenset(("$ref", "$type", "$entity", "$region", "$map"))
+_RESERVED = frozenset(("$ref", "$type", "$entity", "$region", "$map", "$tuple", "$frozenset"))
 _hints: dict[type, dict[str, Any]] = {}
+
+
+def transient(default: Any = None) -> Any:
+    """A dataclass field that never goes on the wire and decodes to ``default``, as Pekko's
+    ``delta``. It is left out of equality and repr too."""
+    return dataclasses.field(
+        default=default, compare=False, repr=False, metadata={"ohra.transient": True}
+    )
 
 
 def remotable[C](cls: C) -> C:
@@ -57,46 +71,7 @@ class Serialization:
     @staticmethod
     def encode(value: object, ref_path: Callable[[ActorRef[Any]], str]) -> Json:
         """``ref_path`` turns a ref into the path another node can send to."""
-        if value is None or isinstance(value, bool | int | float | str):
-            return value
-        if isinstance(value, ActorRef):
-            # an EntityRef is a region plus an id; the other node rebuilds it
-            from ..cluster.sharding.shard import EntityRef
-
-            if isinstance(value, EntityRef):
-                entity = cast(EntityRef[Any], value)
-                return {"$entity": entity.entity_id, "$region": ref_path(entity.region)}
-            return {"$ref": ref_path(cast(ActorRef[Any], value))}
-        if isinstance(value, list | tuple | frozenset | set):
-            return [Serialization.encode(v, ref_path) for v in cast(Iterable[object], value)]
-        if isinstance(value, dict):
-            items = list(cast(dict[object, object], value).items())
-            if all(isinstance(k, str) for k, _ in items):
-                out: dict[str, Json] = {}
-                for k, v in items:
-                    if k in _RESERVED:  # decode would read the dict as a ref or a dataclass
-                        raise SerializationError(
-                            f"dict key {k!r} is reserved for refs and manifests"
-                        )
-                    out[cast(str, k)] = Serialization.encode(v, ref_path)
-                return out
-            return {
-                "$map": [
-                    [Serialization.encode(k, ref_path), Serialization.encode(v, ref_path)]
-                    for k, v in items
-                ]
-            }
-        manifest = _manifests.get(type(value))
-        if manifest is None or not dataclasses.is_dataclass(value):
-            raise SerializationError(
-                f"{type(value).__qualname__} is not registered; decorate it with @remotable"
-            )
-        encoded: dict[str, Json] = {"$type": manifest}
-        for f in dataclasses.fields(value):
-            if not f.compare:  # transient, as Pekko's delta: never on the wire
-                continue
-            encoded[f.name] = Serialization.encode(getattr(value, f.name), ref_path)
-        return encoded
+        return _encode(value, ref_path, None)
 
     @staticmethod
     def decode(data: Json, resolve: Callable[[str], ActorRef[Any]]) -> object:
@@ -105,12 +80,18 @@ class Serialization:
             return [Serialization.decode(v, resolve) for v in data]
         if not isinstance(data, dict):
             return data
-        pairs = data.get("$map")
-        if len(data) == 1 and isinstance(pairs, list):
-            return {
-                _hashable(Serialization.decode(k, resolve)): Serialization.decode(v, resolve)
-                for k, v in cast(list[list[Json]], pairs)
-            }
+        if len(data) == 1:
+            pairs, items = data.get("$map"), data.get("$tuple")
+            if isinstance(pairs, list):
+                return {
+                    _hashable(Serialization.decode(k, resolve)): Serialization.decode(v, resolve)
+                    for k, v in cast(list[list[Json]], pairs)
+                }
+            if isinstance(items, list):
+                return tuple(Serialization.decode(v, resolve) for v in items)
+            items = data.get("$frozenset")
+            if isinstance(items, list):
+                return frozenset(_hashable(Serialization.decode(v, resolve)) for v in items)
         ref = data.get("$ref")
         if isinstance(ref, str):
             return resolve(ref)
@@ -125,17 +106,121 @@ class Serialization:
         if not isinstance(manifest, str) or manifest not in _registry:
             raise SerializationError(f"unknown manifest {manifest!r}")
         klass = _registry[manifest]
-        # resolved on first decode: a self-referential annotation (``delta: GSet[A]``) names the
-        # class, which does not exist yet when the decorator runs
-        if klass not in _hints:
-            _hints[klass] = _hints_of(klass)
-        hints = _hints[klass]
+        hints = _class_hints(klass)
         kwargs: dict[str, object] = {}
         for k, v in data.items():
             if k == "$type":
                 continue
             kwargs[k] = _rebuild(Serialization.decode(v, resolve), hints.get(k))
         return klass(**kwargs)
+
+
+# A field whose annotation cannot be evaluated: it encodes as it did before hints were read.
+_UNKNOWN: Any = object()
+
+
+def _encode(value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any) -> Json:
+    """``hint`` is the static type of the position ``value`` sits in: a field's annotation, or
+    the element, key or value type of a hinted container. ``None`` is a position with no hint."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, ActorRef):
+        # an EntityRef is a region plus an id; the other node rebuilds it
+        from ..cluster.sharding.shard import EntityRef
+
+        if isinstance(value, EntityRef):
+            entity = cast(EntityRef[Any], value)
+            return {"$entity": entity.entity_id, "$region": ref_path(entity.region)}
+        return {"$ref": ref_path(cast(ActorRef[Any], value))}
+    if isinstance(value, list | tuple | frozenset | set):
+        elements = list(cast(Iterable[object], value))
+        encoded_list: list[Json] = [
+            _encode(v, ref_path, h)
+            for v, h in zip(elements, _element_hints(hint, len(elements)), strict=True)
+        ]
+        if isinstance(value, list) or not _loose(hint):
+            return encoded_list
+        # JSON has no tuples or sets: where no hint says so, the value says it
+        return {"$tuple" if isinstance(value, tuple) else "$frozenset": encoded_list}
+    if isinstance(value, dict):
+        items = list(cast(dict[object, object], value).items())
+        kh, vh = _item_hints(hint)
+        if all(isinstance(k, str) for k, _ in items):
+            out: dict[str, Json] = {}
+            for k, v in items:
+                if k in _RESERVED:  # decode would read the dict as a ref, a dataclass or a tag
+                    raise SerializationError(
+                        f"dict key {k!r} is reserved for refs, manifests and tags"
+                    )
+                out[cast(str, k)] = _encode(v, ref_path, vh)
+            return out
+        return {"$map": [[_encode(k, ref_path, kh), _encode(v, ref_path, vh)] for k, v in items]}
+    manifest = _manifests.get(type(value))
+    if manifest is None or not dataclasses.is_dataclass(value):
+        raise SerializationError(
+            f"{type(value).__qualname__} is not registered; decorate it with @remotable"
+        )
+    hints = _class_hints(type(value))
+    encoded: dict[str, Json] = {"$type": manifest}
+    for f in dataclasses.fields(value):
+        if f.metadata.get("ohra.transient"):  # as Pekko's delta: never on the wire
+            continue
+        encoded[f.name] = _encode(getattr(value, f.name), ref_path, hints.get(f.name, _UNKNOWN))
+    return encoded
+
+
+def _is_union(hint: Any) -> bool:
+    return typing.get_origin(hint) in (types.UnionType, typing.Union)
+
+
+def _is_collection(hint: Any) -> bool:
+    return (hint if typing.get_origin(hint) is None else typing.get_origin(hint)) in (
+        list,
+        tuple,
+        frozenset,
+        set,
+    )
+
+
+def _loose(hint: Any) -> bool:
+    """A position whose static type does not say tuple or frozenset: a TypeVar, ``Any``,
+    ``object``, no hint at all, or a union of those with no collection in it."""
+    if hint is None or hint is Any or hint is object or isinstance(hint, typing.TypeVar):
+        return True
+    if _is_union(hint):
+        args = typing.get_args(hint)
+        return any(_loose(a) for a in args) and not any(_is_collection(a) for a in args)
+    return False
+
+
+def _element_hints(hint: Any, n: int) -> list[Any]:
+    if hint is _UNKNOWN:
+        return [_UNKNOWN] * n
+    if _is_union(hint):
+        hint = next((a for a in typing.get_args(hint) if _is_collection(a)), None)
+    args = typing.get_args(hint)
+    if typing.get_origin(hint) is tuple and not (len(args) == 2 and args[1] is Ellipsis):
+        return list(args) if len(args) == n else [None] * n
+    return [args[0] if args else None] * n
+
+
+def _item_hints(hint: Any) -> tuple[Any, Any]:
+    if hint is _UNKNOWN:
+        return _UNKNOWN, _UNKNOWN
+    if _is_union(hint):
+        hint = next(
+            (a for a in typing.get_args(hint) if typing.get_origin(a) in (dict, Mapping)), None
+        )
+    args = typing.get_args(hint)
+    return (args[0], args[1]) if len(args) == 2 else (None, None)
+
+
+def _class_hints(klass: type[Any]) -> dict[str, Any]:
+    # resolved on first use, not by the decorator: a self-referential annotation
+    # (``delta: GSet[A]``) names the class, which does not exist yet when the decorator runs
+    if klass not in _hints:
+        _hints[klass] = _hints_of(klass)
+    return _hints[klass]
 
 
 def _hints_of(klass: type[Any]) -> dict[str, Any]:

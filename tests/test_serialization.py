@@ -11,7 +11,7 @@ import pytest
 
 from ohra import ActorRef
 from ohra.ref import FunctionRef
-from ohra.remote.serialization import Serialization, SerializationError, remotable
+from ohra.remote.serialization import Serialization, SerializationError, remotable, transient
 
 
 def path(r: Any) -> str:
@@ -30,7 +30,14 @@ def rt(v: object) -> object:
 @dataclass(frozen=True)
 class Cached:
     n: int
-    memo: int | None = field(default=None, compare=False)
+    memo: int | None = transient()
+
+
+@remotable
+@dataclass(frozen=True)
+class Annotated:
+    n: int
+    note: str = field(default="", compare=False)
 
 
 @remotable
@@ -160,8 +167,9 @@ def test_tuples_inside_unions_and_lists_are_rebuilt():
 
 def test_a_dict_with_non_string_keys_encodes_as_map_and_round_trips():
     value = {1: "a", ("cart", 42): "b", A(3): "c"}
+    # a top-level dict has no hint, so its tuple key says it is one
     assert Serialization.encode(value, path) == {
-        "$map": [[1, "a"], [["cart", 42], "b"], [{"$type": "A", "n": 3}, "c"]]
+        "$map": [[1, "a"], [{"$tuple": ["cart", 42]}, "b"], [{"$type": "A", "n": 3}, "c"]]
     }
     assert rt(value) == value
 
@@ -181,10 +189,20 @@ def test_a_user_dict_key_map_is_refused():
         Serialization.encode({"$map": []}, path)
 
 
-def test_a_field_with_compare_false_is_not_encoded_and_decodes_to_its_default():
-    assert "memo" not in Serialization.encode(Cached(1, 99), path)  # pyright: ignore[reportOperatorIssue]
+def test_a_transient_field_is_not_encoded_and_decodes_to_its_default():
+    assert Serialization.encode(Cached(1, 99), path) == {"$type": "Cached", "n": 1}
     back = rt(Cached(1, 99))
     assert back == Cached(1) and isinstance(back, Cached) and back.memo is None
+
+
+def test_a_plain_compare_false_field_is_encoded_and_round_trips():
+    assert Serialization.encode(Annotated(1, "hi"), path) == {
+        "$type": "Annotated",
+        "n": 1,
+        "note": "hi",
+    }
+    back = rt(Annotated(1, "hi"))
+    assert isinstance(back, Annotated) and back.note == "hi"
 
 
 @remotable
@@ -213,3 +231,56 @@ class Order:
 def test_an_annotation_naming_a_nested_class_still_rebuilds_tuples():
     o = Order(None, (1, 2))
     assert rt(o) == o
+
+
+@remotable
+@dataclass(frozen=True)
+class Concrete:
+    xs: tuple[int, ...]
+    names: frozenset[str]
+    pairs: list[tuple[str, int]]
+
+
+def test_concretely_hinted_tuples_and_frozensets_encode_as_plain_lists():
+    value = Concrete((1, 2), frozenset({"a"}), [("b", 3)])
+    assert Serialization.encode(value, path) == {
+        "$type": "Concrete",
+        "xs": [1, 2],
+        "names": ["a"],
+        "pairs": [["b", 3]],
+    }
+    assert rt(value) == value
+
+
+@remotable
+@dataclass(frozen=True)
+class Box[K, V]:
+    loose: object
+    mapping: dict[K, V]
+
+
+def test_hint_less_tuples_and_frozensets_are_tagged_and_round_trip():
+    value = Box(((1, 2), frozenset({3})), {frozenset({"k"}): (4, 5), (6, 7): {8}})
+    assert Serialization.encode(value, path) == {
+        "$type": "Box",
+        "loose": {"$tuple": [{"$tuple": [1, 2]}, {"$frozenset": [3]}]},
+        "mapping": {
+            "$map": [
+                [{"$frozenset": ["k"]}, {"$tuple": [4, 5]}],
+                [{"$tuple": [6, 7]}, {"$frozenset": [8]}],
+            ]
+        },
+    }
+    back = rt(value)
+    assert back == value and hash(next(iter(back.mapping))) == hash(frozenset({"k"}))  # pyright: ignore
+
+
+def test_a_top_level_tuple_round_trips_as_a_tuple():
+    assert Serialization.encode((1, "a"), path) == {"$tuple": [1, "a"]}
+    assert rt((1, ("a", frozenset({2})))) == (1, ("a", frozenset({2})))
+
+
+@pytest.mark.parametrize("key", ["$tuple", "$frozenset"])
+def test_a_user_dict_key_tuple_or_frozenset_is_refused(key: str):
+    with pytest.raises(SerializationError):
+        Serialization.encode({key: []}, path)

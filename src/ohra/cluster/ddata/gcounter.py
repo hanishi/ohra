@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, override
 
 from ...remote import UniqueAddress
-from ...remote.serialization import remotable
+from ...remote.serialization import remotable, transient
 from .fast_merge import FastMerge
 from .key import Key
 from .replicated_data import (
@@ -37,7 +37,7 @@ class GCounter(
     empty: ClassVar[GCounter]
 
     state: dict[UniqueAddress, int] = field(default_factory=lambda: {})
-    delta: GCounter | None = field(default=None, compare=False, repr=False)
+    delta: GCounter | None = transient()
 
     @property
     def value(self) -> int:

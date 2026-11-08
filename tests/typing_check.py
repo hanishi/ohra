@@ -16,6 +16,7 @@ from ohra import (
     GCounter,
     GSet,
     MailboxSelector,
+    ORMap,
     ORSet,
     Routers,
     SelfUniqueAddress,
@@ -215,3 +216,4 @@ GSet[str]().add(1)  # type: ignore[arg-type]
 node = SelfUniqueAddress(UniqueAddress("localhost", 7354, 1, "Sys"))
 ORSet[str]().add(node, 1)  # type: ignore[arg-type]
 GCounter().merge(ORSet[str]())  # type: ignore[arg-type]
+ORMap[str, GCounter]().put(node, "k", 1)  # type: ignore[arg-type]

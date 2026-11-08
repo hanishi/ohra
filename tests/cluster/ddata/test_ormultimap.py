@@ -713,3 +713,16 @@ def test_have_unapply_extractor():
             raise AssertionError
     assert ORMultiMapKey("key") == ORMultiMapKey("key")
     assert ORMultiMapKey("key").with_id("k2") == ORMultiMapKey("k2")
+
+
+def test_a_removal_with_value_deltas_depends_on_the_merge_order():
+    # not in ORMultiMapSpec: Pekko's merge (ORMultiMap.scala:88-101) drops an empty tombstone whose
+    # key is gone, so merging the remover's state with its own past loses the removal
+    node3 = UniqueAddress("localhost", 7356, 3, "Sys")
+    common = ORMultiMap.empty_with_value_deltas._add_binding(node1, "k", "x").reset_delta()
+    b = common._remove_binding(node2, "k", "x").reset_delta()  # the last element: key removed
+    c = common._add_binding(node3, "k", "y").reset_delta()  # concurrently
+    assert b.merge(common) != b
+    assert b.merge(c).entries == c.merge(b).entries == {"k": s("y")}
+    assert common.merge(b.merge(c)).entries == {"k": s("y")}
+    assert common.merge(b).merge(c).entries == {"k": s("x", "y")}

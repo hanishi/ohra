@@ -92,6 +92,8 @@ CASES: list[Case] = [
     Case("LWWMap", LWWMap(), _lww_map),
     Case("PNCounterMap", PNCounterMap(), _pn_map),
     Case("ORMultiMap", ORMultiMap.empty, _multimap),
+    # not ORMultiMap.empty_with_value_deltas: its merge is not associative, as in Pekko; see
+    # test_ormultimap.py's test_a_removal_with_value_deltas_depends_on_the_merge_order
 ]
 
 

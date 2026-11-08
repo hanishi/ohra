@@ -3,8 +3,10 @@
 map's value.
 
 Note that on concurrent adds and removals for the same key (on the same set), removals can be
-lost. ``ORMultiMap.empty_with_value_deltas`` avoids that anomaly: it ships the deltas of the
-value sets and clears a set before removing its key.
+lost. ``ORMultiMap.empty_with_value_deltas`` ships the deltas of the value sets and clears a set
+before removing its key, keeping the empty set as a tombstone that a concurrent update merges
+with. A full-state merge still drops an empty tombstone whose key is gone, as Pekko's does, so
+there too a removal can be lost, depending on the order replicas merge in.
 
 Immutable: "modifying" methods return a new instance."""
 

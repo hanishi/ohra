@@ -142,3 +142,29 @@ def test_time_to_available_is_the_missing_tokens_over_the_rate():
 
 def test_time_to_available_for_a_frame_over_capacity_needs_one_token():
     assert TokenBucket(100, 100, 0, 0).time_to_available(0, 110) == pytest.approx(0.01)
+
+
+async def test_a_mode_replaced_while_the_loop_was_blocked_is_honoured():
+    # set_throttle(Blackhole) and the wait deadline both fall inside one blocked stretch
+    t = Throttler()
+    t.set_throttle("h", 1, Direction.SEND, TokenBucket(100, 100.0, time.monotonic_ns(), 0))
+    loop = asyncio.get_running_loop()
+    task = loop.create_task(t.admit("h", 1, Direction.SEND, 2))  # needs about 20ms
+    await asyncio.sleep(0)
+    loop.call_later(0.012, t.set_throttle, "h", 1, Direction.SEND, Blackhole())
+    loop.call_later(0.010, time.sleep, 0.06)
+    assert await task is False
+
+
+async def test_waiters_timing_out_together_do_not_both_spend_the_same_tokens():
+    t = Throttler()
+    t.set_throttle("h", 1, Direction.SEND, TokenBucket(2, 40.0, time.monotonic_ns(), 0))
+    loop = asyncio.get_running_loop()
+    tasks = [loop.create_task(t.admit("h", 1, Direction.SEND, 2)) for _ in range(2)]
+    await asyncio.sleep(0)
+    loop.call_later(0.010, time.sleep, 0.055)  # both deadlines pass inside one blocked stretch
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    blocked_until = time.monotonic()
+    assert len(done) == 1  # 2 tokens were spent, the other frame waits for 2 more
+    await asyncio.wait_for(next(iter(pending)), 1)
+    assert time.monotonic() >= blocked_until + 0.02

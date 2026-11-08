@@ -87,17 +87,21 @@ async def test_register_clients_and_remove_them(caplog: pytest.LogCaptureFixture
         b.remove(A)
         with caplog.at_level(logging.WARNING):
             b.remove(A)
-        assert [
+        warned = [
             r.getMessage() for r in caplog.records if r.getMessage().startswith("cannot remove")
         ]
+        assert len(warned) == 1
 
 
 async def test_register_clients_and_disconnect_them() -> None:
     async with with_controller(1) as b:
         await b.node_info(A)
         b.client_disconnected(B)
+        await asyncio.wait_for(b.enter_barrier(A, "alone"), 2)  # not in failed mode
         b.client_disconnected(A)
         assert b.get_nodes() == frozenset()
+        await b.node_info(C)
+        await asyncio.wait_for(b.enter_barrier(C, "alone"), 2)
 
 
 async def test_fail_entering_barrier_when_nobody_registered() -> None:
@@ -137,7 +141,7 @@ async def test_enter_barrier_with_leaving_node() -> None:
         barrier.remove(C)
         await asyncio.wait_for(b, 2)
         barrier.client_disconnected(C)
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(barrier.enter_barrier(B, "after"), 2)  # not in failed mode
         await settle(a)
 
 
@@ -243,8 +247,12 @@ async def test_timeout_within_the_shortest_timeout_if_the_new_timeout_is_shorter
         a = await enter(barrier, A, "bar22", 10.0)
         b = await enter(barrier, B, "bar22", 0.2)
         await asyncio.sleep(0.4)
-        assert isinstance(await error_of(a), BarrierTimeout)
-        assert isinstance(await error_of(b), BarrierTimeout)
+        err_a = await error_of(a)
+        assert isinstance(err_a, BarrierTimeout)
+        assert err_a == BarrierTimeout(
+            Data(frozenset({A, B, C}), "bar22", (B, A), err_a.data.deadline)
+        )
+        assert await error_of(b) == err_a
         with pytest.raises(FailedBarrier):
             await barrier.enter_barrier(C, "bar22")
 
@@ -252,10 +260,14 @@ async def test_timeout_within_the_shortest_timeout_if_the_new_timeout_is_shorter
 async def test_timeout_within_the_shortest_timeout_if_the_new_timeout_is_longer() -> None:
     async with with_controller(3) as barrier:
         await register(barrier, A, B, C)
-        a = await enter(barrier, A, "bar23", 0.2)
+        a = await enter(barrier, A, "bar23", 0.5)
         b = await enter(barrier, B, "bar23", 10.0)
-        await asyncio.sleep(0.4)
-        assert isinstance(await error_of(a), BarrierTimeout)
-        assert isinstance(await error_of(b), BarrierTimeout)
+        await asyncio.sleep(0.7)
+        err_a = await error_of(a)
+        assert isinstance(err_a, BarrierTimeout)
+        assert err_a == BarrierTimeout(
+            Data(frozenset({A, B, C}), "bar23", (B, A), err_a.data.deadline)
+        )
+        assert await error_of(b) == err_a
         with pytest.raises(FailedBarrier):
             await barrier.enter_barrier(C, "bar23")

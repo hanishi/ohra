@@ -14,6 +14,7 @@ from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
 from ohra.cluster.ddata.lww_register import LWWRegister
+from ohra.cluster.ddata.orset import ORSet
 from ohra.cluster.ddata.pncounter import PNCounter
 from ohra.cluster.ddata.replicated_data import ReplicatedData
 from ohra.cluster.ddata.version_vector import VersionVector
@@ -41,6 +42,11 @@ def _pn(rng: random.Random, node: UniqueAddress, s: PNCounter) -> PNCounter:
     return s._increment(node, n) if rng.random() < 0.5 else s._decrement(node, n)
 
 
+def _orset(rng: random.Random, node: UniqueAddress, s: ORSet[int]) -> ORSet[int]:
+    e = rng.randint(0, 5)
+    return s._add(node, e) if rng.random() < 0.5 else s._remove(node, e)
+
+
 CASES: list[Case] = [
     Case("GCounter", GCounter(), lambda rng, node, s: s._increment(node, rng.randint(1, 5))),
     Case("PNCounter", PNCounter(), _pn),
@@ -51,6 +57,7 @@ CASES: list[Case] = [
         LWWRegister._create(node1, 0, clock),
         lambda rng, node, s: s._with_value(node, rng.randint(0, 9), clock),
     ),
+    Case("ORSet", ORSet(), _orset),
     Case("VersionVector", VersionVector.empty, lambda rng, node, s: s._increment(node)),
 ]
 

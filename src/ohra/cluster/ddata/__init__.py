@@ -1,9 +1,9 @@
 """Pekko's Distributed Data: conflict-free replicated data types.
 
 This release has the data types and their building blocks: the ``ReplicatedData`` traits,
-``Key``, ``VersionVector``, the counters ``GCounter`` and ``PNCounter``, ``GSet``, ``Flag`` and
-``LWWRegister`` with its clocks. The ``Replicator`` that gossips them between nodes comes in a
-later release.
+``Key``, ``VersionVector``, the counters ``GCounter`` and ``PNCounter``, ``GSet``, ``ORSet``,
+``Flag`` and ``LWWRegister`` with its clocks. The ``Replicator`` that gossips them between
+nodes comes in a later release.
 """
 
 from dataclasses import dataclass
@@ -15,6 +15,7 @@ from .gcounter import GCounter, GCounterKey
 from .gset import GSet, GSetKey
 from .key import Key, UnspecificKey
 from .lww_register import Clock, LWWRegister, LWWRegisterKey, default_clock, reverse_clock
+from .orset import ORSet, ORSetKey
 from .pncounter import PNCounter, PNCounterKey
 from .replicated_data import (
     DeltaReplicatedData,
@@ -50,6 +51,8 @@ __all__ = [
     "LWWRegisterKey",
     "ManyVersionVector",
     "OneVersionVector",
+    "ORSet",
+    "ORSetKey",
     "PNCounter",
     "PNCounterKey",
     "RemovedNodePruning",

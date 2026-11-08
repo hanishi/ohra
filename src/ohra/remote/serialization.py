@@ -145,15 +145,9 @@ def _encode(value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any) 
     if isinstance(value, dict):
         items = list(cast(dict[object, object], value).items())
         kh, vh = _item_hints(hint)
-        if all(isinstance(k, str) for k, _ in items):
-            out: dict[str, Json] = {}
-            for k, v in items:
-                if k in _RESERVED:  # decode would read the dict as a ref, a dataclass or a tag
-                    raise SerializationError(
-                        f"dict key {k!r} is reserved for refs, manifests and tags"
-                    )
-                out[cast(str, k)] = _encode(v, ref_path, vh)
-            return out
+        # a reserved key as a JSON object would decode as a ref, a dataclass or a tag: use $map
+        if all(isinstance(k, str) and k not in _RESERVED for k, _ in items):
+            return {cast(str, k): _encode(v, ref_path, vh) for k, v in items}
         return {"$map": [[_encode(k, ref_path, kh), _encode(v, ref_path, vh)] for k, v in items]}
     manifest = _manifests.get(type(value))
     if manifest is None or not dataclasses.is_dataclass(value):

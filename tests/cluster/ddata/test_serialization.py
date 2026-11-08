@@ -1,30 +1,38 @@
 """Ported from Apache Pekko's protobuf/ReplicatedDataSerializerSpec, for the types of this release.
 
-The wire format is the JSON of ``@remotable``, not protobuf. The size bound of "serialize large
-GSet" is dropped: Pekko measures gzip, which comes with the Replicator.
+The wire format is the JSON of ``@remotable``, not protobuf. The size bounds of "serialize large
+GSet" and "serialize large ORSet" are dropped: Pekko measures gzip, which comes with the
+Replicator.
 """
 
 import json
 from dataclasses import dataclass
 from typing import Any
 
+from ohra import ActorSystem, Behavior, Behaviors, ask
 from ohra.cluster.ddata import (
     FlagKey,
     GCounterKey,
     GSetKey,
     LWWRegisterKey,
+    ORSetKey,
     PNCounterKey,
+    SelfUniqueAddress,
     UnspecificKey,
 )
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
 from ohra.cluster.ddata.lww_register import LWWRegister, default_clock
+from ohra.cluster.ddata.orset import ORSet
 from ohra.cluster.ddata.pncounter import PNCounter
 from ohra.cluster.ddata.version_vector import VersionVector
 from ohra.ref import ActorRef, FunctionRef
 from ohra.remote import UniqueAddress
 from ohra.remote.serialization import Serialization, remotable
+
+from ...test_serialization import A
+from ...util import eventually, free_port
 
 address1 = UniqueAddress("localhost", 7354, 1, "Sys")
 address2 = UniqueAddress("localhost", 7355, 2, "Sys")
@@ -87,6 +95,99 @@ def test_serialize_large_gset():
     for n in range(10000, 20000):
         large = large.reset_delta().add(str(n))
     check_serialization(large)
+
+
+def test_serialize_orset():
+    check_serialization(ORSet())
+    check_serialization(ORSet()._add(address1, "a"))
+    check_serialization(ORSet()._add(address1, "a")._add(address2, "a"))
+    check_serialization(ORSet()._add(address1, "a")._remove(address2, "a"))
+    check_serialization(ORSet()._add(address1, "a")._add(address2, "b")._remove(address1, "a"))
+    check_serialization(ORSet()._add(address1, 1)._add(address2, 2))
+    check_serialization(
+        ORSet()._add(address1, "a")._add(address2, 2)._add(address3, 3)._add(address3, ref3)
+    )
+
+    s1 = ORSet()._add(address1, "a")._add(address2, "b")
+    s2 = ORSet()._add(address2, "b")._add(address1, "a")
+    check_same_content(s1.merge(s2), s2.merge(s1))
+
+    s3 = ORSet()._add(address1, "a")._add(address2, 17)._remove(address3, 17)
+    s4 = ORSet()._add(address2, 17)._remove(address3, 17)._add(address1, "a")
+    check_same_content(s3.merge(s4), s4.merge(s3))
+
+    # ORSet with ActorRef
+    check_serialization(ORSet()._add(address1, ref1))
+    check_serialization(ORSet()._add(address1, ref1)._add(address1, ref2))
+    check_serialization(
+        ORSet()._add(address1, ref1)._add(address1, "a")._add(address2, ref2)._add(address2, "b")
+    )
+
+    s5 = ORSet()._add(address1, "a")._add(address2, ref1)
+    s6 = ORSet()._add(address2, ref1)._add(address1, "a")
+    check_same_content(s5.merge(s6), s6.merge(s5))
+    check_serialization(ORSetKey("id"))
+
+
+@remotable
+@dataclass(frozen=True)
+class EchoRequest:
+    reply_to: ActorRef[str]
+
+
+@Behaviors.receive_message
+def echo(msg: EchoRequest) -> Behavior[EchoRequest]:
+    msg.reply_to.tell("pong")
+    return Behaviors.same
+
+
+async def test_serialize_orset_with_actorref_message_sent_between_two_systems():
+    received: list[ORSet[ActorRef[Any]]] = []
+
+    @Behaviors.receive_message
+    def collect(msg: ORSet[ActorRef[Any]]) -> Behavior[ORSet[ActorRef[Any]]]:
+        received.append(msg)
+        return Behaviors.same
+
+    async with (
+        ActorSystem(echo, "a", address=("127.0.0.1", free_port())) as a,
+        ActorSystem(collect, "b", address=("127.0.0.1", free_port())) as b,
+    ):
+        assert a.address is not None
+        node = SelfUniqueAddress(a.address)
+        to_b = a.resolve(b.path)
+        to_b.tell(ORSet[ActorRef[Any]]().add(node, a).add(node, to_b))
+        await eventually(lambda: bool(received))
+        assert received[0].elements == {b.resolve(a.path), b.resolve(b.path)}
+        (echo1,) = (r for r in received[0].elements if r.path == a.path)
+        assert await ask(echo1, EchoRequest, timeout=1) == "pong"
+
+
+def test_serialize_orset_delta():
+    check_serialization(ORSet()._add(address1, "a").delta)
+    check_serialization(ORSet()._add(address1, "a").reset_delta()._remove(address2, "a").delta)
+    check_serialization(ORSet()._add(address1, "a")._remove(address2, "a").delta)
+    check_serialization(ORSet()._add(address1, "a").reset_delta()._clear().delta)
+    check_serialization(ORSet()._add(address1, "a")._clear().delta)
+
+
+def test_serialize_large_orset():
+    large = ORSet[str]()
+    for n in range(10000, 20000):
+        large = large.reset_delta()._add((address1, address2, address3)[n % 3], str(n))
+    check_serialization(large)
+
+
+def test_orset_with_tuple_and_dataclass_elements_merges_after_a_round_trip():
+    s = ORSet()._add(address1, ("cart", 42))._add(address2, A(3))
+    merged = check_serialization(s).merge(s)
+    assert merged.elements == {("cart", 42), A(3)}
+    assert merged.size == 2
+
+
+def test_orset_with_a_reserved_string_element_round_trips():
+    s = ORSet()._add(address1, "$type")._add(address1, "$ref")._add(address2, "tag")
+    assert check_serialization(s).elements == {"$type", "$ref", "tag"}
 
 
 def test_serialize_flag():

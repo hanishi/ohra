@@ -14,9 +14,13 @@ import pytest
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
+from ohra.cluster.ddata.lww_map import LWWMap
 from ohra.cluster.ddata.lww_register import LWWRegister
+from ohra.cluster.ddata.ormap import ORMap
+from ohra.cluster.ddata.ormultimap import ORMultiMap
 from ohra.cluster.ddata.orset import ORSet
 from ohra.cluster.ddata.pncounter import PNCounter
+from ohra.cluster.ddata.pncounter_map import PNCounterMap
 from ohra.cluster.ddata.replicated_data import DeltaReplicatedData, ReplicatedData
 from ohra.remote import UniqueAddress
 from ohra.remote.serialization import Serialization
@@ -109,6 +113,64 @@ def _orset(rng: random.Random, node: UniqueAddress, s: ORSet[int]) -> ORSet[int]
     return s._add(node, e) if rng.random() < 0.5 else s._remove(node, e)
 
 
+# The map checks are per key, against the value type's check. The random map ops only update or
+# put: a remove's outcome depends on what it saw, as ORSet's does.
+
+
+def _per_key(log: list[Any]) -> dict[Any, list[tuple[Any, Any]]]:
+    """Each op's key, from the op alone, with the op's log entry."""
+    by_key: dict[Any, list[tuple[Any, Any]]] = {}
+    for alone, after in log:
+        (key,) = alone.entries
+        by_key.setdefault(key, []).append((alone, after))
+    return by_key
+
+
+def _check_ormap_counters(value: Any, log: list[Any]) -> None:
+    by_key = _per_key(log)
+    assert value.entries.keys() == by_key.keys()
+    for key, entries in by_key.items():
+        _check_counter(value.entries[key], [(a.entries[key], b) for a, b in entries])
+
+
+def _check_pncounter_map(value: Any, log: list[Any]) -> None:
+    by_key = _per_key(log)
+    assert value.entries == {k: sum(a.entries[k] for a, _ in e) for k, e in by_key.items()}
+
+
+def _check_lww_map(value: Any, log: list[Any]) -> None:
+    by_key = _per_key(log)
+    assert value.entries.keys() == by_key.keys()
+    for key, entries in by_key.items():
+        register = value.underlying.entries[key]
+        _check_lww(register, [(None, b.underlying.entries[key]) for _, b in entries])
+
+
+def _check_ormultimap(value: Any, log: list[Any]) -> None:
+    by_key = _per_key(log)
+    assert value.entries == {
+        k: frozenset().union(*(a.entries[k] for a, _ in e)) for k, e in by_key.items()
+    }
+
+
+def _ormap(rng: random.Random, node: UniqueAddress, s: ORMap[int, GCounter]) -> Any:
+    k, n = rng.randint(0, 5), rng.randint(1, 5)
+    return s._update(node, k, GCounter(), lambda c: c._increment(node, n))
+
+
+def _pncounter_map(rng: random.Random, node: UniqueAddress, s: PNCounterMap[int]) -> Any:
+    k, n = rng.randint(0, 5), rng.randint(1, 5)
+    return s._increment(node, k, n) if rng.random() < 0.5 else s._decrement(node, k, n)
+
+
+def _lww_map(rng: random.Random, node: UniqueAddress, s: LWWMap[int, int]) -> Any:
+    return s._put(node, rng.randint(0, 5), rng.randint(0, 9), clock)
+
+
+def _ormultimap(rng: random.Random, node: UniqueAddress, s: ORMultiMap[int, int]) -> Any:
+    return s._add_binding(node, rng.randint(0, 5), rng.randint(0, 9))
+
+
 node1 = UniqueAddress("localhost", 7354, 1, "Sys")
 
 
@@ -154,6 +216,17 @@ CONVERGENCE: list[ConvergenceCase] = [
         _check_lww,
     ),
     ConvergenceCase("ORSet", ORSet(), _orset, True, _check_orset),
+    ConvergenceCase("ORMap", ORMap(), _ormap, True, _check_ormap_counters),
+    ConvergenceCase("PNCounterMap", PNCounterMap(), _pncounter_map, True, _check_pncounter_map),
+    ConvergenceCase("LWWMap", LWWMap(), _lww_map, True, _check_lww_map),
+    ConvergenceCase("ORMultiMap", ORMultiMap.empty, _ormultimap, True, _check_ormultimap),
+    ConvergenceCase(
+        "ORMultiMapWithValueDeltas",
+        ORMultiMap.empty_with_value_deltas,
+        _ormultimap,
+        True,
+        _check_ormultimap,
+    ),
 ]
 
 
@@ -324,4 +397,25 @@ def test_orset_add_wins_over_a_concurrent_remove_through_deltas():
     r.receive(0, re_added)
     assert r.stats["applied"] == 3  # every delta passed the causal check
     assert r.states[0].elements == r.states[1].elements == {"x"}
+    assert r.states[0] == r.states[1]
+
+
+def test_ormap_update_wins_over_a_concurrent_remove_of_the_key():
+    r = Replicas(next(c for c in CONVERGENCE if c.name == "ORMap"), 2)
+    n0, n1 = r.nodes
+
+    def inc(node: UniqueAddress, n: int) -> Callable[[GCounter], GCounter]:
+        return lambda c: c._increment(node, n)
+
+    put = r.update(0, r.states[0]._update(n0, "a", GCounter(), inc(n0, 1)))
+    assert put is not None
+    r.receive(1, put)
+    assert r.states[1].entries["a"].value == 1
+    # split: 0 removes "a" while 1 updates it
+    r.update(0, r.states[0]._remove(n0, "a"))
+    r.update(1, r.states[1]._update(n1, "a", GCounter(), inc(n1, 3)))
+    assert not r.states[0].contains("a") and r.states[1].entries["a"].value == 4
+    r.exchange()
+    # replica 1's counter, with the increment the remove had seen: an update wins, as an add does
+    assert r.states[0].entries["a"].value == r.states[1].entries["a"].value == 4
     assert r.states[0] == r.states[1]

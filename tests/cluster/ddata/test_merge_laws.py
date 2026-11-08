@@ -1,6 +1,6 @@
 """Merge laws every ReplicatedData must keep: merge is commutative, associative and idempotent.
 
-Not a Pekko spec. Later PRs add a Case per type.
+Not a Pekko spec.
 """
 
 import json
@@ -13,9 +13,13 @@ import pytest
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
+from ohra.cluster.ddata.lww_map import LWWMap
 from ohra.cluster.ddata.lww_register import LWWRegister
+from ohra.cluster.ddata.ormap import ORMap
+from ohra.cluster.ddata.ormultimap import ORMultiMap
 from ohra.cluster.ddata.orset import ORSet
 from ohra.cluster.ddata.pncounter import PNCounter
+from ohra.cluster.ddata.pncounter_map import PNCounterMap
 from ohra.cluster.ddata.replicated_data import ReplicatedData
 from ohra.cluster.ddata.version_vector import VersionVector
 from ohra.remote import UniqueAddress
@@ -47,6 +51,31 @@ def _orset(rng: random.Random, node: UniqueAddress, s: ORSet[int]) -> ORSet[int]
     return s._add(node, e) if rng.random() < 0.5 else s._remove(node, e)
 
 
+def _ormap(rng: random.Random, node: UniqueAddress, s: ORMap[int, GCounter]) -> Any:
+    k = rng.randint(0, 3)
+    if rng.random() < 0.7:
+        return s._update(node, k, GCounter(), lambda c: c._increment(node, rng.randint(1, 5)))
+    return s._remove(node, k)
+
+
+def _lww_map(rng: random.Random, node: UniqueAddress, s: LWWMap[int, int]) -> Any:
+    k = rng.randint(0, 3)
+    return s._put(node, k, rng.randint(0, 9), clock) if rng.random() < 0.7 else s._remove(node, k)
+
+
+def _pn_map(rng: random.Random, node: UniqueAddress, s: PNCounterMap[int]) -> Any:
+    k, n = rng.randint(0, 3), rng.randint(1, 5)
+    r = rng.random()
+    if r < 0.4:
+        return s._increment(node, k, n)
+    return s._decrement(node, k, n) if r < 0.7 else s._remove(node, k)
+
+
+def _multimap(rng: random.Random, node: UniqueAddress, s: ORMultiMap[int, int]) -> Any:
+    k, e = rng.randint(0, 3), rng.randint(0, 3)
+    return s._add_binding(node, k, e) if rng.random() < 0.6 else s._remove_binding(node, k, e)
+
+
 CASES: list[Case] = [
     Case("GCounter", GCounter(), lambda rng, node, s: s._increment(node, rng.randint(1, 5))),
     Case("PNCounter", PNCounter(), _pn),
@@ -59,6 +88,12 @@ CASES: list[Case] = [
     ),
     Case("ORSet", ORSet(), _orset),
     Case("VersionVector", VersionVector.empty, lambda rng, node, s: s._increment(node)),
+    Case("ORMap", ORMap(), _ormap),
+    Case("LWWMap", LWWMap(), _lww_map),
+    Case("PNCounterMap", PNCounterMap(), _pn_map),
+    Case("ORMultiMap", ORMultiMap.empty, _multimap),
+    # not ORMultiMap.empty_with_value_deltas: its merge is not associative, as in Pekko; see
+    # test_ormultimap.py's test_a_removal_with_value_deltas_depends_on_the_merge_order
 ]
 
 

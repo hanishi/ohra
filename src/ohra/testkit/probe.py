@@ -9,16 +9,21 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, Protocol, cast
 
 from ..behavior import Behavior, Behaviors, MaybeAwaitable
 from ..context import ActorContext
 from ..ref import ActorRef
 from ..signals import Signal, Terminated
-from .settings import seconds
+from ..system import ActorSystem
+from .settings import TestKitSettings, seconds
 
-if TYPE_CHECKING:
-    from .actor_testkit import ActorTestKit
+
+class _ProbeHost(Protocol):
+    """What a probe needs of its test kit: ``ActorTestKit`` or ``MultiNodeSpec``."""
+
+    settings: TestKitSettings
+    system: ActorSystem[Any]
 
 
 # --- FishingOutcome -------------------------------------------------------------------
@@ -134,7 +139,7 @@ class TestProbe[M]:
 
     __test__ = False  # not a pytest test class
 
-    def __init__(self, testkit: ActorTestKit, name: str | None = None) -> None:
+    def __init__(self, testkit: _ProbeHost, name: str | None = None) -> None:
         self.settings = testkit.settings
         self._queue: asyncio.Queue[M] = asyncio.Queue()
         self._terminations: asyncio.Queue[Terminated] = asyncio.Queue()

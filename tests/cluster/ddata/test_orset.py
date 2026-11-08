@@ -1,4 +1,7 @@
-"""Ported from Apache Pekko's ORSetSpec."""
+"""Ported from Apache Pekko's ORSetSpec.
+
+The ``test_prune_...`` and ``test_pruning_cleanup_...`` tests are ohra's own: ORSetSpec has no
+case for the pruning methods."""
 
 import json
 
@@ -672,3 +675,52 @@ def test_merge_with_its_own_descendant_equals_a_full_merge():
     full = rt(a).merge(rt(b))  # a new pair has new timestamps
     assert b._ancestor is a
     assert b.merge(a) is b and b == full
+
+
+# Pruning: not in ORSetSpec
+
+
+def concurrent_adds() -> ORSet[str]:
+    # "a" has a dot from each node, "b" only node2's
+    return ORSet[str]()._add(node1, "a").merge(ORSet[str]()._add(node2, "a")._add(node2, "b"))
+
+
+def test_prune_collapses_the_removed_nodes_dots_into_the_target():
+    s = concurrent_adds()
+    assert s.need_pruning_from(node2)
+
+    pruned = s.prune(node2, node1)
+
+    assert pruned.elements == {"a", "b"}
+    assert not pruned.need_pruning_from(node2)
+    assert pruned.modified_by_nodes == {node1}
+    for dot in pruned.elements_map.values():
+        # each element is re-added on node1, so its dot is node1's, seen by the vvector
+        assert dot.modified_by_nodes == {node1}
+        assert dot.version_at(node1) <= pruned.vvector.version_at(node1)
+
+
+def test_prune_of_a_node_with_no_dots_only_prunes_the_vvector():
+    s = ORSet[str]()._add(node2, "x")._remove(node2, "x")._add(node1, "a")
+    assert s.elements_map["a"].modified_by_nodes == {node1}
+
+    pruned = s.prune(node2, node1)
+
+    assert pruned.elements_map == s.elements_map
+    assert pruned.modified_by_nodes == {node1}
+    assert not pruned.need_pruning_from(node2)
+
+
+def test_pruning_cleanup_drops_the_removed_node_from_dots_and_vvector():
+    s = concurrent_adds()
+
+    cleaned = s.pruning_cleanup(node2)
+
+    # as Pekko: "b" stays, with an empty dot
+    assert cleaned.elements == {"a", "b"}
+    assert cleaned.elements_map["a"] == OneVersionVector(
+        node1, s.elements_map["a"].version_at(node1)
+    )
+    assert cleaned.elements_map["b"] == VersionVector.empty
+    assert not cleaned.need_pruning_from(node2)
+    assert cleaned.modified_by_nodes == {node1}

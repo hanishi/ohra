@@ -345,6 +345,7 @@ class Remoting:
         """The test transport: set by the multi-node testkit's `test_transport(on=True)`."""
         self.temp = TempRefs(address.root)
         self._associations: dict[tuple[str, int], _Association] = {}
+        self._inbound: dict[tuple[str, int], set[asyncio.StreamWriter]] = {}
         self._peers: dict[tuple[str, int], int] = {}  # last uid seen per peer address
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -493,6 +494,8 @@ class Remoting:
                         host, port = address.get("host"), address.get("port")
                         if isinstance(host, str) and isinstance(port, int):
                             peer = (host, port)
+                            if writer is not None:
+                                self._inbound.setdefault(peer, set()).add(writer)
                 elif (
                     self.throttler is not None
                     and peer is not None
@@ -504,6 +507,34 @@ class Remoting:
         # json.loads raises RecursionError, not ValueError, on a frame nested too deep
         except (ValueError, RecursionError, OSError) as e:
             _log.warning("closing connection: %s", e)
+        finally:
+            if peer is not None and writer is not None:
+                writers = self._inbound.get(peer)
+                if writers is not None:
+                    writers.discard(writer)
+                    if not writers:
+                        del self._inbound[peer]
+
+    async def disconnect(self, host: str, port: int, abort: bool = False) -> None:
+        """Closes the association to (host, port) and every connection accepted from it, by
+        abort or gracefully. The next send to the peer opens a new association."""
+        key = (host, port)
+        association = self._associations.get(key)
+        writers = list(self._inbound.get(key, ()))
+        if association is not None and association.writer is None:
+            association.task.cancel()  # still connecting
+        for writer in [
+            *writers,
+            *([association.writer] if association and association.writer else []),
+        ]:
+            if abort:
+                writer.transport.abort()
+            writer.close()
+        if association is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await association.task
+        while self._inbound.get(key):
+            await asyncio.sleep(0)
 
     def _handle(self, frame: Json) -> None:
         if not isinstance(frame, dict):

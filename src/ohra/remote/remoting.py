@@ -531,11 +531,27 @@ class Remoting:
             if abort:
                 writer.transport.abort()
             writer.close()
+        try:
+            async with asyncio.timeout(SHUTDOWN_FLUSH_TIMEOUT):
+                await self._await_gone(key, association, writers)
+        except TimeoutError:
+            for writer in writers:  # a slow reader never takes the unflushed bytes
+                if writer in self._inbound.get(key, ()):
+                    writer.transport.abort()
+            if association is not None and association.writer is not None:
+                association.writer.transport.abort()
+            await self._await_gone(key, association, writers)
+
+    async def _await_gone(
+        self,
+        key: tuple[str, int],
+        association: _Association | None,
+        writers: list[asyncio.StreamWriter],
+    ) -> None:
         if association is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await association.task
+            await asyncio.wait([association.task])  # not await: that would eat our cancellation
         while any(w in self._inbound.get(key, ()) for w in writers):
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
 
     def _handle(self, frame: Json) -> None:
         if not isinstance(frame, dict):

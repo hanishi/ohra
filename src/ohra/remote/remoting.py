@@ -517,7 +517,8 @@ class Remoting:
 
     async def disconnect(self, host: str, port: int, abort: bool = False) -> None:
         """Closes the association to (host, port) and every connection accepted from it, by
-        abort or gracefully. The next send to the peer opens a new association."""
+        abort or gracefully. It returns once the connections it closed are gone; a new connection
+        the peer opens afterwards is allowed. The next send to the peer opens a new association."""
         key = (host, port)
         association = self._associations.get(key)
         writers = list(self._inbound.get(key, ()))
@@ -533,7 +534,7 @@ class Remoting:
         if association is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await association.task
-        while self._inbound.get(key):
+        while any(w in self._inbound.get(key, ()) for w in writers):
             await asyncio.sleep(0)
 
     def _handle(self, frame: Json) -> None:

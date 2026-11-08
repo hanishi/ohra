@@ -10,6 +10,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+import pytest
+
 from ohra import (
     ActorRef,
     ActorSystem,
@@ -20,7 +22,7 @@ from ohra import (
     remotable,
 )
 from ohra.ref import FunctionRef
-from ohra.remote import Direction
+from ohra.remote import Direction, remoting
 from ohra.remote.throttler import Blackhole, Throttler, TokenBucket, Unthrottled
 
 from .util import eventually, free_port
@@ -207,3 +209,33 @@ async def test_disconnect_from_an_unknown_peer_returns():
     async with pair() as p:
         assert p.a.remoting is not None
         await p.a.remoting.disconnect("127.0.0.1", 1)
+
+
+async def test_disconnect_returns_while_the_peer_has_reconnected(monkeypatch: pytest.MonkeyPatch):
+    # the peer opens a new connection while disconnect runs and keeps it open: not to be waited on
+    real_close = remoting._close  # pyright: ignore[reportPrivateUsage]
+
+    async def slow_close(writer: asyncio.StreamWriter) -> None:
+        await asyncio.sleep(0.2)  # the window in which the peer reconnects
+        await real_close(writer)
+
+    monkeypatch.setattr(remoting, "_close", slow_close)
+    async with pair() as p:
+        assert p.a.remoting is not None and p.a.address is not None and p.b.remoting is not None
+        key = ("127.0.0.1", p.b_port)
+        p.send("one")
+        await eventually(lambda: key in p.a.remoting._inbound)  # pyright: ignore[reportPrivateUsage]
+        old = set(p.a.remoting._inbound[key])  # pyright: ignore[reportPrivateUsage]
+        call = asyncio.get_running_loop().create_task(p.a.remoting.disconnect(*key))
+        _reader, writer = await asyncio.open_connection("127.0.0.1", p.a.address.port)
+        try:
+            writer.write(p.b.remoting.hello())
+            async with asyncio.timeout(5):
+                await call
+            await eventually(lambda: len(p.a.remoting._inbound.get(key, ())) == 1)  # pyright: ignore[reportPrivateUsage]
+            assert not old & p.a.remoting._inbound[key]  # pyright: ignore[reportPrivateUsage]
+        finally:
+            call.cancel()
+            await asyncio.gather(call, return_exceptions=True)
+            writer.close()
+            await writer.wait_closed()

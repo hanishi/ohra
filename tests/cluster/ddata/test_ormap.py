@@ -792,6 +792,13 @@ def test_update_deltas_of_a_counter_value_do_not_double_count():
     assert replica.entries["a"].value == 2 and m2.entries["a"].value == 2
 
 
+def test_an_update_delta_carries_only_the_new_part_of_the_value():
+    # a counter's delta is idempotent, so a missed reset_delta shows only in a set's delta
+    m1 = ORMap[str, GSet[str]]()._update(node1, "a", GSet(), lambda s: s.add("A"), True)
+    m2 = m1.reset_delta()._update(node1, "a", GSet(), lambda s: s.add("B"), True)
+    assert delta(m2).values == {"a": GSet(frozenset({"B"}))}
+
+
 # Pruning: not in ORMapSpec
 
 

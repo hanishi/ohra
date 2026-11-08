@@ -135,10 +135,15 @@ async def test_a_blackhole_set_before_any_connection_still_connects():
         p.send("first")
         await asyncio.sleep(0.3)
         assert p.seen_on_b == [] and p.replies == []
+        key = ("127.0.0.1", p.b_port)
+        association = p.a.remoting._associations[key]  # pyright: ignore[reportPrivateUsage]
+        writer = association.writer
+        assert writer is not None
         p.throttler.set_throttle("127.0.0.1", p.b_port, Direction.BOTH, Unthrottled())
         p.send("second")
         await eventually(lambda: p.replies == ["second"])
-        assert len(p.a.remoting._associations) == 1  # pyright: ignore[reportPrivateUsage]
+        assert p.a.remoting._associations[key] is association  # pyright: ignore[reportPrivateUsage]
+        assert association.writer is writer
 
 
 async def test_frames_waiting_under_a_slow_bucket_are_released_in_order():
@@ -153,7 +158,7 @@ async def test_frames_waiting_under_a_slow_bucket_are_released_in_order():
         for i in "12345":
             p.send(i)
         await asyncio.sleep(0.1)
-        assert len(p.replies) < 5
+        assert p.replies == []
         p.throttler.set_throttle("127.0.0.1", p.b_port, Direction.SEND, Unthrottled())
         await eventually(lambda: p.replies == list("12345"))
 
@@ -239,3 +244,23 @@ async def test_disconnect_returns_while_the_peer_has_reconnected(monkeypatch: py
             await asyncio.gather(call, return_exceptions=True)
             writer.close()
             await writer.wait_closed()
+
+
+async def test_cancelling_disconnect_cancels_its_caller(monkeypatch: pytest.MonkeyPatch):
+    real_close = remoting._close  # pyright: ignore[reportPrivateUsage]
+
+    async def slow_close(writer: asyncio.StreamWriter) -> None:
+        await asyncio.sleep(0.5)
+        await real_close(writer)
+
+    monkeypatch.setattr(remoting, "_close", slow_close)
+    async with pair() as p:
+        assert p.a.remoting is not None
+        key = ("127.0.0.1", p.b_port)
+        p.send("one")
+        await eventually(lambda: p.replies == ["one"])
+        call = asyncio.get_running_loop().create_task(p.a.remoting.disconnect(*key))
+        await asyncio.sleep(0.05)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call

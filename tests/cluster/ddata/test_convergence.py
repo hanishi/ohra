@@ -15,6 +15,7 @@ from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
 from ohra.cluster.ddata.lww_register import LWWRegister
+from ohra.cluster.ddata.orset import ORSet
 from ohra.cluster.ddata.pncounter import PNCounter
 from ohra.cluster.ddata.replicated_data import DeltaReplicatedData, ReplicatedData
 from ohra.remote import UniqueAddress
@@ -97,6 +98,17 @@ def _check_lww(value: Any, log: list[Any]) -> None:
     assert (value.timestamp, value.updated_by, value.value) == (-best[0], best[1], best[2])
 
 
+def _check_orset(value: Any, log: list[Any]) -> None:
+    # Which element survives depends on what each remove saw; every replica being equal is the
+    # check. A removed element is never resurrected out of nothing:
+    assert value.elements <= frozenset().union(*(alone.elements for alone, _ in log))
+
+
+def _orset(rng: random.Random, node: UniqueAddress, s: ORSet[int]) -> ORSet[int]:
+    e = rng.randint(0, 5)
+    return s._add(node, e) if rng.random() < 0.5 else s._remove(node, e)
+
+
 node1 = UniqueAddress("localhost", 7354, 1, "Sys")
 
 
@@ -141,7 +153,72 @@ CONVERGENCE: list[ConvergenceCase] = [
         False,
         _check_lww,
     ),
+    ConvergenceCase("ORSet", ORSet(), _orset, True, _check_orset),
 ]
+
+
+class Replicas:
+    """The replicas of one case and their wire format. ``receive`` applies a full state, or a
+    delta: in sequence per sender when the case is causal."""
+
+    def __init__(self, case: ConvergenceCase, n: int, stats: dict[str, int] | None = None) -> None:
+        self.case = case
+        self.nodes = [UniqueAddress("localhost", 7354 + i, i + 1, "Sys") for i in range(n)]
+        self.states: list[Any] = [case.empty] * n
+        self.stats = {} if stats is None else stats
+        self.stats.setdefault("sent", 0)
+        self.stats.setdefault("applied", 0)
+        self.has_deltas = isinstance(case.empty, DeltaReplicatedData)
+        self.seqs = [0] * n  # causal: the last delta number each replica sent
+        self.last_applied = [[0] * n for _ in range(n)]  # causal: [receiver][sender]
+
+    def pack(self, src: int, is_delta: bool, v: Any) -> str:
+        return json.dumps(
+            {
+                "src": src,
+                "seq": self.seqs[src],
+                "delta": is_delta,
+                "v": Serialization.encode(v, _no_ref),
+            }
+        )
+
+    def full_state(self, src: int) -> str:
+        return self.pack(src, False, self.states[src])
+
+    def update(self, i: int, after: Any) -> str | None:
+        """Replica ``i`` takes ``after``. Returns the payload of its delta, if any.
+
+        Like the Replicator, which takes the delta out at update time: it goes to every peer,
+        then the sender resets. A delta left on the state would be dropped by the next incoming
+        merge, while the sequence numbers ran on."""
+        self.states[i] = after
+        if not self.has_deltas or after.delta is None:
+            return None
+        self.seqs[i] += 1
+        self.states[i] = after.reset_delta()
+        return self.pack(i, True, after.delta)
+
+    def receive(self, dst: int, payload: str) -> None:
+        m = json.loads(payload)
+        v = Serialization.decode(m["v"], _no_ref)
+        last = self.last_applied[dst]
+        if not m["delta"]:
+            self.states[dst] = self.states[dst].merge(v)
+            # A full state holds every delta its sender has sent so far.
+            last[m["src"]] = max(last[m["src"]], m["seq"])
+        elif not self.case.causal or m["seq"] == last[m["src"]] + 1:
+            # ponytail: stands in for the Replicator's causal delivery, not a copy of it
+            last[m["src"]] = m["seq"]
+            self.stats["applied"] += 1
+            self.states[dst] = self.states[dst].merge_delta(v)
+
+    def exchange(self) -> None:
+        """Everyone's full state reaches everyone, with no faults."""
+        payloads = [self.full_state(i) for i in range(len(self.states))]
+        for i, payload in enumerate(payloads):
+            for j in range(len(self.states)):
+                if i != j:
+                    self.receive(j, payload)
 
 
 def run(
@@ -149,34 +226,9 @@ def run(
 ) -> tuple[list[Any], list[Any]]:
     rng = random.Random(seed)
     n = rng.randint(3, 5)
-    nodes = [UniqueAddress("localhost", 7354 + i, i + 1, "Sys") for i in range(n)]
-    states: list[Any] = [case.empty] * n
+    r = Replicas(case, n, stats)
     net = SimNetwork(rng, n)
     log: list[Any] = []
-    stats = {} if stats is None else stats
-    stats.setdefault("sent", 0)
-    stats.setdefault("applied", 0)
-    has_deltas = isinstance(case.empty, DeltaReplicatedData)
-    seqs = [0] * n  # causal: the last delta number each replica sent
-    last_applied = [[0] * n for _ in range(n)]  # causal: [receiver][sender]
-
-    def pack(src: int, seq: int, is_delta: bool, v: Any) -> str:
-        return json.dumps(
-            {"src": src, "seq": seq, "delta": is_delta, "v": Serialization.encode(v, _no_ref)}
-        )
-
-    def receive(dst: int, payload: str) -> None:
-        m = json.loads(payload)
-        v = Serialization.decode(m["v"], _no_ref)
-        if not m["delta"]:
-            states[dst] = states[dst].merge(v)
-            # A full state holds every delta its sender has sent so far.
-            last_applied[dst][m["src"]] = max(last_applied[dst][m["src"]], m["seq"])
-        elif not case.causal or m["seq"] == last_applied[dst][m["src"]] + 1:
-            # ponytail: stands in for the Replicator's causal delivery, not a copy of it
-            last_applied[dst][m["src"]] = m["seq"]
-            stats["applied"] += 1
-            states[dst] = states[dst].merge_delta(v)
 
     for tick in range(TICKS):
         if tick == SPLIT_AT:
@@ -184,35 +236,24 @@ def run(
         if tick == HEAL_AT:
             net.heal()
         for src, dst, payload in net.deliver():
-            receive(dst, payload)
+            r.receive(dst, payload)
         for i in range(n):
             if rng.random() < 0.5:
                 op_seed = rng.getrandbits(32)
-                after = case.op(random.Random(op_seed), nodes[i], states[i])
-                log.append((case.op(random.Random(op_seed), nodes[i], case.empty), after))
-                states[i] = after
-                # Like the Replicator, which takes the delta out at update time: it goes to
-                # every peer, then the sender resets. A delta left on the state would be
-                # dropped by the next incoming merge, while the sequence numbers ran on.
-                if has_deltas and after.delta is not None:
-                    seqs[i] += 1
-                    payload = pack(i, seqs[i], True, after.delta)
+                after = case.op(random.Random(op_seed), r.nodes[i], r.states[i])
+                log.append((case.op(random.Random(op_seed), r.nodes[i], case.empty), after))
+                payload = r.update(i, after)
+                if payload is not None:
                     for dst in range(n):
                         if dst != i:
-                            stats["sent"] += 1
+                            r.stats["sent"] += 1
                             net.send(i, dst, payload)
-                    states[i] = after.reset_delta()
-            if not has_deltas or rng.random() < 0.3:
+            if not r.has_deltas or rng.random() < 0.3:
                 dst = rng.choice([j for j in range(n) if j != i])
-                net.send(i, dst, pack(i, seqs[i], False, states[i]))
+                net.send(i, dst, r.full_state(i))
 
-    # The final exchange: everyone's full state reaches everyone, with no faults.
-    payloads = [pack(i, seqs[i], False, states[i]) for i in range(n)]
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                receive(j, payloads[i])
-    return states, log
+    r.exchange()
+    return r.states, log
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -250,3 +291,37 @@ def test_every_ops_delta_is_sent_to_every_peer(case: ConvergenceCase):
         states, log = run(case, seed, stats)
         with_delta = sum(after.delta is not None for _, after in log)
         assert with_delta == stats["sent"] / (len(states) - 1), f"seed {seed}"
+
+
+ORSET = next(c for c in CONVERGENCE if c.name == "ORSet")
+
+
+def _add_and_remove_x_concurrently() -> tuple[Replicas, str, str]:
+    """Replicas 0 and 1 hold {"x"}; then, split, 0 removes "x" while 1 adds it again. Returns
+    the replicas and the two queued deltas: 0's remove and 1's add."""
+    r = Replicas(ORSET, 2)
+    added = r.update(0, r.states[0]._add(r.nodes[0], "x"))
+    assert added is not None
+    r.receive(1, added)
+    assert r.states[0].elements == r.states[1].elements == {"x"}
+    removed = r.update(0, r.states[0]._remove(r.nodes[0], "x"))
+    re_added = r.update(1, r.states[1]._add(r.nodes[1], "x"))
+    assert removed is not None and re_added is not None
+    assert r.states[0].elements == set() and r.states[1].elements == {"x"}
+    return r, removed, re_added
+
+
+def test_orset_add_wins_over_a_concurrent_remove():
+    r, _, _ = _add_and_remove_x_concurrently()
+    r.exchange()
+    assert r.states[0].elements == r.states[1].elements == {"x"}
+    assert r.states[0] == r.states[1]
+
+
+def test_orset_add_wins_over_a_concurrent_remove_through_deltas():
+    r, removed, re_added = _add_and_remove_x_concurrently()
+    r.receive(1, removed)
+    r.receive(0, re_added)
+    assert r.stats["applied"] == 3  # every delta passed the causal check
+    assert r.states[0].elements == r.states[1].elements == {"x"}
+    assert r.states[0] == r.states[1]

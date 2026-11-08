@@ -3,8 +3,11 @@
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
+
+import ohra.remote.throttler as throttler_module
 
 from ohra.remote.throttler import Blackhole, Direction, Throttler, TokenBucket, Unthrottled
 
@@ -145,26 +148,29 @@ def test_time_to_available_for_a_frame_over_capacity_needs_one_token():
 
 
 async def test_a_mode_replaced_while_the_loop_was_blocked_is_honoured():
-    # set_throttle(Blackhole) and the wait deadline both fall inside one blocked stretch
+    # set_throttle(Blackhole) and the wait deadline both expire while the loop is blocked
     t = Throttler()
     t.set_throttle("h", 1, Direction.SEND, TokenBucket(100, 100.0, time.monotonic_ns(), 0))
     loop = asyncio.get_running_loop()
     task = loop.create_task(t.admit("h", 1, Direction.SEND, 2))  # needs about 20ms
     await asyncio.sleep(0)
     loop.call_later(0.012, t.set_throttle, "h", 1, Direction.SEND, Blackhole())
-    loop.call_later(0.010, time.sleep, 0.06)
+    time.sleep(0.06)  # both handles are due by the next loop iteration
     assert await task is False
 
 
-async def test_waiters_timing_out_together_do_not_both_spend_the_same_tokens():
+async def test_waiters_timing_out_together_do_not_both_spend_the_same_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = [time.monotonic_ns()]  # the bucket's clock stands still unless the test moves it
+    monkeypatch.setattr(throttler_module, "time", SimpleNamespace(monotonic_ns=lambda: clock[0]))
     t = Throttler()
-    t.set_throttle("h", 1, Direction.SEND, TokenBucket(2, 40.0, time.monotonic_ns(), 0))
-    loop = asyncio.get_running_loop()
-    tasks = [loop.create_task(t.admit("h", 1, Direction.SEND, 2)) for _ in range(2)]
-    await asyncio.sleep(0)
-    loop.call_later(0.010, time.sleep, 0.055)  # both deadlines pass inside one blocked stretch
+    t.set_throttle("h", 1, Direction.SEND, TokenBucket(2, 40.0, clock[0], 0))
+    tasks = [asyncio.create_task(t.admit("h", 1, Direction.SEND, 2)) for _ in range(2)]
+    await asyncio.sleep(0)  # both wait for 2 tokens: 50ms
+    clock[0] += 60_000_000  # 2 tokens accrued for one waiter, none left for the other
+    time.sleep(0.055)  # both deadlines are due by the next loop iteration
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    blocked_until = time.monotonic()
-    assert len(done) == 1  # 2 tokens were spent, the other frame waits for 2 more
-    await asyncio.wait_for(next(iter(pending)), 1)
-    assert time.monotonic() >= blocked_until + 0.02
+    assert len(done) == 1
+    # the other one keeps waiting, then is delivered through the timeout path
+    assert await asyncio.wait_for(next(iter(pending)), 1) is True

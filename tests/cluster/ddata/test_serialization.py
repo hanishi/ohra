@@ -185,6 +185,11 @@ def test_orset_with_tuple_and_dataclass_elements_merges_after_a_round_trip():
     assert merged.size == 2
 
 
+def test_orset_with_a_reserved_string_element_round_trips():
+    s = ORSet()._add(address1, "$type")._add(address1, "$ref")._add(address2, "tag")
+    assert check_serialization(s).elements == {"$type", "$ref", "tag"}
+
+
 def test_serialize_flag():
     check_serialization(Flag())
     check_serialization(Flag().switch_on())

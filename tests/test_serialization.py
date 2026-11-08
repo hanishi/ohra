@@ -112,11 +112,12 @@ def test_unregistered_dataclass_raises():
         Serialization.decode({"$type": "Unregistered", "x": 1}, lambda _p: _never())
 
 
-def test_a_dict_with_a_reserved_key_raises_at_the_sender():
-    # decode reads them as a ref, a dataclass, or (as a pair) an entity ref: refuse them all
-    for key in ("$ref", "$type", "$entity", "$region"):
-        with pytest.raises(SerializationError, match="reserved"):
-            Serialization.encode({key: "x"}, lambda r: r.path)
+def test_a_dict_with_a_reserved_key_is_sent_as_a_map():
+    # as a JSON object, decode would read it as a ref, a dataclass, an entity ref or a tag
+    for key in ("$ref", "$type", "$entity", "$region", "$map", "$tuple", "$frozenset"):
+        encoded = Serialization.encode({key: "x", "plain": "y"}, lambda r: r.path)
+        assert encoded == {"$map": [[key, "x"], ["plain", "y"]]}
+        assert Serialization.decode(encoded, lambda _p: _never()) == {key: "x", "plain": "y"}
 
 
 def test_manifest_collision_raises_unless_same_class():
@@ -184,11 +185,6 @@ def test_tuple_keys_and_frozenset_elements_decode_hashable():
     assert rt({("a", (1, 2)): {("b", 3): 4}}) == {("a", (1, 2)): {("b", 3): 4}}
     back = rt(WithFrozenset(frozenset(), frozenset({("x", 1)})))
     assert isinstance(back, WithFrozenset) and back.pairs == frozenset({("x", 1)})
-
-
-def test_a_user_dict_key_map_is_refused():
-    with pytest.raises(SerializationError):
-        Serialization.encode({"$map": []}, path)
 
 
 def test_a_transient_field_is_not_encoded_and_decodes_to_its_default():
@@ -280,12 +276,6 @@ def test_hint_less_tuples_and_frozensets_are_tagged_and_round_trip():
 def test_a_top_level_tuple_round_trips_as_a_tuple():
     assert Serialization.encode((1, "a"), path) == {"$tuple": [1, "a"]}
     assert rt((1, ("a", frozenset({2})))) == (1, ("a", frozenset({2})))
-
-
-@pytest.mark.parametrize("key", ["$tuple", "$frozenset"])
-def test_a_user_dict_key_tuple_or_frozenset_is_refused(key: str):
-    with pytest.raises(SerializationError):
-        Serialization.encode({key: []}, path)
 
 
 type Grid = list[tuple[int, int]]

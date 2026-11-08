@@ -4,6 +4,8 @@
 import asyncio
 import time
 
+import pytest
+
 from ohra.remote.throttler import Blackhole, Direction, Throttler, TokenBucket, Unthrottled
 
 half = 500_000_000
@@ -114,3 +116,29 @@ async def test_a_waiting_admit_returns_false_when_set_to_blackhole():
     task = await _drained(t)
     t.set_throttle("h", 1, Direction.SEND, Blackhole())
     assert await asyncio.wait_for(task, 0.1) is False
+
+
+async def test_oversized_frames_on_a_fresh_player_bucket_all_pass():
+    # Pekko Player's bucket: a frame over capacity once available_tokens <= 0 must not stall
+    t = Throttler()
+    t.set_throttle("h", 1, Direction.SEND, TokenBucket(1000, 125000.0, 0, 0))
+    async with asyncio.timeout(0.5):
+        assert await t.admit("h", 1, Direction.SEND, 10) is True
+        assert await t.admit("h", 1, Direction.SEND, 1500) is True
+        assert await t.admit("h", 1, Direction.SEND, 1500) is True
+
+
+async def test_an_oversized_frame_on_receive_passes_too():
+    t = Throttler()
+    t.set_throttle("h", 1, Direction.RECEIVE, TokenBucket(1000, 125000.0, 0, 0))
+    async with asyncio.timeout(0.5):
+        for size in (10, 1500, 1500):
+            assert await t.admit("h", 1, Direction.RECEIVE, size) is True
+
+
+def test_time_to_available_is_the_missing_tokens_over_the_rate():
+    assert TokenBucket(100, 100, 0, 0).time_to_available(500_000_000, 60) == pytest.approx(0.1)
+
+
+def test_time_to_available_for_a_frame_over_capacity_needs_one_token():
+    assert TokenBucket(100, 100, 0, 0).time_to_available(0, 110) == pytest.approx(0.01)

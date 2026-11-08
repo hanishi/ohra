@@ -102,6 +102,10 @@ class Throttler:
                     event.set()
 
     async def admit(self, host: str, port: int, direction: Direction, size: int) -> bool:
+        """True to deliver the frame, False to drop it (Blackhole). It waits until the mode has
+        the tokens. A wait that times out (not one cut short by ``set_throttle``) delivers the
+        frame regardless and stores the mode's consume result only if the consume succeeds, as
+        Pekko's inbound ``Dequeue`` does; so a frame over capacity cannot stall the bucket."""
         key = (host, port, direction)
         while True:
             mode = self._modes.get(key, Unthrottled())
@@ -119,4 +123,7 @@ class Throttler:
             try:
                 await asyncio.wait_for(event.wait(), delay)
             except TimeoutError:
-                pass
+                consumed, ok = mode.try_consume_tokens(time.monotonic_ns(), size)
+                if ok and self._modes.get(key) is mode:
+                    self._modes[key] = consumed
+                return True

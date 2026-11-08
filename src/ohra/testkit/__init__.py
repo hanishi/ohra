@@ -13,6 +13,7 @@ from .conductor import (
     DuplicateNode,
     FailedBarrier,
     RoleName,
+    TestConductor,
     WrongBarrier,
 )
 from .manual_time import ExplicitlyTriggeredScheduler, ManualTime
@@ -35,6 +36,7 @@ __all__ = [
     "MultiNodeConfig",
     "MultiNodeSpec",
     "RoleName",
+    "TestConductor",
     "TestKitSettings",
     "TestProbe",
     "WrongBarrier",

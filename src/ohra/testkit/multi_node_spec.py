@@ -23,7 +23,7 @@ from ..behavior import Behavior, Behaviors, MaybeAwaitable
 from ..ref import ActorRef
 from ..remote.throttler import Throttler
 from ..system import ActorSystem
-from .conductor import Controller, RoleName
+from .conductor import Controller, RoleName, TestConductor
 from .probe import TestProbe
 from .settings import TestKitSettings, seconds
 
@@ -71,6 +71,8 @@ _RESERVED = ("address", "name")
 
 # Pekko's testconductor barrier-timeout
 _BARRIER_TIMEOUT = 30.0
+
+_TERMINATED = "TestConductor unavailable because system is terminated"
 
 
 def _check(system_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -143,6 +145,7 @@ class MultiNodeSpec:
         self.settings: TestKitSettings = run.settings
         self.system: ActorSystem[Any] = run.systems[myself]
         self._probe: TestProbe[Any] = TestProbe(self, "testActor")  # Pekko's testActor
+        self.test_conductor = TestConductor(run, myself)
 
     def is_node(self, *nodes: RoleName) -> bool:
         """Whether this node is one of `nodes`."""
@@ -157,7 +160,8 @@ class MultiNodeSpec:
 
     async def enter_barrier(self, *names: str, max: float | None = None) -> None:
         """Enter the named barriers in order, all within what is left of an enclosing `within`,
-        else within `max` (dilated) or the barrier timeout."""
+        else within `max` (dilated) or the barrier timeout. Once this node's system has
+        terminated, or if it terminates while waiting, it raises `RuntimeError`."""
         timeout = self.settings.dilated(_BARRIER_TIMEOUT if max is None else max)
         stop = time.monotonic() + self._probe.remaining_or(timeout)
         controller = self._run.controller
@@ -166,7 +170,23 @@ class MultiNodeSpec:
             if left < 0:
                 controller.fail_barrier(self.myself, name)
                 raise TimeoutError(f"Server timed out while waiting for barrier {name}")
-            await controller.enter_barrier(self.myself, name, left)
+            await self._enter(controller, name, left)
+
+    async def _enter(self, controller: Controller, name: str, timeout: float) -> None:
+        # Pekko's Player.client: a terminated system has no conductor client
+        if self.system.is_terminated:
+            raise RuntimeError(_TERMINATED)
+        entered = asyncio.ensure_future(controller.enter_barrier(self.myself, name, timeout))
+        terminated = asyncio.ensure_future(self.system.when_terminated())
+        try:
+            await asyncio.wait({entered, terminated}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            entered.cancel()
+            terminated.cancel()
+            await asyncio.wait({entered, terminated})
+        if entered.cancelled():
+            raise RuntimeError(_TERMINATED)
+        entered.result()
 
     def node(self, role: RoleName) -> str:
         """The role's root path: ``ohra://<name>@127.0.0.1:<port>``."""
@@ -234,6 +254,10 @@ async def _run_spec(
                     system.remoting.throttler = Throttler()
                 await system.__aenter__()
                 stack.push_async_callback(_shutdown, system, settings)
+                # the player's connection drops when its system has terminated (ClientDisconnected)
+                system._system_root.done.add_done_callback(  # pyright: ignore[reportPrivateUsage]
+                    lambda _, role=role: controller.client_disconnected(role)
+                )
                 run.systems[role] = system
                 run.ports[role] = port
             await asyncio.gather(*(controller.node_info(role) for role in roles))

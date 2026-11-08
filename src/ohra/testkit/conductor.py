@@ -1,8 +1,9 @@
-"""Pekko's test conductor controller: `Controller` and its `BarrierCoordinator`.
+"""Pekko's test conductor: `TestConductor`, `Controller` and its `BarrierCoordinator`.
 
-Ported from `Conductor.scala` (`Controller.receive`, `BarrierCoordinator`). Pekko's
-two actors share one thread here, so they are plain classes: a handler that throws in
-Pekko raises, and `_receive` plays the controller's supervisor strategy.
+Ported from `Conductor.scala` (`Conductor`, `Controller.receive`, `BarrierCoordinator`) and
+`Player.scala` (`ClientFSM`'s handling of the network and terminate ops). Pekko's actors
+share one thread here, so they are plain classes: a handler that throws in Pekko raises,
+and `_receive` plays the controller's supervisor strategy.
 """
 
 from __future__ import annotations
@@ -11,7 +12,13 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from ..remote.remoting import Remoting
+from ..remote.throttler import Blackhole, Direction, ThrottleMode, TokenBucket, Unthrottled
+
+if TYPE_CHECKING:
+    from .multi_node_spec import _Run  # pyright: ignore[reportPrivateUsage]
 
 log = logging.getLogger(__name__)
 
@@ -335,3 +342,108 @@ class Controller:
             if not fut.done():
                 fut.set_exception(FailedBarrier(_EMPTY))
         self._startup = []
+
+
+_NO_TEST_TRANSPORT = (
+    "To use this feature you must activate the failure injector adapters by specifying "
+    "`test_transport(on=True)` in your MultiNodeConfig."
+)
+
+
+class TestConductor:
+    """Pekko's `Conductor` ops, one per node as `spec.test_conductor`; only the first role's
+    work. Each op completes at once in one process, so none waits on Pekko's query-timeout."""
+
+    __test__ = False  # not a pytest test class
+
+    def __init__(self, run: _Run, myself: RoleName) -> None:
+        self._run = run
+        self._myself = myself
+
+    def _controller(self) -> Controller:
+        if self._myself != self._run.roles[0]:
+            raise RuntimeError("TestConductorServer was not started")
+        return self._run.controller
+
+    def _remoting(self, node: RoleName) -> Remoting:
+        remoting = self._run.systems[node].remoting
+        assert remoting is not None
+        return remoting
+
+    def _require_test_conductor_transport(self) -> None:
+        if self._remoting(self._myself).throttler is None:
+            raise RuntimeError(_NO_TEST_TRANSPORT)
+
+    async def throttle(
+        self, node: RoleName, target: RoleName, direction: Direction, rate_mbit: float
+    ) -> None:
+        """Throttle what `node` sends to or receives from `target` to `rate_mbit`: a negative
+        rate is `Unthrottled`, 0 is `Blackhole`."""
+        self._require_test_conductor_transport()
+        self._controller()
+        # the ClientFSM's ThrottleMsg
+        mode: ThrottleMode
+        if rate_mbit < 0.0:
+            mode = Unthrottled()
+        elif rate_mbit == 0.0:
+            mode = Blackhole()
+        else:
+            # 125000 octets/s = 1 Mbit/s
+            mode = TokenBucket(1000, rate_mbit * 125000.0, 0, 0)
+        throttler = self._remoting(node).throttler
+        assert throttler is not None
+        throttler.set_throttle("127.0.0.1", self._run.ports[target], direction, mode)
+
+    async def blackhole(self, node: RoleName, target: RoleName, direction: Direction) -> None:
+        """Drop everything `node` sends to or receives from `target`."""
+        await self.throttle(node, target, direction, 0.0)
+
+    async def pass_through(self, node: RoleName, target: RoleName, direction: Direction) -> None:
+        """Undo `throttle` and `blackhole` between `node` and `target`."""
+        await self.throttle(node, target, direction, -1.0)
+
+    async def disconnect(self, node: RoleName, target: RoleName) -> None:
+        """Close the links between `node` and `target` on `node`'s side, gracefully."""
+        await self._disconnect(node, target, False)
+
+    async def abort(self, node: RoleName, target: RoleName) -> None:
+        """Close the links between `node` and `target` on `node`'s side, by abort."""
+        await self._disconnect(node, target, True)
+
+    async def _disconnect(self, node: RoleName, target: RoleName, abort: bool) -> None:
+        # Pekko's Player ignores DisconnectMsg; here it closes links, so it needs the transport
+        self._require_test_conductor_transport()
+        self._controller()
+        await self._remoting(node).disconnect("127.0.0.1", self._run.ports[target], abort)
+
+    async def exit(self, node: RoleName, exit_value: int) -> None:
+        """Stop `node` as a process exit would: out of the barriers, its system crashed and its
+        body cancelled. A non-zero `exit_value` fails the spec once the other bodies finish."""
+        from .multi_node_spec import crash
+
+        self._controller().remove(node)
+        self._run.exit_values[node] = exit_value
+        # an exited process runs nothing more; cancelled first, so the crash cannot wake it
+        self._run.tasks[node].cancel()
+        await crash(self._run.systems[node])
+
+    async def shutdown(self, node: RoleName, abort: bool = False) -> None:
+        """Take `node` out of the barriers and terminate its system, or crash it with `abort`.
+        Its body runs on, and its next barrier raises."""
+        from .multi_node_spec import crash
+
+        self._controller().remove(node)
+        system = self._run.systems[node]
+        if abort:
+            await crash(system)
+        else:
+            system.terminate()
+
+    async def get_nodes(self) -> tuple[RoleName, ...]:
+        """The roles still connected, in declaration order."""
+        nodes = self._controller().get_nodes()
+        return tuple(r for r in self._run.roles if r in nodes)
+
+    async def remove_node(self, node: RoleName) -> None:
+        """Take `node` out of the barriers, so the others pass them without it."""
+        self._controller().remove(node)

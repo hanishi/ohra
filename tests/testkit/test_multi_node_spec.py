@@ -2,26 +2,30 @@
 
 Ported from Pekko's ``MultiNodeSpecSpec`` (the after-all waits for every node to remove itself)
 and ``MultiNodeSample`` (send to and receive from a remote node), plus ohra's own cases for the
-runner: a failing body, a body that returns while others wait, and the config.
+runner: a failing body, a body that returns while others wait, a node that does not stop, a
+barrier inside ``within``, and the config.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
 from ohra import ActorContext, ActorRef, Behavior, Behaviors
 from ohra.coordinated_shutdown import CoordinatedShutdownSettings
 from ohra.remote import Serialization
+from ohra.system import ActorSystem
 from ohra.testkit import (
+    BarrierTimeout,
     ClientLost,
     MultiNodeConfig,
     MultiNodeSpec,
     RoleName,
+    TestKitSettings,
     TestProbe,
     multi_node_spec,
 )
@@ -86,12 +90,6 @@ def test_a_decorated_spec_takes_no_parameters():
 # --- the runner ----------------------------------------------------------------------------------
 
 
-def _role_failure(group: BaseExceptionGroup[Any], role: str) -> BaseException:
-    assert group.message == f"role {role} failed"
-    assert len(group.exceptions) == 1
-    return group.exceptions[0]
-
-
 async def test_a_failing_body_fails_the_spec_at_once_naming_its_role():
     config = MultiNodeConfig()
     first, second = config.role("first"), config.role("second")
@@ -105,8 +103,10 @@ async def test_a_failing_body_fails_the_spec_at_once_naming_its_role():
 
     with pytest.raises(ExceptionGroup) as info:
         await asyncio.wait_for(body(), 2.0)  # the barrier timeout is 30s
-    e = _role_failure(info.value, "second")
-    assert isinstance(e, ValueError) and e.args == ("boom",)
+    assert info.group_contains(ValueError, match="boom")
+    (member,) = info.value.exceptions
+    assert isinstance(member, ExceptionGroup)
+    assert member.message == "role second failed"
 
 
 async def test_a_body_that_returns_while_others_wait_fails_them_with_client_lost():
@@ -120,8 +120,63 @@ async def test_a_body_that_returns_while_others_wait_fails_them_with_client_lost
 
     with pytest.raises(ExceptionGroup) as info:
         await asyncio.wait_for(body(), 2.0)
-    e = _role_failure(info.value, "a")
-    assert isinstance(e, ClientLost) and e.client == b
+    assert info.group_contains(ClientLost)
+    (member,) = info.value.exceptions
+    assert isinstance(member, ExceptionGroup)
+    assert member.message == "role a failed"
+    (lost,) = member.exceptions
+    assert isinstance(lost, ClientLost) and lost.client == b
+
+
+async def test_a_node_that_does_not_stop_is_left_after_the_shutdown_timeout(
+    caplog: pytest.LogCaptureFixture,
+):
+    config = MultiNodeConfig()
+    _a, b = config.role("a"), config.role("b")
+    started, release = asyncio.Event(), asyncio.Event()
+    stuck: list[ActorSystem[object]] = []
+
+    async def hold(_ctx: ActorContext[str], _msg: str) -> Behavior[str]:
+        started.set()
+        await release.wait()  # holds the actor, its stop included
+        return Behaviors.same
+
+    @multi_node_spec(config, settings=TestKitSettings(system_shutdown_default=0.2))
+    async def body(spec: MultiNodeSpec) -> None:
+        if spec.is_node(b):
+            stuck.append(spec.system)
+            spec.spawn(Behaviors.receive(hold)).tell("hold")
+            await started.wait()
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(body(), 2.0)  # the default bound is 10s
+        assert any(
+            r.getMessage().startswith(f"Failed to stop [{stuck[0].path.removesuffix('/user')}]")
+            for r in caplog.records
+        )
+    finally:
+        release.set()
+        for system in stuck:
+            await system.when_terminated()
+
+
+async def test_an_enclosing_within_shortens_a_barrier():
+    config = MultiNodeConfig()
+    a, _b = config.role("a"), config.role("b")
+    done = asyncio.Event()
+
+    @multi_node_spec(config)
+    async def body(spec: MultiNodeSpec) -> None:
+        if spec.is_node(a):
+            with pytest.raises(BarrierTimeout):
+                async with spec.within(0.3):
+                    await spec.enter_barrier("never")
+            done.set()
+        else:
+            await done.wait()  # never enters "never", and stays until a has timed out
+
+    await asyncio.wait_for(body(), 5.0)  # the barrier timeout is 30s
 
 
 def test_a_duplicate_role_is_refused():

@@ -13,6 +13,7 @@ import itertools
 import random
 import re
 import socket
+import time
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ from ..remote.throttler import Throttler
 from ..system import ActorSystem
 from .conductor import Controller, RoleName
 from .probe import TestProbe
-from .settings import TestKitSettings
+from .settings import TestKitSettings, seconds
 
 # Below the ephemeral ranges (Linux from 32768, macOS from 49152), so the local end of an outbound
 # connection cannot take a port between free_port() and the test's bind. Counting up from a random
@@ -51,6 +52,19 @@ async def crash(system: ActorSystem[Any]) -> None:
     await system.remoting.close()
     system._final_terminate()  # pyright: ignore[reportPrivateUsage]  # a crash does not run the coordinated shutdown
     await system.when_terminated()
+
+
+async def _shutdown(system: ActorSystem[Any], settings: TestKitSettings) -> None:
+    """Pekko's shutdown(system) with verifySystemShutdown off: a system that does not stop
+    within system_shutdown_default is left running with a warning, as ActorTestKit does."""
+    system.terminate()
+    d = settings.system_shutdown_default_dilated
+    terminated = asyncio.ensure_future(system.when_terminated())
+    done, _ = await asyncio.wait({terminated}, timeout=d)
+    if not done:
+        terminated.cancel()
+        root = system.address.root if system.address else system.name
+        system.log.warning(f"Failed to stop [{root}] within [{seconds(d)}]")
 
 
 _RESERVED = ("address", "name")
@@ -142,10 +156,17 @@ class MultiNodeSpec:
                 await r
 
     async def enter_barrier(self, *names: str, max: float | None = None) -> None:
-        """Enter the named barriers in order. `max`, dilated, overrides the barrier timeout."""
-        timeout = None if max is None else self.settings.dilated(max)
-        for name in names:
-            await self._run.controller.enter_barrier(self.myself, name, timeout)
+        """Enter the named barriers in order, all within what is left of an enclosing `within`,
+        else within `max` (dilated) or the barrier timeout."""
+        timeout = self.settings.dilated(_BARRIER_TIMEOUT if max is None else max)
+        stop = time.monotonic() + self._probe.remaining_or(timeout)
+        controller = self._run.controller
+        for name in names:  # Player.enter
+            left = stop - time.monotonic()
+            if left < 0:
+                controller.fail_barrier(self.myself, name)
+                raise TimeoutError(f"Server timed out while waiting for barrier {name}")
+            await controller.enter_barrier(self.myself, name, left)
 
     def node(self, role: RoleName) -> str:
         """The role's root path: ``ohra://<name>@127.0.0.1:<port>``."""
@@ -181,8 +202,7 @@ class MultiNodeSpec:
                 assert nodes <= {self.myself}, f"Nodes not shutdown: {sorted(nodes, key=str)}"
 
             await self.await_assert(removed, _BARRIER_TIMEOUT)
-        self.system.terminate()
-        await self.system.when_terminated()
+        await _shutdown(self.system, self.settings)
         controller.client_disconnected(self.myself)  # the player's connection drops
 
 
@@ -195,10 +215,11 @@ async def _role(body: Callable[[MultiNodeSpec], Awaitable[None]], spec: MultiNod
 
 
 async def _run_spec(
-    config: MultiNodeConfig, body: Callable[[MultiNodeSpec], Awaitable[None]]
+    config: MultiNodeConfig,
+    settings: TestKitSettings,
+    body: Callable[[MultiNodeSpec], Awaitable[None]],
 ) -> None:
     name = re.sub(r"[^A-Za-z0-9_-]", "", body.__name__) or "MultiNodeSpec"
-    settings = TestKitSettings()
     roles = config.roles
     controller = Controller(len(roles), settings.dilated(_BARRIER_TIMEOUT))
     run = _Run(roles, settings, controller)
@@ -211,19 +232,15 @@ async def _run_spec(
                 if config._test_transport:  # pyright: ignore[reportPrivateUsage]
                     assert system.remoting is not None
                     system.remoting.throttler = Throttler()
-                await stack.enter_async_context(system)
+                await system.__aenter__()
+                stack.push_async_callback(_shutdown, system, settings)
                 run.systems[role] = system
                 run.ports[role] = port
             await asyncio.gather(*(controller.node_info(role) for role in roles))
             specs = [MultiNodeSpec(run, role) for role in roles]
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    for spec in specs:
-                        run.tasks[spec.myself] = tg.create_task(_role(body, spec))
-            except BaseExceptionGroup as eg:
-                if len(eg.exceptions) == 1:  # one role failed: raise its own group
-                    raise eg.exceptions[0] from None
-                raise
+            async with asyncio.TaskGroup() as tg:
+                for spec in specs:
+                    run.tasks[spec.myself] = tg.create_task(_role(body, spec))
             for role, value in run.exit_values.items():
                 if value != 0:
                     raise AssertionError(f"role {role.name} exited with {value}")
@@ -232,18 +249,18 @@ async def _run_spec(
 
 
 def multi_node_spec(
-    config: MultiNodeConfig,
+    config: MultiNodeConfig, settings: TestKitSettings | None = None
 ) -> Callable[
     [Callable[[MultiNodeSpec], Awaitable[None]]], Callable[[], Coroutine[Any, Any, None]]
 ]:
     """Turn ``async def test_x(spec: MultiNodeSpec)`` into a pytest test with no parameters
-    that runs the body once per role of `config`."""
+    that runs the body once per role of `config`. `settings` default to `TestKitSettings()`."""
 
     def decorate(
         body: Callable[[MultiNodeSpec], Awaitable[None]],
     ) -> Callable[[], Coroutine[Any, Any, None]]:
         async def test() -> None:
-            await _run_spec(config, body)
+            await _run_spec(config, settings or TestKitSettings(), body)
 
         # not functools.wraps: its __wrapped__ would show pytest the spec parameter
         for attr in ("__name__", "__qualname__", "__doc__", "__module__"):

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..ref import ActorRef, LocalRef
 from .serialization import Json, Serialization, SerializationError, remotable
+from .throttler import Direction, Throttler
 from .tls import RotatingKeysSSLEngineProvider
 
 _log = logging.getLogger("ohra.remote")
@@ -215,6 +216,8 @@ class _Association:
         self.writer: asyncio.StreamWriter | None = None
         self.pending: deque[tuple[str, object, bytes]] = deque()
         self.connected = asyncio.Event()
+        self.throttled: asyncio.Queue[bytes] = asyncio.Queue()
+        self._pacer: asyncio.Task[None] | None = None
         self.task = asyncio.get_running_loop().create_task(self._run())
 
     def full(self) -> bool:
@@ -224,12 +227,30 @@ class _Association:
         )
 
     def send(self, path: str, msg: object, frame: bytes) -> None:
-        if self.writer is not None:
+        if self.remoting.throttler is not None:
+            if self._pacer is None:
+                self._pacer = asyncio.get_running_loop().create_task(self._pace())
+                self.remoting._track(self._pacer)  # pyright: ignore[reportPrivateUsage]
+            self.throttled.put_nowait(frame)
+        elif self.writer is not None:
             self.writer.write(frame)
         elif len(self.pending) < QUEUE_BOUND:
             self.pending.append((path, msg, frame))
         else:
             self.remoting.system.dead_letter(msg, RemoteRef(path, self.remoting))
+
+    async def _pace(self) -> None:
+        """Writes the queued frames as the throttler admits them; a refused frame is lost
+        silently, as Pekko's blackhole."""
+        await self.connected.wait()
+        while True:
+            frame = await self.throttled.get()
+            throttler = self.remoting.throttler
+            if throttler is None or await throttler.admit(
+                self.host, self.port, Direction.SEND, len(frame)
+            ):
+                if self.writer is not None:
+                    self.writer.write(frame)
 
     async def drain(self) -> None:
         await self.connected.wait()
@@ -275,6 +296,8 @@ class _Association:
             self.connected.set()
             await self.remoting.read_loop(reader)
         finally:
+            if self._pacer is not None:
+                self._pacer.cancel()
             self.remoting.drop(self)
             self.connected.set()
             for path, msg, _ in self.pending:
@@ -318,8 +341,11 @@ class Remoting:
         self.address = address
         self.tls = tls
         """Set when connections run over TLS, both ways."""
+        self.throttler: Throttler | None = None
+        """The test transport: set by the multi-node testkit's `test_transport(on=True)`."""
         self.temp = TempRefs(address.root)
         self._associations: dict[tuple[str, int], _Association] = {}
+        self._inbound: dict[tuple[str, int], set[asyncio.StreamWriter]] = {}
         self._peers: dict[tuple[str, int], int] = {}  # last uid seen per peer address
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -452,17 +478,80 @@ class Remoting:
                     _reject(writer, reason)
                     return
             writer.write(self.hello())
-            await self.read_loop(reader)
+            await self.read_loop(reader, writer)
         finally:
             await _close(writer)
 
-    async def read_loop(self, reader: asyncio.StreamReader) -> None:
+    async def read_loop(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | None = None
+    ) -> None:
+        peer: tuple[str, int] | None = None
         try:
             while (frame := await read_frame(reader)) is not None:
+                if isinstance(frame, dict) and frame.get("kind") == "hello":
+                    address = frame.get("address")
+                    if isinstance(address, dict):
+                        host, port = address.get("host"), address.get("port")
+                        if isinstance(host, str) and isinstance(port, int):
+                            peer = (host, port)
+                            if writer is not None:
+                                self._inbound.setdefault(peer, set()).add(writer)
+                elif (
+                    self.throttler is not None
+                    and peer is not None
+                    # ponytail: re-packs the frame for its size; the test transport only
+                    and not await self.throttler.admit(*peer, Direction.RECEIVE, len(pack(frame)))
+                ):
+                    continue
                 self._handle(frame)
         # json.loads raises RecursionError, not ValueError, on a frame nested too deep
         except (ValueError, RecursionError, OSError) as e:
             _log.warning("closing connection: %s", e)
+        finally:
+            if peer is not None and writer is not None:
+                writers = self._inbound.get(peer)
+                if writers is not None:
+                    writers.discard(writer)
+                    if not writers:
+                        del self._inbound[peer]
+
+    async def disconnect(self, host: str, port: int, abort: bool = False) -> None:
+        """Closes the association to (host, port) and every connection accepted from it, by
+        abort or gracefully. It returns once the connections it closed are gone; a new connection
+        the peer opens afterwards is allowed. The next send to the peer opens a new association."""
+        key = (host, port)
+        association = self._associations.get(key)
+        writers = list(self._inbound.get(key, ()))
+        if association is not None and association.writer is None:
+            association.task.cancel()  # still connecting
+        for writer in [
+            *writers,
+            *([association.writer] if association and association.writer else []),
+        ]:
+            if abort:
+                writer.transport.abort()
+            writer.close()
+        try:
+            async with asyncio.timeout(SHUTDOWN_FLUSH_TIMEOUT):
+                await self._await_gone(key, association, writers)
+        except TimeoutError:
+            for writer in writers:  # a slow reader never takes the unflushed bytes
+                if writer in self._inbound.get(key, ()):
+                    writer.transport.abort()
+            if association is not None and association.writer is not None:
+                association.writer.transport.abort()
+            await self._await_gone(key, association, writers)
+
+    async def _await_gone(
+        self,
+        key: tuple[str, int],
+        association: _Association | None,
+        writers: list[asyncio.StreamWriter],
+    ) -> None:
+        if association is not None:
+            await asyncio.wait([association.task])  # not await: that would eat our cancellation
+        while any(w in self._inbound.get(key, ()) for w in writers):
+            await asyncio.sleep(0.001)
 
     def _handle(self, frame: Json) -> None:
         if not isinstance(frame, dict):

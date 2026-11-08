@@ -68,16 +68,28 @@ async def test_a_test_conductor_enters_a_barrier_and_throttles(spec: MultiNodeSp
     await spec.enter_barrier("name")
 
     # "support throttling of network connections"
-    target = spec.system.resolve(spec.node(leader) + "/user/echo")
+    target_path = spec.node(leader) + "/user/echo"
+    target = spec.system.resolve(target_path)
     tc = spec.test_conductor
 
     # A fresh bucket passes one frame of T bytes free and then its 1000 tokens, so ten frames
     # pace 9T - 1000 bytes at 0.01 Mbit/s (1250 bytes/s). An Echo frame is about 300 bytes,
-    # as the spec's 51-character name is in it twice: about 1.4s, inside 0.5s to 2s. A reply
+    # as the spec's 51-character name is in it twice: about 1.3s, inside 0.5s to 2s. A reply
     # frame is about 145 bytes, 0.24s, under the follower's 0.3s; Pekko's replies are as large
-    # as its requests. So in the receive case the replies go to a probe whose 55-character name
-    # widens each reply frame to 191 bytes, 0.57s.
-    wide: TestProbe[int | str] = spec.create_test_probe("wide-" + "x" * 50)
+    # as its requests. So in the receive case the replies go to a probe named to make each
+    # reply frame 191 bytes, 0.58s, whatever the spec's name.
+    remoting = spec.system.remoting
+    assert remoting is not None
+    frame = remoting._frame  # pyright: ignore[reportPrivateUsage]
+    unnamed = len(frame(spec.node(follower) + "/system/", 15))
+    wide: TestProbe[int | str] = spec.create_test_probe("wide-" + "x" * (191 - unnamed - 5))
+    if spec.is_node(follower):
+        send = (9 * len(frame(target_path, Echo(5, probe.ref))) - 1000) / 1250
+        recv = (9 * len(frame(wide.ref.path, 15)) - 1000) / 1250
+        assert 0.8 <= send <= 1.6 and recv >= 0.45, (
+            f"frame sizes moved (send {send:.2f}s, want 0.8s to 1.6s; recv {recv:.2f}s, want "
+            "0.45s or more): the spec's name sizes the Echo frames, the wide probe's the replies"
+        )
 
     if spec.is_node(follower):
         # start remote network connection so that it can be throttled
@@ -130,7 +142,8 @@ async def test_exit_cancels_the_node_and_the_others_pass_the_barrier():
         seen[spec.myself] = spec.system
         await spec.enter_barrier("started")
         if spec.is_node(third):
-            await asyncio.Event().wait()  # cancelled by exit
+            # cancelled by exit; were the crash to wake it first, its barrier would raise
+            await spec.enter_barrier("after-exit")
             raise AssertionError("unreachable")
         if spec.is_node(first):
             await spec.test_conductor.exit(third, 0)

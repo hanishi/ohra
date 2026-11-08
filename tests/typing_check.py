@@ -36,6 +36,7 @@ from ohra.stream import (
     Source,
     UniqueKillSwitch,
 )
+from ohra.testkit import Direction, MultiNodeConfig, MultiNodeSpec
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,15 @@ async def probes_are_typed() -> None:
         s: Greeting = await probe2.expect_message_type(Greeting)
         wrong: Bye = await probe2.expect_message_type(Greeting)  # type: ignore[assignment]
         del x, s, wrong
+
+
+async def multi_node_specs_are_typed(spec: MultiNodeSpec) -> None:
+    config = MultiNodeConfig()
+    first, second = config.role("first"), config.role("second")
+    spec.is_node(first)
+    spec.is_node("first")  # type: ignore[arg-type]
+    await spec.test_conductor.blackhole(first, second, Direction.BOTH)
+    await spec.test_conductor.blackhole(first, second, "both")  # type: ignore[arg-type]
 
 
 def streams_are_typed(system: ActorSystem[Any]) -> None:

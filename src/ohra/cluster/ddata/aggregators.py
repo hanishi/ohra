@@ -220,6 +220,7 @@ def read_aggregator(
     self_unique_address: UniqueAddress,
     *,
     shuffle: bool,
+    now: Callable[[], float],
 ) -> Behavior[Never]:
     """Pekko's ReadAggregator. It replies once to ``reply_to`` and stops. Before a GetSuccess it
     sends the merged value to ``replicator`` as a ReadRepair, and waits for the ack. It takes no
@@ -301,7 +302,7 @@ def read_aggregator(
                 case _ReadReply(node, ReadResult(envelope)):
                     if result is not None and envelope is not None:
                         try:
-                            result = result.merge(envelope)
+                            result = result.merge(envelope, now())
                         except TypeError as e:
                             # a replica holds another type: no reply could merge, so fail now
                             # rather than restart and leave the caller to its timeout

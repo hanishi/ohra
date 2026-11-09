@@ -575,6 +575,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         ctx.self,
                         self_unique_address,
                         shuffle=not settings.prefer_oldest,
+                        now=now,
                     )
                 )
 
@@ -611,7 +612,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     case DataEnvelope() as envelope if envelope.is_deleted:
                         pass
                     case DataEnvelope(existing) as envelope:
-                        envelope = envelope.merge(DataEnvelope(modify(existing)))
+                        envelope = envelope.merge(DataEnvelope(modify(existing)), now())
                     case None:
                         envelope = DataEnvelope(modify(initial))
             except Exception as e:  # Pekko's Try: NonFatal
@@ -688,7 +689,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     return DELETED_ENVELOPE  # already deleted
                 case DataEnvelope() as envelope:
                     try:
-                        merged = envelope.merge(write_envelope)
+                        merged = envelope.merge(write_envelope, now())
                     except TypeError as e:  # Pekko's IllegalArgumentException
                         ctx.log.warning("Couldn't merge [%s], due to: %s", key, e)
                         return None

@@ -20,9 +20,10 @@ from ohra.cluster.ddata import replicator as replicator_module
 from ohra.cluster.ddata.envelope import DataEnvelope, Gossip, Status
 from ohra.cluster.ddata.gset import GSet
 from ohra.cluster.ddata.ormap import ORMap
+from ohra.cluster.ddata.version_vector import VersionVector
 from ohra.ref import ActorRef
 from ohra.remote import Address, UniqueAddress
-from ohra.remote.serialization import Serialization
+from ohra.remote.serialization import Serialization, canonical_json
 from ohra.testkit import MultiNodeConfig, MultiNodeSpec, TestProbe, multi_node_spec
 
 from ..test_cluster import FAST, FAST_SHUTDOWN
@@ -80,6 +81,20 @@ def test_default_encoding_is_unchanged():
     expected = {"$map": [[address, {"$type": "GSet", "elements": [8, 0]}]]}
     assert Serialization.encode(value, ref_path) == expected
     assert Serialization.encode(value, ref_path, canonical=False) == expected
+
+
+def test_a_pruned_version_vector_encodes_as_one_built_directly():
+    """D7: prune and pruning_cleanup build through VersionVector.create, so a vector left with
+    one entry has the class, and the encoding, of one built directly."""
+    n1, n2, n3 = (UniqueAddress("localhost", 7354 + i, i, "Sys") for i in (1, 2, 3))
+    three = VersionVector.create({n1: 1, n2: 2, n3: 3})
+    pruned = three.prune(n1, n2).pruning_cleanup(n3)
+    direct = VersionVector.create({n2: pruned.version_at(n2)})
+
+    def encode(v: VersionVector) -> str:
+        return canonical_json(Serialization.encode(v, ref_path, canonical=True))
+
+    assert encode(pruned) == encode(direct)
 
 
 def two_nodes() -> MultiNodeConfig:

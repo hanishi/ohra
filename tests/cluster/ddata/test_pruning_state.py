@@ -67,3 +67,6 @@ def test_pruning_states_round_trip_over_serialization():
         back = Serialization.decode(json.loads(wire), lambda p: pytest.fail(p))
         assert back == state
         assert type(back) is type(state)
+        if isinstance(back, PruningInitialized):
+            # frozenset == set compares equal, so check the type
+            assert isinstance(back.seen, frozenset)

@@ -1,9 +1,16 @@
-"""Pruning across two nodes, with short real intervals: a split pauses it, and the owner of a
-marker waits until every node has seen it. No Pekko spec covers these alone.
+"""Pruning across two nodes: a split pauses it, and the owner of a marker waits until every node
+has seen it. No Pekko spec covers these alone.
+
+Both cases run on short real intervals: 0.1 s for gossip and for pruning, and 0.5 s for
+``max_pruning_dissemination``.
 
 Data that names a node outside the cluster is placed on the leader with a wire ``Write``, as
-another node's Replicator would send it, and read back with a wire ``Read``, which shows the
-pruning markers. The leader is the Up member with the lowest address."""
+another node's Replicator would send it. The data and its pruning markers are read back with a
+wire ``Read``. The leader is the Up member with the lowest address.
+
+The marker case holds node 2's Replicator back by not calling ``DistributedData`` there until
+after the ``initialized`` barrier: the extension starts the Replicator on its first call, so node
+2 is a reachable member without one and no Replicator is renamed."""
 
 from typing import cast
 
@@ -141,7 +148,9 @@ async def test_the_owner_waits_until_every_node_has_seen_the_marker(spec: MultiN
         async def initialized() -> None:
             envelope = await read(spec)
             assert envelope is not None
-            assert isinstance(envelope.pruning.get(removed), PruningInitialized), envelope
+            marker = envelope.pruning.get(removed)
+            assert isinstance(marker, PruningInitialized), envelope
+            assert marker.owner == Cluster(spec.system).self_unique_address, marker
 
         await spec.await_assert(initialized)
         # Pekko's expectNoMessage: the other node has not seen the marker, so it is not performed

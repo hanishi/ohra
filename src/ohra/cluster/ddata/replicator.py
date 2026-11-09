@@ -2,6 +2,7 @@
 responses nested in ``Replicator`` as ``EventStream``'s are, and the actor, whose handlers port
 classic ``Replicator.scala`` function for function.
 
+Replication between nodes is not here yet: every consistency level runs on the local node.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 

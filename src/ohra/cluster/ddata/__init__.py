@@ -4,6 +4,7 @@ The data types and their building blocks: the ``ReplicatedData`` traits, ``Key``
 ``VersionVector``, the counters ``GCounter`` and ``PNCounter``, ``GSet``, ``ORSet``, ``ORMap``,
 ``ORMultiMap``, ``LWWMap``, ``PNCounterMap``, ``Flag`` and ``LWWRegister`` with its clocks. The
 ``Replicator`` holds them on each node, reached through the ``DistributedData`` extension.
+Replication between nodes is not here yet: every consistency level runs on the local node.
 """
 
 from dataclasses import dataclass

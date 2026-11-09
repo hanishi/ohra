@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ReplicatorSettings:
+    """How the Replicator runs. Replication between nodes is not here yet: every consistency
+    level, ``WriteMajority`` included, runs on the local node."""
+
     name: str = "ddataReplicator"
     """The name of the Replicator actor, under /system."""
     gossip_interval: float = 2.0

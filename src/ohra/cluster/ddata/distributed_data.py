@@ -86,8 +86,9 @@ class ReplicatorMessageAdapter[M, A: ReplicatedData]:
     The Replicator always replies within the request's own timeout, so ``unexpected_ask_timeout``
     is for cleanup only. When it passes, ``response_adapter`` gets ``GetFailure``,
     ``UpdateTimeout`` or ``DeleteFailure`` for the request's key. Pekko throws the timeout in the
-    actor instead, but an exception in an adapt function here is only logged (appendix B).
-    ``ask_replica_count`` has no failure reply, so its timeout is only logged."""
+    actor instead, but an exception in an adapt function here is only logged (appendix B, the
+    ``Replicator`` entry). ``ask_replica_count`` has no failure reply, so its timeout is only
+    logged."""
 
     def __init__(
         self,

@@ -7,7 +7,7 @@ from typing import Any, Never
 import pytest
 
 from ohra import Behavior
-from ohra.cluster.ddata import GCounter, GCounterKey, Replicator, SelfUniqueAddress
+from ohra.cluster.ddata import GCounter, GCounterKey, GSet, Replicator, SelfUniqueAddress
 from ohra.cluster.ddata.aggregators import read_aggregator
 from ohra.cluster.ddata.envelope import DataEnvelope, Read, ReadRepair, ReadRepairAck, ReadResult
 from ohra.remote import UniqueAddress
@@ -137,6 +137,20 @@ async def test_reachable_nodes_are_the_primaries():
         await manual_time.time_passes(0.05)
         await s.replicas[node_a].expect_message_type(Read)
         await s.replicas[node_b].expect_message_type(Read)
+
+
+async def test_a_reply_of_another_type_fails_the_get_at_once():
+    async with ActorTestKit(manual_time=True) as kit:
+        s = Setup(kit)
+        aggr = kit.spawn(s.aggregator(read_majority, DataEnvelope(local)))
+
+        (await s.replicas[node_a].expect_message_type(Read)).reply_to.tell(
+            ReadResult(DataEnvelope(GSet[str]().add("x")))
+        )
+        # no timeout passes: the merge failure replies at once
+        await s.reply.expect_message(Replicator.GetFailure(KeyA))
+        await s.reply.expect_terminated(aggr)
+        await s.replicator.expect_no_message(0)
 
 
 def test_read_from_zero_is_rejected():

@@ -1,24 +1,29 @@
 """The Replicator's view of the cluster, on three nodes in one process: Pekko's
 receiveMemberUp, receiveMemberExiting and receiveMemberRemoved, and nodesForReadWrite.
 
-No Pekko spec covers these alone. The read and write targets are read through the private
-``_NodesForReadWrite`` query, since no reply shows them before the aggregators come."""
+No Pekko spec covers these alone. The read and write targets show in which node a read or a
+write reaches; the long gossip interval keeps values where the writes put them."""
 
 import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any, cast
 
 from ohra.cluster import Cluster, ClusterDomainEvent, Leave, MemberExited, Subscribe
-from ohra.cluster.ddata import DistributedData, Replicator, ReplicatorSettings
-from ohra.cluster.ddata.replicator import _NodesForReadWrite  # pyright: ignore[reportPrivateUsage]
-from ohra.ref import ActorRef
+from ohra.cluster.ddata import (
+    DistributedData,
+    GCounter,
+    GCounterKey,
+    Replicator,
+    ReplicatorSettings,
+)
 from ohra.remote import UniqueAddress
 from ohra.testkit import TestProbe
 
 from ...util import eventually, free_port
 from ..test_cluster import all_up, cluster_node
 from .test_replicator_local import Node
+
+KEYS = [GCounterKey(f"k{i}") for i in range(4)]
 
 
 @asynccontextmanager
@@ -56,20 +61,36 @@ async def replica_count(node: Node) -> int:
     return (await probe.receive_message()).n
 
 
-async def nodes_for_read_write(node: Node, exclude_exiting: bool) -> tuple[UniqueAddress, ...]:
-    probe: TestProbe[tuple[UniqueAddress, ...]] = node.probe()
-    cast(ActorRef[Any], node.replicator).tell(_NodesForReadWrite(exclude_exiting, probe.ref))
-    return await probe.receive_message()
-
-
 async def replica_count_is(node: Node, n: int) -> None:
     assert await replica_count(node) == n
 
 
-async def targets_are(
-    node: Node, exclude_exiting: bool, expected: tuple[UniqueAddress, ...]
-) -> None:
-    assert await nodes_for_read_write(node, exclude_exiting) == expected
+async def every_replicator_knows_all(nodes: list[Node]) -> None:
+    """Each Replicator takes a Read or a Write only from a node it knows."""
+    for node in nodes:
+        await node.probe().await_assert(
+            lambda node=node: replica_count_is(node, 3), max=3, interval=0.01
+        )
+
+
+async def update(
+    node: Node, key: GCounterKey, write: Replicator.WriteConsistency
+) -> Replicator.UpdateResponse[GCounter]:
+    probe: TestProbe[Replicator.UpdateResponse[GCounter]] = node.probe()
+    node.replicator.tell(
+        Replicator.Update(
+            key, GCounter(), write, probe.ref, lambda c: c.increment(node.self_address)
+        )
+    )
+    return await probe.receive_message(5.0)
+
+
+async def get(
+    node: Node, key: GCounterKey, read: Replicator.ReadConsistency
+) -> Replicator.GetResponse[GCounter]:
+    probe: TestProbe[Replicator.GetResponse[GCounter]] = node.probe()
+    node.replicator.tell(Replicator.Get(key, read, probe.ref))
+    return await probe.receive_message(5.0)
 
 
 def address_of(node: Node) -> UniqueAddress:
@@ -96,25 +117,35 @@ async def test_a_removed_member_leaves_the_replicas():
             )
 
 
-async def test_prefer_oldest_orders_targets_by_age():
-    async with three_nodes(ReplicatorSettings(prefer_oldest=True)) as nodes:
+async def test_prefer_oldest_writes_to_the_oldest_first():
+    async with three_nodes(ReplicatorSettings(prefer_oldest=True, gossip_interval=60.0)) as nodes:
         low, mid, high = nodes
-        expected = (address_of(high), address_of(mid))  # the seed is the oldest
-        await low.probe().await_assert(
-            lambda: targets_are(low, False, expected), max=3, interval=0.01
-        )
+        await every_replicator_knows_all(nodes)
+        # WriteTo(2) writes to one other node: the oldest, the seed, though its address sorts
+        # last. It acks long before the secondary send, so the other gets nothing.
+        for key in KEYS:
+            assert await update(low, key, Replicator.WriteTo(2, 5.0)) == (
+                Replicator.UpdateSuccess(key)
+            )
+        for key in KEYS:
+            assert isinstance(await get(high, key, Replicator.ReadLocal()), Replicator.GetSuccess)
+            assert await get(mid, key, Replicator.ReadLocal()) == Replicator.NotFound(key)
 
 
-async def test_exiting_nodes_are_excluded_from_majority_targets():
-    async with three_nodes() as nodes:
+async def test_exiting_nodes_are_excluded_from_read_all_targets():
+    async with three_nodes(ReplicatorSettings(gossip_interval=60.0)) as nodes:
         low, mid, high = nodes
-        both = (address_of(mid), address_of(high))
-        await low.probe().await_assert(lambda: targets_are(low, True, both), max=3, interval=0.01)
+        await every_replicator_knows_all(nodes)
+        k1, k2 = KEYS[:2]
+        for key in (k1, k2):  # on the middle node only: no gossip runs
+            assert await update(mid, key, Replicator.WriteLocal()) == Replicator.UpdateSuccess(key)
         exited: TestProbe[ClusterDomainEvent] = low.probe()
         Cluster(low.system).subscriptions.tell(Subscribe(exited.ref, MemberExited))
         Cluster(low.system).manager.tell(Leave(address_of(mid).address))
         # low is the leader, so it moves mid to Exiting itself; its MemberRemoved needs mid's
-        # confirmation and a later leader tick, so it is still behind these queries
+        # confirmation and a later leader tick, so it is still behind these reads
         assert await exited.receive_message() == MemberExited(Cluster(mid.system).self_member)
-        assert await nodes_for_read_write(low, True) == (address_of(high),)
-        assert await nodes_for_read_write(low, False) == both
+        # ReadFrom keeps the exiting node as a target, and reads its value
+        assert isinstance(await get(low, k1, Replicator.ReadFrom(3, 3.0)), Replicator.GetSuccess)
+        # ReadAll leaves it out, so it reads only the third node, which lacks the key
+        assert await get(low, k2, Replicator.ReadAll(3.0)) == Replicator.NotFound(k2)

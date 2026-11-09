@@ -299,7 +299,13 @@ def read_aggregator(
             match msg:
                 case _ReadReply(node, ReadResult(envelope)):
                     if result is not None and envelope is not None:
-                        result = result.merge(envelope)
+                        try:
+                            result = result.merge(envelope)
+                        except TypeError as e:
+                            # a replica holds another type: no reply could merge, so fail now
+                            # rather than restart and leave the caller to its timeout
+                            ctx.log.warning("Couldn't merge [%s], due to: %s", key.id, e)
+                            return reply(ok=False)
                     elif envelope is not None:
                         result = envelope
                     remaining.discard(node)

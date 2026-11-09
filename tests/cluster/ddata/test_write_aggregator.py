@@ -195,7 +195,7 @@ async def test_a_delete_that_gets_nacks_replies_delete_failure():
     async with ActorTestKit(manual_time=True) as kit:
         probe: TestProbe[Write] = kit.create_test_probe()
         reply: TestProbe[Reply] = kit.create_test_probe()
-        kit.spawn(
+        aggr = kit.spawn(
             write_aggregator(
                 KeyA,
                 DELETED_ENVELOPE,
@@ -212,3 +212,4 @@ async def test_a_delete_that_gets_nacks_replies_delete_failure():
         (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
         (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
         await reply.expect_message(Replicator.DeleteFailure(KeyA))
+        await reply.expect_terminated(aggr)

@@ -2,8 +2,8 @@
 responses nested in ``Replicator`` as ``EventStream``'s are, and the actor, whose handlers port
 classic ``Replicator.scala`` function for function.
 
-The Replicator tracks the cluster's members, but replication between nodes is not here yet:
-every consistency level runs on the local node.
+The Replicator tracks the cluster's members, and reads and writes at a level other than local
+through aggregator children. Gossip between Replicators is not here yet.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 
@@ -17,7 +17,17 @@ from typing import TYPE_CHECKING, Any, cast
 from ...behavior import Behavior, Behaviors
 from ...cell import watched_ref
 from ...signals import PostStop, PreRestart, Signal
-from .envelope import DELETED_ENVELOPE, DataEnvelope
+from .envelope import (
+    DELETED_ENVELOPE,
+    DataEnvelope,
+    Read,
+    ReadRepair,
+    ReadRepairAck,
+    ReadResult,
+    Write,
+    WriteAck,
+    WriteNack,
+)
 from .key import Key
 from .replicated_data import ReplicatedData
 from .settings import ReplicatorSettings
@@ -313,16 +323,14 @@ class _ClusterEvent:
     event: ClusterDomainEvent
 
 
-@dataclass(frozen=True)
-class _NodesForReadWrite:
-    """Internal, for tests: replies with ``nodes_for_read_write(exclude_exiting)``."""
-
-    exclude_exiting: bool
-    reply_to: ActorRef[tuple[UniqueAddress, ...]]
-
-
 type _Msg = (
-    Replicator.Command | _GossipTick | _SubscriberTerminated | _ClusterEvent | _NodesForReadWrite
+    Replicator.Command
+    | Read
+    | Write
+    | ReadRepair
+    | _GossipTick
+    | _SubscriberTerminated
+    | _ClusterEvent
 )
 
 
@@ -371,8 +379,13 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             Unsubscribe,
         )
 
+        # imported here: the aggregators import Replicator from this module
+        from .aggregators import read_aggregator, write_aggregator
+
         cluster = Cluster(ctx.system)
         self_address = cluster.self_address
+        self_unique_address = cluster.self_unique_address
+        name = ReplicatorSettings.name_for(ctx.system, None)
         scheduler = ctx.system.scheduler
 
         # cluster nodes, without self, joining and weakly up ones
@@ -429,6 +442,18 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 return tuple(m.unique_address for m in members_by_age)
             return tuple(sorted(nodes))
 
+        def is_known_node(node: UniqueAddress) -> bool:
+            return (
+                node in nodes
+                or node in weakly_up_nodes
+                or node in joining_nodes
+                or node == self_unique_address
+            )
+
+        def replica(node: UniqueAddress) -> ActorRef[Any]:
+            """The Replicator on ``node``: this one's path at that node's address."""
+            return ctx.system.resolve(f"{node.root}/system/{name}")
+
         def receive_get(
             key: Key[Any],
             consistency: Replicator.ReadConsistency,
@@ -439,12 +464,24 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             update_used_timestamp(key.id, current_used_timestamp)
             if is_local_get(consistency):
                 reply_to.tell(local_reply(key, local_value))
-            # ponytail: Pekko starts a ReadAggregator here. With `nodes` empty it replies at once,
-            # as below; the aggregator replaces this when the Replicator tracks membership.
-            elif not_enough_nodes(consistency):
-                reply_to.tell(Replicator.GetFailure(key))
             else:
-                reply_to.tell(local_reply(key, local_value))
+                exclude_exiting = isinstance(
+                    consistency, Replicator.ReadMajorityPlus | Replicator.ReadAll
+                )
+                ctx.spawn_anonymous(
+                    read_aggregator(
+                        key,
+                        consistency,
+                        reply_to,
+                        nodes_for_read_write(exclude_exiting),
+                        unreachable,
+                        local_value,
+                        replica,
+                        ctx.self,
+                        self_unique_address,
+                        shuffle=not settings.prefer_oldest,
+                    )
+                )
 
         def local_reply(
             key: Key[Any], local_value: DataEnvelope | None
@@ -459,7 +496,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
 
         def is_local_get(read_consistency: Replicator.ReadConsistency) -> bool:
             match read_consistency:
-                case Replicator.ReadLocal():
+                case Replicator.ReadLocal() | Replicator.ReadFrom(1):  # n == 1: appendix B
                     return True
                 case Replicator.ReadMajority() | Replicator.ReadAll():
                     return not nodes
@@ -495,30 +532,80 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             update_used_timestamp(key.id, current_used_timestamp)
             if is_local_update(write_consistency):
                 reply_to.tell(Replicator.UpdateSuccess(key))
-            # ponytail: Pekko starts a WriteAggregator here, as in receive_get
-            elif not_enough_nodes(write_consistency):
-                reply_to.tell(Replicator.UpdateTimeout(key))
             else:
-                reply_to.tell(Replicator.UpdateSuccess(key))
+                start_write_aggregator(key, envelope, write_consistency, reply_to)
 
         def is_local_update(write_consistency: Replicator.WriteConsistency) -> bool:
             match write_consistency:
-                case Replicator.WriteLocal():
+                case Replicator.WriteLocal() | Replicator.WriteTo(1):  # n == 1: appendix B
                     return True
                 case Replicator.WriteMajority() | Replicator.WriteAll():
                     return not nodes
                 case _:
                     return False
 
-        def not_enough_nodes(
-            consistency: Replicator.ReadConsistency | Replicator.WriteConsistency,
-        ) -> bool:
-            """The aggregators' ``notEnoughNodes``: the local node counts as one replica."""
-            match consistency:
-                case Replicator.ReadFrom(n) | Replicator.WriteTo(n):
-                    return n > len(nodes) + 1
-                case _:
-                    return False
+        def start_write_aggregator(
+            key: Key[Any],
+            envelope: DataEnvelope,
+            consistency: Replicator.WriteConsistency,
+            reply_to: ActorRef[Any],
+        ) -> None:
+            """The WriteAggregator that receiveUpdate and receiveDelete start, without deltas."""
+            exclude_exiting = isinstance(
+                consistency, Replicator.WriteMajorityPlus | Replicator.WriteAll
+            )
+            ctx.spawn_anonymous(
+                write_aggregator(
+                    key,
+                    envelope,
+                    consistency,
+                    reply_to,
+                    nodes_for_read_write(exclude_exiting),
+                    unreachable,
+                    replica,
+                    self_unique_address,
+                    shuffle=not settings.prefer_oldest,
+                )
+            )
+
+        def receive_read(key: str, reply_to: ActorRef[ReadResult]) -> None:
+            reply_to.tell(ReadResult(get_data(key)))
+
+        def receive_write(
+            key: str, envelope: DataEnvelope, reply_to: ActorRef[WriteAck | WriteNack]
+        ) -> None:
+            write_and_store(key, envelope, reply_to)
+
+        def write_and_store(
+            key: str, write_envelope: DataEnvelope, reply_to: ActorRef[WriteAck | WriteNack] | None
+        ) -> None:
+            """Without durable storage, the store is left out: a reply, if any, goes at once."""
+            new_envelope = write(key, write_envelope)
+            if reply_to is not None:
+                reply_to.tell(WriteAck() if new_envelope is not None else WriteNack())
+
+        def write(key: str, write_envelope: DataEnvelope) -> DataEnvelope | None:
+            # Pekko's addSeen feeds only pruning, which is left out
+            match get_data(key):
+                case DataEnvelope() as envelope if envelope is write_envelope:
+                    return envelope
+                case DataEnvelope() as envelope if envelope.is_deleted:
+                    return DELETED_ENVELOPE  # already deleted
+                case DataEnvelope() as envelope:
+                    try:
+                        merged = envelope.merge(write_envelope)
+                    except TypeError as e:  # Pekko's IllegalArgumentException
+                        ctx.log.warning("Couldn't merge [%s], due to: %s", key, e)
+                        return None
+                    return set_data(key, merged)
+                case None:
+                    return set_data(key, write_envelope)
+
+        def receive_read_repair(
+            key: str, write_envelope: DataEnvelope, reply_to: ActorRef[ReadRepairAck]
+        ) -> None:
+            write_and_store(key, write_envelope, None)
+            reply_to.tell(ReadRepairAck())
 
         def receive_get_key_ids(reply_to: ActorRef[Replicator.GetKeyIdsResult]) -> None:
             keys = frozenset(
@@ -539,11 +626,8 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     update_used_timestamp(key.id, current_used_timestamp)
                     if is_local_update(consistency):
                         reply_to.tell(Replicator.DeleteSuccess(key))
-                    # ponytail: Pekko starts a WriteAggregator here, as in receive_get
-                    elif not_enough_nodes(consistency):
-                        reply_to.tell(Replicator.DeleteFailure(key))
                     else:
-                        reply_to.tell(Replicator.DeleteSuccess(key))
+                        start_write_aggregator(key, DELETED_ENVELOPE, consistency, reply_to)
 
         def set_data(key: str, envelope: DataEnvelope) -> DataEnvelope:
             if has_subscriber(key) and key not in changed:
@@ -768,10 +852,28 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         @Behaviors.receive
         def normal_receive(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
+                case Read(_, from_node) | Write(_, _, from_node) if (
+                    from_node is not None and not is_known_node(from_node)
+                ):
+                    # When restarting a node with same host:port it is possible that a Replicator
+                    # on another node is sending messages to the restarted node even if it hasn't
+                    # joined the same cluster. Therefore we check that the message was from a
+                    # known cluster member.
+                    ctx.log.info(
+                        "Ignoring message [%s] from unknown node [%s]",
+                        type(msg).__name__,
+                        from_node,
+                    )
+                case Read(key, _, reply_to):
+                    receive_read(key, reply_to)
+                case Write(key, envelope, _, reply_to):
+                    receive_write(key, envelope, reply_to)
                 case Replicator.Get(key, consistency, reply_to):
                     receive_get(key, consistency, reply_to)
                 case Replicator.Update(key, initial, write_consistency, reply_to, modify):
                     receive_update(key, initial, modify, write_consistency, reply_to)
+                case ReadRepair(key, envelope, reply_to):
+                    receive_read_repair(key, envelope, reply_to)
                 case Replicator.GetKeyIds(reply_to):
                     receive_get_key_ids(reply_to)
                 case Replicator.Delete(key, consistency, reply_to):
@@ -806,8 +908,6 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     receive_reachable(m)
                 case _ClusterEvent():
                     pass  # only member and reachability events are subscribed
-                case _NodesForReadWrite(exclude_exiting, reply_to):
-                    reply_to.tell(nodes_for_read_write(exclude_exiting))
             return Behaviors.same
 
         def on_signal(_ctx: ActorContext[_Msg], sig: Signal) -> Behavior[_Msg]:

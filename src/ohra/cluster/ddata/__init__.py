@@ -1,15 +1,17 @@
 """Pekko's Distributed Data: conflict-free replicated data types.
 
-This release has the data types and their building blocks: the ``ReplicatedData`` traits,
-``Key``, ``VersionVector``, the counters ``GCounter`` and ``PNCounter``, ``GSet``, ``ORSet``,
-``ORMap``, ``ORMultiMap``, ``LWWMap``, ``PNCounterMap``, ``Flag`` and ``LWWRegister`` with its
-clocks. The ``Replicator`` that gossips them between nodes comes in a later release.
+The data types and their building blocks: the ``ReplicatedData`` traits, ``Key``,
+``VersionVector``, the counters ``GCounter`` and ``PNCounter``, ``GSet``, ``ORSet``, ``ORMap``,
+``ORMultiMap``, ``LWWMap``, ``PNCounterMap``, ``Flag`` and ``LWWRegister`` with its clocks. The
+``Replicator`` holds them on each node, reached through the ``DistributedData`` extension.
+Replication between nodes is not here yet: every consistency level runs on the local node.
 """
 
 from dataclasses import dataclass
 
 from ...remote import UniqueAddress
 from ...remote.serialization import remotable
+from .distributed_data import DistributedData, ReplicatorMessageAdapter
 from .flag import Flag, FlagKey
 from .gcounter import GCounter, GCounterKey
 from .gset import GSet, GSetKey
@@ -29,6 +31,8 @@ from .replicated_data import (
     ReplicatedDeltaSize,
     RequiresCausalDeliveryOfDeltas,
 )
+from .replicator import Replicator
+from .settings import ReplicatorSettings
 from .version_vector import ManyVersionVector, OneVersionVector, VersionVector
 
 
@@ -50,6 +54,7 @@ __all__ = [
     "GSet",
     "GSetKey",
     "DeltaReplicatedData",
+    "DistributedData",
     "Key",
     "LWWMap",
     "LWWMapKey",
@@ -71,6 +76,9 @@ __all__ = [
     "ReplicatedData",
     "ReplicatedDelta",
     "ReplicatedDeltaSize",
+    "Replicator",
+    "ReplicatorMessageAdapter",
+    "ReplicatorSettings",
     "RequiresCausalDeliveryOfDeltas",
     "SelfUniqueAddress",
     "UnspecificKey",

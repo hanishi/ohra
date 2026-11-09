@@ -14,10 +14,13 @@ from ohra import (
     Behavior,
     Behaviors,
     GCounter,
+    GCounterKey,
     GSet,
     MailboxSelector,
     ORMap,
     ORSet,
+    ORSetKey,
+    Replicator,
     Routers,
     SelfUniqueAddress,
     SpawnProtocol,
@@ -227,3 +230,18 @@ node = SelfUniqueAddress(UniqueAddress("localhost", 7354, 1, "Sys"))
 ORSet[str]().add(node, 1)  # type: ignore[arg-type]
 GCounter().merge(ORSet[str]())  # type: ignore[arg-type]
 ORMap[str, GCounter]().put(node, "k", 1)  # type: ignore[arg-type]
+
+
+def check_replicator(rep: ActorRef[Replicator.Command], me: ActorRef[Any]) -> None:
+    k = GCounterKey("a")
+    rep.tell(Replicator.Get(k, Replicator.ReadLocal(), me))
+    rep.tell(Replicator.Update(k, GCounter(), Replicator.WriteLocal(), me, lambda c: c))
+    rep.tell(Replicator.Subscribe(k, me))
+    rep.tell("not a command")  # type: ignore[arg-type]
+    s = ORSetKey[str]("s")
+    Replicator.Update(s, ORSet[str](), Replicator.WriteLocal(), me, lambda _: GCounter())  # type: ignore[arg-type]
+
+
+def check_get_success(success: Replicator.GetSuccess[GCounter]) -> None:
+    data: ORSet[str] = success.data  # type: ignore[assignment]
+    del data

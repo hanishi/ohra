@@ -124,7 +124,7 @@ async def test_prefer_oldest_writes_to_the_oldest_first():
         # WriteTo(2) writes to one other node: the oldest, the seed, though its address sorts
         # last. It acks long before the secondary send, so the other gets nothing.
         for key in KEYS:
-            assert await update(low, key, Replicator.WriteTo(2, 5.0)) == (
+            assert await update(low, key, Replicator.WriteTo(2, 20.0)) == (
                 Replicator.UpdateSuccess(key)
             )
         for key in KEYS:

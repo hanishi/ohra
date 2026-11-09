@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from ...ref import ActorRef
 from ...remote import UniqueAddress
-from ...remote.serialization import remotable
+from ...remote.serialization import Serialization, remotable
 from .replicated_data import ReplicatedData
 
 
@@ -99,3 +99,32 @@ class ReadRepair:
 @dataclass(frozen=True)
 class ReadRepairAck:
     pass
+
+
+@dataclass(frozen=True)
+class Status:
+    """Pekko's gossip Status: key id to its digest and used timestamp. A timestamp of 0 is not
+    set, and a digest of the not-found sentinel asks for the key."""
+
+    digests: dict[str, tuple[str, float]]
+    chunk: int
+    tot_chunks: int
+    to_system_uid: int
+    from_system_uid: int
+    reply_to: ActorRef[Status | Gossip]
+
+
+@dataclass(frozen=True)
+class Gossip:
+    """Pekko's Gossip: key id to its envelope and used timestamp."""
+
+    updated_data: dict[str, tuple[DataEnvelope, float]]
+    send_back: bool
+    to_system_uid: int
+    from_system_uid: int
+    reply_to: ActorRef[Status | Gossip]
+
+
+# the cluster's own Gossip takes the class name
+Serialization.register(Status, "Replicator.Status")
+Serialization.register(Gossip, "Replicator.Gossip")

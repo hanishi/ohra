@@ -2,28 +2,37 @@
 responses nested in ``Replicator`` as ``EventStream``'s are, and the actor, whose handlers port
 classic ``Replicator.scala`` function for function.
 
-The Replicator tracks the cluster's members, and reads and writes at a level other than local
-through aggregator children. Gossip between Replicators is not here yet.
+The Replicator tracks the cluster's members, reads and writes at a level other than local
+through aggregator children, and gossips digests to a random replica for anti-entropy. Deltas,
+pruning and durable storage are not here.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import random
+import time
+import zlib
 from bisect import insort
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from ...behavior import Behavior, Behaviors
 from ...cell import watched_ref
+from ...remote.remoting import MAX_FRAME, pack
+from ...remote.serialization import Serialization
 from ...signals import PostStop, PreRestart, Signal
 from .envelope import (
     DELETED_ENVELOPE,
     DataEnvelope,
+    Gossip,
     Read,
     ReadRepair,
     ReadRepairAck,
     ReadResult,
+    Status,
     Write,
     WriteAck,
     WriteNack,
@@ -33,6 +42,8 @@ from .replicated_data import ReplicatedData
 from .settings import ReplicatorSettings
 
 if TYPE_CHECKING:
+    from logging import Logger
+
     from ...context import ActorContext
     from ...ref import ActorRef
     from ...remote import Address, UniqueAddress
@@ -295,13 +306,56 @@ class Replicator:
     )
 
 
-type _Digest = bytes
-# Pekko's LazyDigest and DeletedDigest. The digests that gossip compares come with gossip.
-_LAZY_DIGEST: _Digest = b"\x00"
-_DELETED_DIGEST: _Digest = b""
+# Pekko's SHA-1 Digest, as lowercase hex. The sentinels can never be hex SHA-1.
+type _Digest = str
+_DELETED_DIGEST: _Digest = ""
+_LAZY_DIGEST: _Digest = "lazy"
+_NOT_FOUND_DIGEST: _Digest = "not-found"
 
-# Pekko's used timestamp, on the system scheduler's clock. None is Pekko's 0L: not set.
+# Pekko's used timestamp, in seconds since the epoch. None is Pekko's 0L: not set. On the wire,
+# in Status and Gossip, it is 0.0.
 type _Timestamp = float
+
+
+def _chunk_of(key: str, tot_chunks: int) -> int:
+    """Pekko's ``math.abs(key.hashCode % totChunks)``. Python's str hash differs per process, so
+    the chunk comes from the key's CRC-32, which every node computes alike."""
+    return zlib.crc32(key.encode()) % tot_chunks
+
+
+class _PayloadSizeAggregator:
+    """Pekko's PayloadSizeAggregator: logs the encoded size of data larger than
+    ``log_size_exceeding``, again only once it has grown by 10%, and keeps the largest size seen
+    per key for sizing Gossip messages."""
+
+    def __init__(self, log: Logger, log_size_exceeding: int, max_frame_size: int) -> None:
+        self._log = log
+        self._log_size_exceeding = log_size_exceeding
+        self.max_frame_size = max_frame_size
+        self._warn_size_exceeding = max_frame_size * 3 // 4
+        self._max_payload_bytes: dict[str, int] = {}
+
+    def update_payload_size(self, key: str, size: int) -> None:
+        if size > 0:  # deleted has size 0
+            existing = self._max_payload_bytes.get(key)
+            if existing is None or size > existing:
+                self._max_payload_bytes[key] = int(size * 1.1)  # 10% threshold until next log
+                if size >= self._log_size_exceeding:
+                    if size >= self._warn_size_exceeding:
+                        self._log.warning(
+                            "Distributed data size for [%s] is [%s] bytes. Close to max remote "
+                            "message payload size.",
+                            key,
+                            size,
+                        )
+                    else:
+                        self._log.info("Distributed data size for [%s] is [%s] bytes.", key, size)
+
+    def get_max_size(self, key: str) -> int:
+        return self._max_payload_bytes.get(key, 0)
+
+    def remove(self, key: str) -> None:
+        self._max_payload_bytes.pop(key, None)
 
 
 @dataclass(frozen=True)
@@ -328,6 +382,8 @@ type _Msg = (
     | Read
     | Write
     | ReadRepair
+    | Status
+    | Gossip
     | _GossipTick
     | _SubscriberTerminated
     | _ClusterEvent
@@ -385,8 +441,25 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         cluster = Cluster(ctx.system)
         self_address = cluster.self_address
         self_unique_address = cluster.self_unique_address
+        self_from_system_uid = self_unique_address.uid
         name = ReplicatorSettings.name_for(ctx.system, None)
         scheduler = ctx.system.scheduler
+        remoting = ctx.system.remoting
+        assert remoting is not None  # a cluster node has remoting
+        max_delta_elements = settings.max_delta_elements
+
+        # Pekko's System.currentTimeMillis, in seconds: the scheduler's clock, so ManualTime drives
+        # expiry, anchored to the epoch once, so used timestamps from other nodes compare
+        epoch_offset = time.time() - scheduler.current_time
+
+        def now() -> float:
+            return scheduler.current_time + epoch_offset
+
+        payload_size_aggregator = _PayloadSizeAggregator(
+            ctx.log,
+            settings.log_data_size_exceeding or 2**63,  # None: Pekko's Int.MaxValue
+            MAX_FRAME,
+        )
 
         # cluster nodes, without self, joining and weakly up ones
         nodes: set[UniqueAddress] = set()
@@ -397,6 +470,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         joining_nodes: set[UniqueAddress] = set()
         exiting_nodes: set[UniqueAddress] = set()
         unreachable: set[UniqueAddress] = set()
+
+        # the chunk of the keys the next Status covers, when there are more than max_delta_elements
+        status_count = 0
+        status_tot_chunks = 0
 
         # Pekko's preStart. No ClusterShuttingDown in ohra: the node's own MemberRemoved stops
         # the Replicator. The subscription replays the current state, as InitialStateAsEvents.
@@ -416,9 +493,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         }
         expiry_enabled = bool(expiry_keys)
         # updated on the gossip tick, as Pekko's, which avoids reading the clock on every access
-        current_used_timestamp: _Timestamp | None = (
-            scheduler.current_time if expiry_enabled else None
-        )
+        current_used_timestamp: _Timestamp | None = now() if expiry_enabled else None
 
         data_entries: dict[str, tuple[DataEnvelope, _Digest, _Timestamp | None]] = {}
         # keys that have changed: Changed, Deleted and Expired go to subscribers on FlushChanges
@@ -450,6 +525,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 or node == self_unique_address
             )
 
+        def all_nodes() -> set[UniqueAddress]:
+            """Up and weakly up nodes, unreachable ones included; without joining ones and self."""
+            return nodes | weakly_up_nodes
+
         def replica(node: UniqueAddress) -> ActorRef[Any]:
             """The Replicator on ``node``: this one's path at that node's address."""
             return ctx.system.resolve(f"{node.root}/system/{name}")
@@ -474,7 +553,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         consistency,
                         reply_to,
                         nodes_for_read_write(exclude_exiting),
-                        unreachable,
+                        frozenset(unreachable),
                         local_value,
                         replica,
                         ctx.self,
@@ -561,7 +640,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     consistency,
                     reply_to,
                     nodes_for_read_write(exclude_exiting),
-                    unreachable,
+                    frozenset(unreachable),
                     replica,
                     self_unique_address,
                     shuffle=not settings.prefer_oldest,
@@ -624,6 +703,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 case _:
                     set_data(key.id, DELETED_ENVELOPE)
                     update_used_timestamp(key.id, current_used_timestamp)
+                    payload_size_aggregator.remove(key.id)
                     if is_local_update(consistency):
                         reply_to.tell(Replicator.DeleteSuccess(key))
                     else:
@@ -631,13 +711,36 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
 
         def set_data(key: str, envelope: DataEnvelope) -> DataEnvelope:
             if has_subscriber(key) and key not in changed:
-                # ponytail: Pekko compares the old and new SHA-1 digests here; envelope equality
-                # stands in until gossip brings the digests
-                if get_data(key) != envelope:
+                old_digest = get_digest(key)
+                dig, payload_size = digest(envelope)
+                payload_size_aggregator.update_payload_size(key, payload_size)
+                if dig != old_digest:
                     changed.add(key)  # notify subscribers, later
-            dig = _DELETED_DIGEST if envelope.is_deleted else _LAZY_DIGEST
+            elif envelope.is_deleted:
+                dig = _DELETED_DIGEST
+            else:
+                dig = _LAZY_DIGEST
             data_entries[key] = (envelope, dig, get_used_timestamp(key))
             return envelope
+
+        def get_digest(key: str) -> _Digest:
+            match data_entries.get(key):
+                case (envelope, digest_, used_timestamp) if digest_ == _LAZY_DIGEST:
+                    d, size = digest(envelope)
+                    payload_size_aggregator.update_payload_size(key, size)
+                    data_entries[key] = (envelope, d, used_timestamp)
+                    return d
+                case (_, digest_, _):
+                    return digest_
+                case None:
+                    return _NOT_FOUND_DIGEST
+
+        def digest(envelope: DataEnvelope) -> tuple[_Digest, int]:
+            """The SHA-1 digest of the encoded data, and the size of the encoded data."""
+            if envelope.is_deleted:
+                return _DELETED_DIGEST, 0
+            body = pack(Serialization.encode(envelope, remoting.ref_path))[4:]  # no length prefix
+            return hashlib.sha1(body).hexdigest(), len(body)
 
         def get_data(key: str) -> DataEnvelope | None:
             entry = data_entries.get(key)
@@ -654,6 +757,12 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         def get_used_timestamp(key: str) -> _Timestamp | None:
             entry = data_entries.get(key) if expiry_enabled else None
             return None if entry is None else entry[2]
+
+        def is_expired(key: str, timestamp: _Timestamp | None, now: float) -> bool:
+            if expiry_enabled and timestamp is not None:
+                expiry_duration = get_expiry_duration(key)
+                return expiry_duration != 0.0 and timestamp <= now - expiry_duration
+            return False
 
         def update_used_timestamp(key: str, timestamp: _Timestamp | None) -> None:
             if expiry_enabled and timestamp is not None:
@@ -722,7 +831,193 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
 
         def receive_gossip_tick() -> None:
             cleanup_expired()
-            # gossip to a random node comes with anti-entropy
+            # Pekko's fullStateGossipEnabled is always on: there are no deltas
+            if (address := select_random_node(sorted(all_nodes()))) is not None:
+                gossip_to(address)
+
+        def gossip_to(address: UniqueAddress) -> None:
+            nonlocal status_count, status_tot_chunks
+            to = replica(address)
+            to_system_uid = address.uid
+            if len(data_entries) <= max_delta_elements:
+                status = Status(
+                    {
+                        k: (get_digest(k), ts or 0.0)
+                        for k, (_, _, ts) in list(data_entries.items())
+                    },
+                    0,
+                    1,
+                    to_system_uid,
+                    self_from_system_uid,
+                    ctx.self,
+                )
+                to.tell(status)
+            else:
+                tot_chunks = len(data_entries) // max_delta_elements
+                for _ in range(min(tot_chunks, 10)):
+                    if tot_chunks == status_tot_chunks:
+                        status_count += 1
+                    else:
+                        status_count = random.randrange(tot_chunks)
+                        status_tot_chunks = tot_chunks
+                    chunk = status_count % tot_chunks
+                    status = Status(
+                        {
+                            k: (get_digest(k), ts or 0.0)
+                            for k, (_, _, ts) in list(data_entries.items())
+                            if _chunk_of(k, tot_chunks) == chunk
+                        },
+                        chunk,
+                        tot_chunks,
+                        to_system_uid,
+                        self_from_system_uid,
+                        ctx.self,
+                    )
+                    to.tell(status)
+
+        def select_random_node(addresses: list[UniqueAddress]) -> UniqueAddress | None:
+            return random.choice(addresses) if addresses else None
+
+        def receive_status(
+            other_digests: dict[str, tuple[_Digest, float]],
+            chunk: int,
+            tot_chunks: int,
+            from_system_uid: int,
+            reply_to: ActorRef[Status | Gossip],
+        ) -> None:
+            ctx.log.debug(
+                "Received gossip status from [%s], chunk [%s] of [%s] containing [%s].",
+                reply_to.path,
+                chunk + 1,
+                tot_chunks,
+                ", ".join(other_digests),
+            )
+            # update the used timestamp when needed
+            if expiry_enabled:
+                for key, (_, used_timestamp) in other_digests.items():
+                    # if we don't have the key it will be updated with the full Gossip
+                    update_used_timestamp(key, used_timestamp or None)
+
+            def is_other_different(key: str, other_digest: _Digest) -> bool:
+                d = get_digest(key)
+                return d != _NOT_FOUND_DIGEST and d != other_digest
+
+            other_different_keys = [
+                key for key, (d, _) in other_digests.items() if is_other_different(key, d)
+            ]
+            other_keys = other_digests.keys()
+            my_keys = (
+                set(data_entries)
+                if tot_chunks == 1
+                else {k for k in data_entries if _chunk_of(k, tot_chunks) == chunk}
+            )
+            if expiry_enabled:
+                now_ = now()
+                other_missing_keys = [
+                    k
+                    for k in my_keys - other_keys
+                    if not is_expired(k, get_used_timestamp(k), now_)
+                ]
+            else:
+                other_missing_keys = list(my_keys - other_keys)
+            keys = [*other_different_keys, *other_missing_keys][:max_delta_elements]
+            if keys:
+                ctx.log.debug(
+                    "Sending gossip to [%s], containing [%s]", reply_to.path, ", ".join(keys)
+                )
+                send_back = bool(other_different_keys)
+                for g in create_gossip_messages(keys, send_back, from_system_uid):
+                    reply_to.tell(g)
+            my_missing_keys = other_keys - my_keys
+            if my_missing_keys:
+                ctx.log.debug(
+                    "Sending gossip status to [%s], requesting missing [%s]",
+                    reply_to.path,
+                    ", ".join(my_missing_keys),
+                )
+                status = Status(
+                    {k: (_NOT_FOUND_DIGEST, 0.0) for k in my_missing_keys},
+                    chunk,
+                    tot_chunks,
+                    from_system_uid,
+                    self_from_system_uid,
+                    ctx.self,
+                )
+                reply_to.tell(status)
+
+        def create_gossip_messages(
+            keys: Collection[str], send_back: bool, from_system_uid: int
+        ) -> list[Gossip]:
+            # The sizes don't have to be exact, rather error on too small messages.
+            max_message_size = payload_size_aggregator.max_frame_size - 128
+
+            messages: list[Gossip] = []
+            collected_entries: dict[str, tuple[DataEnvelope, float]] = {}
+            total = 0
+
+            def add_gossip() -> None:
+                if collected_entries:
+                    messages.append(
+                        Gossip(
+                            dict(collected_entries),
+                            send_back,
+                            from_system_uid,
+                            self_from_system_uid,
+                            ctx.self,
+                        )
+                    )
+
+            for key in keys:
+                key_size = len(key) + 4
+                data_size = payload_size_aggregator.get_max_size(key)
+                if data_size == 0:
+                    get_digest(key)  # trigger payload_size_aggregator update (LazyDigest)
+                    data_size = payload_size_aggregator.get_max_size(key)
+                data_envelope = get_data(key)
+                assert data_envelope is not None  # keys are ones this node holds
+                # Pekko adds the envelope's estimated pruning size, and there is no pruning here
+                envelope_size = 100
+                entry_size = key_size + data_size + envelope_size
+                entry = (data_envelope, get_used_timestamp(key) or 0.0)
+                if total + entry_size <= max_message_size:
+                    collected_entries[key] = entry
+                    total += entry_size
+                else:
+                    add_gossip()
+                    collected_entries.clear()
+                    collected_entries[key] = entry
+                    total = entry_size
+
+            add_gossip()  # add remaining, if any
+            ctx.log.debug(
+                "Created [%s] Gossip messages from [%s] data entries.", len(messages), len(keys)
+            )
+            return messages
+
+        def receive_gossip(
+            updated_data: dict[str, tuple[DataEnvelope, float]],
+            send_back: bool,
+            from_system_uid: int,
+            reply_to: ActorRef[Status | Gossip],
+        ) -> None:
+            ctx.log.debug(
+                "Received gossip from [%s], containing [%s].",
+                reply_to.path,
+                ", ".join(updated_data),
+            )
+            reply_keys: set[str] = set()
+            now_ = now() if expiry_enabled else 0.0
+            for key, (envelope, used_timestamp) in updated_data.items():
+                if not is_expired(key, used_timestamp or None, now_):
+                    had_data = key in data_entries
+                    write_and_store(key, envelope, None)
+                    update_used_timestamp(key, used_timestamp or None)
+                    # Pekko also sends back data with pruning, and there is no pruning here
+                    if send_back and had_data and get_data(key) is not None:
+                        reply_keys.add(key)
+            if send_back and reply_keys:
+                for g in create_gossip_messages(reply_keys, False, from_system_uid):
+                    reply_to.tell(g)
 
         def receive_subscribe(key: Key[Any], subscriber: ActorRef[Any]) -> None:
             _add_binding(new_subscribers, key.id, subscriber)
@@ -735,20 +1030,21 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         def cleanup_expired() -> None:
             nonlocal current_used_timestamp
             if expiry_enabled:
-                now = scheduler.current_time
+                now_ = now()
                 # no need to be more accurate than the gossip tick interval
-                current_used_timestamp = now
+                current_used_timestamp = now_
                 expired_keys = [
                     key
                     # None when set by a Write the first time: such a key does not expire at once
                     for key, (_, _, used_timestamp) in data_entries.items()
                     if used_timestamp is not None
                     and (duration := get_expiry_duration(key)) != 0.0
-                    and used_timestamp <= now - duration
+                    and used_timestamp <= now_ - duration
                 ]
                 if expired_keys:
                     ctx.log.debug("Removing expired keys [%s]", ", ".join(expired_keys))
                     for key in expired_keys:
+                        payload_size_aggregator.remove(key)
                         changed.add(key)  # notify subscribers, later
                         del data_entries[key]
 
@@ -864,6 +1160,25 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         type(msg).__name__,
                         from_node,
                     )
+                case Status(to_system_uid=uid) | Gossip(to_system_uid=uid) if (
+                    uid != self_from_system_uid
+                ):
+                    # When restarting a node with same host:port it is possible that a Replicator
+                    # on another node is sending messages to the restarted node even if it hasn't
+                    # joined the same cluster. Therefore we check that the message was intended
+                    # for this incarnation and otherwise it is discarded.
+                    ctx.log.info(
+                        "Ignoring message [%s] from [%s] intended for system uid [%s], self uid "
+                        "is [%s]",
+                        type(msg).__name__,
+                        msg.reply_to.path,
+                        uid,
+                        self_from_system_uid,
+                    )
+                case Status(digests, chunk, tot_chunks, _, from_system_uid, reply_to):
+                    receive_status(digests, chunk, tot_chunks, from_system_uid, reply_to)
+                case Gossip(updated_data, send_back, _, from_system_uid, reply_to):
+                    receive_gossip(updated_data, send_back, from_system_uid, reply_to)
                 case Read(key, _, reply_to):
                     receive_read(key, reply_to)
                 case Write(key, envelope, _, reply_to):

@@ -12,6 +12,7 @@ from ...supervision import SupervisorStrategy
 from .key import Key
 from .replicated_data import ReplicatedData
 from .replicator import Replicator
+from .settings import ReplicatorSettings
 
 if TYPE_CHECKING:
     from ...context import ActorContext
@@ -50,7 +51,8 @@ class DistributedData:
                 SupervisorStrategy.restart()
             )
             self = object.__new__(cls)
-            self.replicator = system._system_root.spawn_child(behavior, settings.name, None).ref  # pyright: ignore[reportPrivateUsage]
+            name = ReplicatorSettings.name_for(system, None)
+            self.replicator = system._system_root.spawn_child(behavior, name, None).ref  # pyright: ignore[reportPrivateUsage]
             self.self_unique_address = SelfUniqueAddress(cluster.self_unique_address)
             system.distributed_data = self
         return system.distributed_data

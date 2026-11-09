@@ -155,6 +155,11 @@ async def test_the_replicator_lives_under_system():
         assert str(node.replicator.path).endswith("/system/ddataReplicator")
 
 
+async def test_the_replicator_has_the_configured_name():
+    async with single_node(ReplicatorSettings(name="fooReplicator")) as node:
+        assert str(node.replicator.path).endswith("/system/fooReplicator")
+
+
 async def test_adapter_ask_update_and_ask_get():
     async with single_node() as node:
         key = GCounterKey("counter1")

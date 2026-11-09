@@ -284,18 +284,13 @@ class _GossipTick:
 
 
 @dataclass(frozen=True)
-class _ClockTick:
-    pass
-
-
-@dataclass(frozen=True)
 class _SubscriberTerminated:
     """A watched subscriber stopped: Pekko's Terminated, as ``watch_with`` delivers it."""
 
     ref: ActorRef[Any]
 
 
-type _Msg = Replicator.Command | _GossipTick | _ClockTick | _SubscriberTerminated
+type _Msg = Replicator.Command | _GossipTick | _SubscriberTerminated
 
 
 def _is_wildcard(key_id: str) -> bool:
@@ -324,16 +319,13 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
     def setup(ctx: ActorContext[_Msg]) -> Behavior[_Msg]:
         # the other members that are Up or Leaving, empty until the Replicator tracks membership
         nodes: set[UniqueAddress] = set()
-        # empty until the Replicator tracks reachability
-        unreachable: set[UniqueAddress] = set()
         scheduler = ctx.system.scheduler
 
-        # Pekko's gossipTask, notifyTask and clockTask
+        # Pekko's gossipTask and notifyTask; its clockTask feeds only pruning, which is left out
         ctx.timers.start_timer_with_fixed_delay("gossip", _GossipTick(), settings.gossip_interval)
         ctx.timers.start_timer_with_fixed_delay(
             "notify", Replicator.FlushChanges(), settings.notify_subscribers_interval
         )
-        ctx.timers.start_timer_with_fixed_delay("clock", _ClockTick(), settings.gossip_interval)
 
         expiry_keys = settings.expire_keys_after_inactivity
         expiry_wildcards = {
@@ -344,10 +336,6 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         current_used_timestamp: _Timestamp | None = (
             scheduler.current_time if expiry_enabled else None
         )
-
-        # for pruning, timeouts are based on a clock that only advances while all are reachable
-        previous_clock_time = scheduler.current_time
-        all_reachable_clock_time = 0.0
 
         data_entries: dict[str, tuple[DataEnvelope, _Digest, _Timestamp | None]] = {}
         # keys that have changed: Changed, Deleted and Expired go to subscribers on FlushChanges
@@ -646,13 +634,6 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 if not has_subscriber(key) and key not in new_subscribers:
                     subscription_keys.pop(key, None)
 
-        def receive_clock_tick() -> None:
-            nonlocal previous_clock_time, all_reachable_clock_time
-            now = scheduler.current_time
-            if not unreachable:
-                all_reachable_clock_time += now - previous_clock_time
-            previous_clock_time = now
-
         def receive_get_replica_count(reply_to: ActorRef[Replicator.ReplicaCount]) -> None:
             reply_to.tell(Replicator.ReplicaCount(len(nodes) + 1))  # nodes excludes self
 
@@ -673,8 +654,6 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     receive_flush_changes()
                 case _GossipTick():
                     receive_gossip_tick()
-                case _ClockTick():
-                    receive_clock_tick()
                 case Replicator.Subscribe(key, subscriber):
                     receive_subscribe(key, subscriber)
                 case Replicator.Unsubscribe(key, subscriber):

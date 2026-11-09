@@ -9,7 +9,6 @@ and B4.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Callable
 
@@ -21,7 +20,7 @@ from ohra.cluster.ddata import (
     Replicator,
     ReplicatorSettings,
 )
-from ohra.cluster.ddata.envelope import Gossip, Status
+from ohra.cluster.ddata.envelope import DataEnvelope, Gossip, Status
 from ohra.ref import ActorRef
 from ohra.remote import Address
 from ohra.testkit import Direction, MultiNodeConfig, MultiNodeSpec, TestProbe, multi_node_spec
@@ -99,6 +98,12 @@ async def key_ids(spec: MultiNodeSpec, replicator: ActorRef[Replicator.Command])
     probe: TestProbe[Replicator.GetKeyIdsResult] = spec.create_test_probe()
     replicator.tell(Replicator.GetKeyIds(probe.ref))
     return (await probe.receive_message()).key_ids
+
+
+def replicator_of(spec: MultiNodeSpec) -> ActorRef[Status | Gossip]:
+    """This node's Replicator, as another node's Replicator sends to it: Status and Gossip are no
+    Replicator.Command."""
+    return spec.system.resolve(f"{spec.node(spec.myself)}/system/ddataReplicator")
 
 
 async def converged(
@@ -196,8 +201,7 @@ async def test_status_for_another_incarnation_is_ignored(spec: MultiNodeSpec):
         assert await update(spec, replicator) == Replicator.UpdateSuccess(KeyA)
         uid = Cluster(spec.system).self_unique_address.uid
         probe: TestProbe[Status | Gossip] = spec.create_test_probe()
-        # as another node's Replicator sends it: Status is no Replicator.Command
-        to: ActorRef[Status] = spec.system.resolve(f"{spec.node(first)}/system/ddataReplicator")
+        to = replicator_of(spec)
         to.tell(Status({}, 0, 1, uid + 1, 4711, probe.ref))
         await probe.expect_no_message(0.5)
         # the same Status for this incarnation gets the key this node holds and the sender lacks
@@ -226,36 +230,77 @@ async def test_keys_beyond_max_delta_elements_gossip_in_chunks(spec: MultiNodeSp
 
 
 @multi_node_spec(config)
-async def test_a_key_used_on_one_node_does_not_expire_on_another(spec: MultiNodeSpec):
+async def test_gossip_for_another_incarnation_is_ignored(spec: MultiNodeSpec):
     replicator = await join(spec)
     await spec.enter_barrier("after-join")
-    key = GCounterKey("expiring-a")
 
-    # the second node creates the key, and never touches it again
+    if spec.is_node(first):
+        uid = Cluster(spec.system).self_unique_address.uid
+        probe: TestProbe[Status | Gossip] = spec.create_test_probe()
+        updated_data = {"B": (DataEnvelope(GCounter()), 0.0)}
+        replicator_of(spec).tell(Gossip(updated_data, False, uid + 1, 4711, probe.ref))
+        assert "B" not in await key_ids(spec, replicator)
+        # the same Gossip for this incarnation is written
+        replicator_of(spec).tell(Gossip(updated_data, False, uid, 4711, probe.ref))
+        assert "B" in await key_ids(spec, replicator)
+    await spec.enter_barrier("after-gossip-uid")
+
+
+async def a_stamped_key_outlives_an_unstamped_one(
+    spec: MultiNodeSpec,
+    stamp: Callable[[str, float, int, ActorRef[Status | Gossip]], Status | Gossip],
+) -> None:
+    """Two keys are used together on the second node; then a message from another node carries a
+    later used timestamp for one of them. The other expires, and the stamped one is kept."""
+    replicator = await join(spec)
+    await spec.enter_barrier("after-join")
+    control, stamped = GCounterKey("expiring-control"), GCounterKey("expiring-stamped")
+
     if spec.is_node(second):
-        assert await update(spec, replicator, key=key) == Replicator.UpdateSuccess(key)
-    await spec.enter_barrier("created")
+        for key in (control, stamped):
+            assert await update(spec, replicator, key=key) == Replicator.UpdateSuccess(key)
+        uid = Cluster(spec.system).self_unique_address.uid
+        probe: TestProbe[Status | Gossip] = spec.create_test_probe()
+        # a used timestamp on the PF3 clock, seconds since the epoch, far ahead of the control's
+        replicator_of(spec).tell(stamp(stamped.id, time.time() + 100.0, uid, probe.ref))
 
-    async def held() -> None:
-        assert key.id in await key_ids(spec, replicator)
+        async def control_expired() -> None:
+            assert control.id not in await key_ids(spec, replicator)
 
-    await spec.await_assert(held, max=5.0, interval=0.05)
-    await spec.enter_barrier("spread")
+        await spec.await_assert(control_expired, max=5.0, interval=0.05)
+        assert stamped.id in await key_ids(spec, replicator)
+    await spec.enter_barrier("after-stamp")
 
-    # for three expiry periods the first node uses the key, and the others keep it: its used
-    # timestamp reaches them with Status and Gossip
-    deadline = time.monotonic() + 3 * EXPIRY
-    while time.monotonic() < deadline:
-        if spec.is_node(first):
-            assert isinstance(await get(spec, replicator, key), Replicator.GetSuccess)
-        else:
-            await held()
-        await asyncio.sleep(0.05)
-    await spec.enter_barrier("used")
 
-    # unused, it expires everywhere
-    async def expired() -> None:
-        assert key.id not in await key_ids(spec, replicator)
+@multi_node_spec(config)
+async def test_a_used_timestamp_in_status_keeps_the_key_from_expiring(spec: MultiNodeSpec):
+    await a_stamped_key_outlives_an_unstamped_one(
+        spec, lambda key, ts, uid, reply_to: Status({key: ("", ts)}, 0, 1, uid, 4711, reply_to)
+    )
 
-    await spec.await_assert(expired, max=5.0, interval=0.05)
-    await spec.enter_barrier("after-6")
+
+@multi_node_spec(config)
+async def test_a_used_timestamp_in_gossip_keeps_the_key_from_expiring(spec: MultiNodeSpec):
+    await a_stamped_key_outlives_an_unstamped_one(
+        spec,
+        lambda key, ts, uid, reply_to: Gossip(
+            {key: (DataEnvelope(GCounter()), ts)}, False, uid, 4711, reply_to
+        ),
+    )
+
+
+@multi_node_spec(config)
+async def test_status_and_gossip_carry_the_used_timestamp(spec: MultiNodeSpec):
+    replicator = await join(spec)
+    await spec.enter_barrier("after-join")
+
+    if spec.is_node(first):
+        assert await update(spec, replicator) == Replicator.UpdateSuccess(KeyA)
+        assert isinstance(await get(spec, replicator), Replicator.GetSuccess)  # a touch
+        uid = Cluster(spec.system).self_unique_address.uid
+        probe: TestProbe[Status | Gossip] = spec.create_test_probe()
+        replicator_of(spec).tell(Status({}, 0, 1, uid, 4711, probe.ref))
+        gossip = await probe.receive_message()
+        assert isinstance(gossip, Gossip), gossip
+        assert gossip.updated_data["A"][1] > 0.0  # 0.0 is unset
+    await spec.enter_barrier("after-carry")

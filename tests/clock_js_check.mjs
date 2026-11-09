@@ -1,4 +1,4 @@
-// offsetFrom in src/ohra/ext/clock.js, run by tests/test_clock_js.py.
+// offsetFrom in src/ohra/ext/clock.js, built from clock.ts, run by tests/test_clock_js.py.
 import assert from "node:assert/strict";
 import { connect, delayFor, errorFrom, offsetFrom, SAMPLE_WINDOW } from "../src/ohra/ext/clock.js";
 

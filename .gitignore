@@ -8,3 +8,5 @@ docs/superpowers/
 .superpowers/
 examples/relay_rally/node_modules/
 examples/relay_rally/dist/
+src/ohra/ext/clock.js
+src/ohra/ext/clock.d.ts

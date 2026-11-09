@@ -57,6 +57,13 @@
 | `ClusterSharding(system).init(Entity(key, create))`, `entityRefFor(key, id)` | same, `entity_ref_for(key, id)`; the region ref is returned, as Pekko Typed |
 | `HashCodeMessageExtractor(numberOfShards)` | `ClusterShardingSettings(number_of_shards=...)`; the shard id is `crc32(entity_id) % number_of_shards` |
 | `ClusterShardingSettings` tuning parameters (`retry-interval`, `rebalance-interval`, `handoff-timeout`, `shard-start-timeout`, `buffer-size`, `rebalance-absolute-limit`, `rebalance-relative-limit`, `coordinator-singleton`) | `ClusterShardingSettings` fields in snake_case, seconds; `coordinator_singleton_settings` is a `ClusterSingletonSettings` |
+| `DistributedData(system).replicator`, `selfUniqueAddress` | `DistributedData(system).replicator`, `self_unique_address`; raises `RuntimeError` on a system without `cluster=` |
+| `DistributedData.withReplicatorMessageAdapter[Command, A](factory)` | `DistributedData.with_replicator_message_adapter(factory, unexpected_ask_timeout=20.0)` |
+| `ReplicatorMessageAdapter.askUpdate / askGet / askDelete / askReplicaCount / subscribe / unsubscribe` | `ReplicatorMessageAdapter[M, A].ask_update / ask_get / ask_delete / ask_replica_count / subscribe / unsubscribe` |
+| `Replicator.Update(key, initial, writeConsistency, replyTo)(modify)`, `Get(key, consistency, replyTo)`, `Delete(key, consistency, replyTo)`, `Subscribe(key, subscriber)`, `Unsubscribe`, `GetReplicaCount(replyTo)`, `FlushChanges` | `Replicator.Update(key, initial, write_consistency, reply_to, modify)`, `Replicator.Get`, `Delete`, `Subscribe`, `Unsubscribe`, `GetReplicaCount(reply_to)`, `FlushChanges()` |
+| `GetSuccess`, `NotFound`, `GetFailure`, `GetDataDeleted`, `UpdateSuccess`, `UpdateTimeout`, `UpdateDataDeleted`, `ModifyFailure`, `StoreFailure`, `DeleteSuccess`, `DeleteFailure`, `DataDeleted`, `Changed`, `Deleted`, `Expired`, `ReplicaCount` | the same, nested in `Replicator`; `ModifyFailure(key, error_message, cause)`; `GetSuccess` and `Changed` have `get(key)` |
+| `ReadLocal`, `ReadFrom(n, timeout)`, `ReadMajority(timeout, minCap)`, `ReadMajorityPlus(timeout, additional, minCap)`, `ReadAll(timeout)`, and the `Write` levels | `Replicator.ReadLocal()`, `ReadFrom(n, timeout)`, `ReadMajority(timeout, min_cap=0)`, `ReadMajorityPlus(timeout, additional, min_cap=0)`, `ReadAll(timeout)`, and the same for `Write`; frozen dataclasses, timeouts in seconds |
+| `ReplicatorSettings`, `pekko.cluster.distributed-data.*` | `ClusterSettings(distributed_data=ReplicatorSettings(name, gossip_interval, notify_subscribers_interval, max_delta_elements, log_data_size_exceeding, prefer_oldest, expire_keys_after_inactivity))`, in seconds; `ReplicatorSettings.name_for(system, prefix)` |
 | `Routers.pool(n)(behavior)`, `withRoundRobinRouting / withRandomRouting / withConsistentHashingRouting` | `Routers.pool(n, behavior)`, same methods in snake_case |
 | `system.scheduler.scheduleOnce / scheduleWithFixedDelay / scheduleAtFixedRate`, `Cancellable` | `system.scheduler.schedule_once / schedule_with_fixed_delay / schedule_at_fixed_rate`, `Cancellable`; delays in seconds; `ActorSystem(..., scheduler=...)` in place of `pekko.scheduler.implementation` |
 | `system.eventStream ! EventStream.Subscribe[E](ref)`, `Unsubscribe(ref)`, `Publish(event)` | `system.event_stream.tell(EventStream.Subscribe(E, ref))`, `EventStream.Unsubscribe(ref)`, `EventStream.Publish(event)`; the class is passed, since Python has no class tag |
@@ -105,4 +112,4 @@
 
 ---
 
-[← Streams](13-streams.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)
+[← Distributed Data](14-distributed-data.md) · [Contents](README.md) · [Appendix B: Known deviations from Apache Pekko →](appendix-deviations.md)

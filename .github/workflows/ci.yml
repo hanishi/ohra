@@ -39,6 +39,7 @@ jobs:
       - run: uv run pytest
       - run: uv run pytest examples/testing   # the book's chapter 12 tests
       - run: uv run pytest examples/streams   # the book's chapter 13 tests
+      - run: uv run pytest examples/distributed_data   # the book's chapter 14 tests
       - run: npx --yes -p typescript@7.0.2 tsc --noEmit --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.ts
       # the release's build of clock.js, rehearsed
       - name: Build clock.js from clock.ts, minified, and clock.d.ts for TypeScript pages

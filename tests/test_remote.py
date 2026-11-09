@@ -497,6 +497,12 @@ from ohra import DeadLetter, EventStream  # noqa: E402
 from ohra.remote import remoting as remoting_module  # noqa: E402
 from ohra.remote.remoting import MAX_FRAME  # noqa: E402
 
+import base64  # noqa: E402
+import os  # noqa: E402
+
+# random bytes in base64: frames gzip, so a frame of this is still about 1 MiB on the wire
+MIB_ON_THE_WIRE = base64.b64encode(os.urandom(2**20)).decode()
+
 
 @asynccontextmanager
 async def stalled_peer() -> AsyncGenerator[tuple[int, list[asyncio.StreamWriter]]]:
@@ -539,7 +545,7 @@ async def test_terminate_does_not_wait_for_a_peer_that_stopped_reading(
         async with node(Behaviors.ignore, "a", free_port()) as a:
             remote = a.resolve(f"ohra://b@127.0.0.1:{port}/user")
             for _ in range(8):  # more than the socket buffers take
-                remote.tell(Greeted("x" * 2**20))
+                remote.tell(Greeted(MIB_ON_THE_WIRE))
             await eventually(lambda: unsent(a) > 0)
             a.terminate()
             try:
@@ -574,6 +580,6 @@ async def test_tells_to_a_peer_that_stopped_reading_are_dead_letters_past_the_bo
         remote.tell(Greeted("first"))
         await eventually(lambda: bool(writers(a)))
         for _ in range(MAX_FRAME // 2**20 + 8):
-            remote.tell(Greeted("x" * 2**20))
+            remote.tell(Greeted(MIB_ON_THE_WIRE))
         await eventually(lambda: any(isinstance(d.message, Greeted) for d in dead))
         assert unsent(a) <= MAX_FRAME + 2**21  # the bound, plus the one frame that crossed it

@@ -816,7 +816,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     case None:
                         return
                 for s in subs:
-                    s.tell(msg)
+                    send_to_replica(ctx.log, s, msg, [key_id])
 
             nonlocal changed
             if subscribers or wildcard_subscribers:

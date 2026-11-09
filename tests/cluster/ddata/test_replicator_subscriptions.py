@@ -9,10 +9,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from ohra.behavior import Behaviors
-from ohra.cluster import Cluster, ClusterSettings
-from ohra.cluster.ddata import GCounter, GCounterKey, SelfUniqueAddress
-from ohra.cluster.ddata.replicator import Replicator
-from ohra.cluster.ddata.settings import ReplicatorSettings
+from ohra.cluster import ClusterSettings
+from ohra.cluster.ddata import (
+    DistributedData,
+    GCounter,
+    GCounterKey,
+    Replicator,
+    ReplicatorSettings,
+)
 from ohra.eventstream import DeadLetter, EventStream
 from ohra.management import ManagementSettings
 from ohra.remote import Address
@@ -39,7 +43,9 @@ async def manual_node(
         Behaviors.ignore,
         "ddata",
         address=("127.0.0.1", port),
-        cluster=ClusterSettings(seed_nodes=(Address("ddata", "127.0.0.1", port),), **FAST),
+        cluster=ClusterSettings(
+            seed_nodes=(Address("ddata", "127.0.0.1", port),), distributed_data=settings, **FAST
+        ),
         shutdown=FAST_SHUTDOWN,
         management=ManagementSettings(hostname="127.0.0.1", port=0),
         scheduler=ExplicitlyTriggeredScheduler(),
@@ -48,13 +54,8 @@ async def manual_node(
         manual = ManualTime(system)
         while not all_up(system, 1):
             await manual.time_passes(0.02)
-        cell = system._system_root.spawn_child(  # pyright: ignore[reportPrivateUsage]
-            Replicator.behavior(settings), "ddataReplicator", None
-        )
-        yield (
-            Node(system, cell.ref, SelfUniqueAddress(Cluster(system).self_unique_address)),
-            manual,
-        )
+        dd = DistributedData(system)
+        yield Node(system, dd.replicator, dd.self_unique_address), manual
 
 
 def counter_of(msg: Replicator.SubscribeResponse[GCounter]) -> tuple[str, int]:

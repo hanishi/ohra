@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .cluster.core import Cluster, ClusterSettings
     from .coordinated_shutdown import CoordinatedShutdownSettings
     from .management import Management, ManagementSettings
+    from .cluster.ddata import DistributedData
     from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
@@ -99,6 +100,8 @@ class ActorSystem[T](ActorRef[T]):
         """The singleton extension, reached as ``ClusterSingleton(system)``."""
         self.cluster_sharding: ClusterSharding | None = None
         """The cluster sharding extension, reached as ``ClusterSharding(system)``."""
+        self.distributed_data: DistributedData | None = None
+        """The Distributed Data extension, reached as ``DistributedData(system)``."""
         from .coordinated_shutdown import CoordinatedShutdown as _CoordinatedShutdown
         from .coordinated_shutdown import CoordinatedShutdownSettings as _CSSettings
 

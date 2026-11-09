@@ -31,6 +31,7 @@ from .core import (
     UnreachableMember,
     Unsubscribe,
 )
+from .ddata import DistributedData, Replicator, ReplicatorMessageAdapter, ReplicatorSettings
 from .gossip import Member, MemberStatus
 from .sbr import DownAll, KeepMajority, KeepOldest, SplitBrainResolverSettings, StaticQuorum
 from .singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
@@ -42,6 +43,7 @@ __all__ = [
     "ClusterSingleton",
     "ClusterSingletonSettings",
     "CurrentClusterState",
+    "DistributedData",
     "Down",
     "DownAll",
     "GetCurrentState",
@@ -64,6 +66,9 @@ __all__ = [
     "ReachabilityChanged",
     "ReachabilityEvent",
     "ReachableMember",
+    "Replicator",
+    "ReplicatorMessageAdapter",
+    "ReplicatorSettings",
     "SeenChanged",
     "SelfRemoved",
     "SelfUp",

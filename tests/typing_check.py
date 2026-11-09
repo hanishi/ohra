@@ -19,6 +19,8 @@ from ohra import (
     MailboxSelector,
     ORMap,
     ORSet,
+    ORSetKey,
+    Replicator,
     Routers,
     SelfUniqueAddress,
     SpawnProtocol,
@@ -27,7 +29,6 @@ from ohra import (
     UniqueAddress,
     batching,
 )
-from ohra.cluster.ddata.replicator import Replicator
 from ohra.stream import (
     Flow,
     Keep,
@@ -237,3 +238,10 @@ def check_replicator(rep: ActorRef[Replicator.Command], me: ActorRef[Any]) -> No
     rep.tell(Replicator.Update(k, GCounter(), Replicator.WriteLocal(), me, lambda c: c))
     rep.tell(Replicator.Subscribe(k, me))
     rep.tell("not a command")  # type: ignore[arg-type]
+    s = ORSetKey[str]("s")
+    Replicator.Update(s, ORSet[str](), Replicator.WriteLocal(), me, lambda _: GCounter())  # type: ignore[arg-type]
+
+
+def check_get_success(success: Replicator.GetSuccess[GCounter]) -> None:
+    data: ORSet[str] = success.data  # type: ignore[assignment]
+    del data

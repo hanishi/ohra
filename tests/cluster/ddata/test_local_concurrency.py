@@ -3,8 +3,7 @@ from two actors").
 """
 
 from ohra.behavior import Behavior, Behaviors
-from ohra.cluster.ddata import ORSet, ORSetKey
-from ohra.cluster.ddata.replicator import Replicator
+from ohra.cluster.ddata import ORSet, ORSetKey, Replicator
 from ohra.testkit import TestProbe
 
 from .test_replicator_local import Node, single_node

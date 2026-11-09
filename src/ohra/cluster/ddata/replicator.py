@@ -274,8 +274,8 @@ type _Digest = bytes
 _LAZY_DIGEST: _Digest = b"\x00"
 _DELETED_DIGEST: _Digest = b""
 
+# Pekko's used timestamp, on the system scheduler's clock. None is Pekko's 0L: not set.
 type _Timestamp = float
-"""Pekko's used timestamp, on the system scheduler's clock. None is Pekko's 0L: not set."""
 
 
 @dataclass(frozen=True)

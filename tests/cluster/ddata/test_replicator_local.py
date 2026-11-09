@@ -6,18 +6,18 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from ohra.cluster import Cluster
 from ohra.cluster.ddata import (
+    DistributedData,
     GCounter,
     GCounterKey,
     GSet,
     GSetKey,
     ORSet,
     ORSetKey,
+    Replicator,
+    ReplicatorSettings,
     SelfUniqueAddress,
 )
-from ohra.cluster.ddata.replicator import Replicator
-from ohra.cluster.ddata.settings import ReplicatorSettings
 from ohra.ref import ActorRef
 from ohra.system import ActorSystem
 from ohra.testkit import TestKitSettings, TestProbe
@@ -40,14 +40,12 @@ class Node:
 
 
 @asynccontextmanager
-async def single_node() -> AsyncGenerator[Node]:
+async def single_node(settings: ReplicatorSettings = ReplicatorSettings()) -> AsyncGenerator[Node]:
     port = free_port()
-    async with cluster_node("ddata", port, [port]) as system:
+    async with cluster_node("ddata", port, [port], distributed_data=settings) as system:
         await eventually(lambda: all_up(system, 1), timeout=3)
-        cell = system._system_root.spawn_child(  # pyright: ignore[reportPrivateUsage]
-            Replicator.behavior(ReplicatorSettings()), "ddataReplicator", None
-        )
-        yield Node(system, cell.ref, SelfUniqueAddress(Cluster(system).self_unique_address))
+        dd = DistributedData(system)
+        yield Node(system, dd.replicator, dd.self_unique_address)
 
 
 async def update_counter(node: Node, key: GCounterKey, n: int) -> None:

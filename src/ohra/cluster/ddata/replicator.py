@@ -10,6 +10,7 @@ The commands and responses stay on one node, so they are not ``@remotable``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import random
 import time
@@ -448,12 +449,13 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         assert remoting is not None  # a cluster node has remoting
         max_delta_elements = settings.max_delta_elements
 
-        # Pekko's System.currentTimeMillis, in seconds: the scheduler's clock, so ManualTime drives
-        # expiry, anchored to the epoch once, so used timestamps from other nodes compare
-        epoch_offset = time.time() - scheduler.current_time
-
         def now() -> float:
-            return scheduler.current_time + epoch_offset
+            """Pekko's System.currentTimeMillis, in seconds. It is the scheduler's clock, so
+            ManualTime drives expiry, plus the gap from the loop's clock to wall time, read every
+            time: the loop's monotonic clock stops while a container is frozen, and a gap taken
+            once would leave this clock behind wall time after a resume. On the real scheduler
+            it is wall time, and under ManualTime only virtual time moves it."""
+            return scheduler.current_time + (time.time() - asyncio.get_running_loop().time())
 
         payload_size_aggregator = _PayloadSizeAggregator(
             ctx.log,

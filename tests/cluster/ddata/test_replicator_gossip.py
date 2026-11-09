@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from ohra.cluster import Cluster, ClusterSettings, Join
 from ohra.cluster.ddata import (
@@ -20,6 +22,7 @@ from ohra.cluster.ddata import (
     Replicator,
     ReplicatorSettings,
 )
+from ohra.cluster.ddata import replicator as replicator_module
 from ohra.cluster.ddata.envelope import DataEnvelope, Gossip, Status
 from ohra.ref import ActorRef
 from ohra.remote import Address
@@ -304,3 +307,35 @@ async def test_status_and_gossip_carry_the_used_timestamp(spec: MultiNodeSpec):
         assert isinstance(gossip, Gossip), gossip
         assert gossip.updated_data["A"][1] > 0.0  # 0.0 is unset
     await spec.enter_barrier("after-carry")
+
+
+@multi_node_spec(config)
+async def test_the_used_timestamp_follows_wall_time_the_loop_clock_misses(spec: MultiNodeSpec):
+    """A frozen container resumes with the loop's monotonic clock behind wall time: the
+    Replicator reads wall time on every clock read, so its used timestamps jump with it."""
+    replicator = await join(spec)
+    await spec.enter_barrier("after-join")
+
+    if spec.is_node(first):
+        assert await update(spec, replicator) == Replicator.UpdateSuccess(KeyA)
+        uid = Cluster(spec.system).self_unique_address.uid
+        probe: TestProbe[Status | Gossip] = spec.create_test_probe()
+
+        async def carried_timestamp() -> float:
+            assert isinstance(await get(spec, replicator), Replicator.GetSuccess)  # a touch
+            replicator_of(spec).tell(Status({}, 0, 1, uid, 4711, probe.ref))
+            gossip = await probe.receive_message()
+            assert isinstance(gossip, Gossip), gossip
+            return gossip.updated_data["A"][1]
+
+        before = await carried_timestamp()
+        real_time = time.time
+        # wall time steps an hour ahead, as after a resume; the loop's clock does not see it
+        jumped = SimpleNamespace(time=lambda: real_time() + 3600.0)
+        with patch.object(replicator_module, "time", jumped):
+
+            async def jumped_ahead() -> None:
+                assert await carried_timestamp() > before + 1800.0
+
+            await spec.await_assert(jumped_ahead, max=5.0, interval=0.05)
+    await spec.enter_barrier("after-clock")

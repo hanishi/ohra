@@ -176,7 +176,7 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
 > - The API is cluster-typed's `DistributedData` and `Replicator` in snake_case: `Replicator.Update`, `Get`, `Delete`, `Subscribe` and their responses are nested in `Replicator`, and the consistency levels are dataclasses, `Replicator.WriteLocal()` and `Replicator.ReadMajority(timeout=3.0)`. Timeouts are seconds.
 > - `Update(key, initial, writeConsistency, replyTo)(modify)` is `Update(key, initial, write_consistency, reply_to, modify)`, with `modify` as its last field. The types' symbolic operators are named methods taking the node: `c :+ 1` is `c.increment(node, 1)`.
 > - The settings are `ReplicatorSettings`, a field of `ClusterSettings` (`distributed_data=`), not HOCON under `pekko.cluster.distributed-data`.
-> - Delta propagation, pruning of removed nodes, durable storage and roles are not here yet: every write and every gossip carries the full value, and every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
+> - Delta propagation, durable storage and roles are not here yet: every write and every gossip carries the full value, and every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
 
 ## How it works
 
@@ -216,6 +216,9 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 | `log_data_size_exceeding` | `10 * 1024` | log the size of a value whose encoding is at least this large, in bytes, at INFO (a WARNING from 3/4 of the 16 MiB frame on); `None` turns it off |
 | `prefer_oldest` | `False` | read from and write to the oldest nodes first |
 | `expire_keys_after_inactivity` | `{}` | key id, or `"prefix*"`, to the seconds after which an untouched key is removed |
+| `pruning_interval` | `120.0` | seconds between two [pruning](#pruning) rounds; `0` or less turns pruning off |
+| `max_pruning_dissemination` | `300.0` | seconds a removed node's updates are given to reach every node before its data is pruned, counted only while every node is reachable |
+| `pruning_marker_time_to_live` | `6 * 3600.0` | seconds the marker that a removed node's data was pruned is kept after the pruning |
 
 ### Update
 
@@ -442,6 +445,55 @@ sequenceDiagram
 - **A gossip message is split to fit a frame.** A frame holds at most 16 MiB of JSON, measured before compression. Remoting gzips any frame over 32 KiB, so large sets and maps travel compressed, but compression does not raise that limit.
 - **A restarted node is not confused with its old self.** A `Status` names the system it was meant for, and a node that restarted on the same address ignores one meant for its previous run.
 
+### Pruning
+
+A `GCounter` keeps a count for every node that ever incremented it, and an `ORSet` keeps, for every element, the dots of the nodes that added it, with a version vector that has an entry for each of them. Those entries are part of the value, so they stay when their node leaves the cluster for good. A cluster that replaces its nodes often, with a rolling deploy for one, would see such values grow by an entry for every node that ever wrote to them.
+
+So the Replicator **prunes** the data of a removed node: it moves the node's entries into those of a node that is still there. The value does not change. A `GCounter` that holds 3 from a removed node C still reads 3, now counted under the node that pruned it, and it no longer names C. The counters, `ORSet`, the maps and `ORMultiMap` are pruned. `GSet`, `Flag` and `LWWRegister` keep no entry per node and are left alone.
+
+The danger is a double count: if one node moved C's 3 into its own entry while another still held C's 3, their merge would count those 3 twice. So pruning runs as a protocol of **markers**, which travel inside the replicated value, by the same writes and gossip as the data. With C removed from a cluster of A, the leader, and B:
+
+```mermaid
+sequenceDiagram
+  participant A as Replicator A (leader)
+  participant B as Replicator B
+  Note over A,B: C is removed from the cluster
+  Note over A: after max_pruning_dissemination, adds PruningInitialized(owner A)
+  A->>B: gossip, the data with the marker
+  Note over B: merges, adds itself to the marker's seen
+  B->>A: gossip, the marker seen by B
+  Note over A: every node has seen it, so moves C's entries into A's and marks PruningPerformed
+  A->>B: gossip, the pruned data with PruningPerformed
+  Note over B: cleans C out of its own copy, then merges
+  Note over A,B: after pruning_marker_time_to_live, each drops the marker
+```
+
+The leader starts and the owner prunes on a pruning round, every `pruning_interval`; in between, the markers move with the data:
+
+- **C's updates spread first.** Every node notes when C was removed, and the leader waits `max_pruning_dissemination` from then, five minutes by default, so that C's last updates have reached every node. The leader also finds removed nodes in the data itself: a node that a value names, that is not a member the Replicator gossips to, and that is not already known as removed, such as a node removed before this one joined. Its wait starts when the leader finds it.
+- **The leader starts it.** The leader is the first of the up and leaving members in address order, while it is up itself. Once the wait is over, it adds a `PruningInitialized` marker for C to every value that names C, with itself as the owner.
+- **The marker spreads.** Each node that receives the value merges it and adds itself to the marker's `seen`. Markers merge too, so the owner learns who has seen its marker as the gossip comes back.
+- **The owner prunes once every node has seen it.** On a round where every other node it gossips to is in `seen`, or at once when it has no other node, the owner moves C's entries into its own and replaces the marker with `PruningPerformed`, which nobody undoes: when two markers for C merge, the performed one wins, so no node prunes C a second time. Every member counts, so a member that has not started `DistributedData` holds pruning up for the whole cluster. If the owner itself leaves before it prunes, its marker still wins every merge over a later leader's, as in Pekko, and C is never pruned.
+- **Stale copies are cleaned on merge.** While a value carries `PruningPerformed` for C, every merge first takes C's entries out of both sides, and only then merges the data. A node that still holds C's old entries, or a write that carries them, cannot bring C's count back.
+- **The markers go.** `PruningPerformed` carries a wall-clock time, `pruning_marker_time_to_live` after the pruning, six hours by default. Once that time has passed, each node drops the marker and forgets C. A copy of C's old entries that turned up after that, from a partition that outlasted it, would be merged in as if C were new, and the value would no longer be right. That is why the time is in hours.
+
+**A split pauses pruning.** While any node is unreachable, the pruning rounds are skipped: nothing is collected, started or pruned, and no expired marker is dropped. The clock that times `max_pruning_dissemination` stops as well, so a removed node's updates get their full time with every node reachable. None of this changes what a `Get` reads, before, during or after the pruning.
+
+The three settings are in the [table above](#the-replicator). A cluster whose partitions can outlast six hours can give the updates more time and keep the markers longer:
+
+```python
+from ohra import ClusterSettings
+from ohra.cluster.ddata import ReplicatorSettings
+
+settings = ClusterSettings(
+    distributed_data=ReplicatorSettings(
+        max_pruning_dissemination=600.0, pruning_marker_time_to_live=24 * 3600.0
+    )
+)
+```
+
+`pruning_interval=0` turns pruning off, as Pekko's `pruning-interval = off` does, and every value then keeps the entries of every node that ever wrote to it.
+
 ### Limits
 
 All the data is in memory, on every node, and every change of a key sends the whole value: a write to the nodes its level asks for, and gossip to the rest. That suits many small keys, or a few of moderate size; Pekko's guidance of at most 100,000 top-level keys holds here too. A value whose encoding is at least `log_data_size_exceeding` bytes has its size logged at INFO, and at WARNING once it reaches 3/4 of the frame, as Pekko does. One whose JSON is larger than 16 MiB cannot be sent at all, compressed or not.
@@ -452,7 +504,6 @@ CRDTs hold state, not commands. A value that has to be decided once, such as whi
 
 Distributed Data comes in parts, and these are still to come:
 
-- **Pruning.** A `GCounter` and the other types that keep an entry per node keep the entries of nodes that have left the cluster; Pekko's Replicator folds them into a node that is still there. Until then, a cluster that replaces its nodes often grows its values.
 - **Durable storage.** Every replica is in memory, so a cluster that stops as a whole loses the data. Pekko can keep chosen keys in LMDB.
 - **Delta propagation.** Every write and gossip carries the full value, as Pekko's Replicator does with `delta-crdt.enabled = off`. With deltas on, Pekko sends only the change.
 

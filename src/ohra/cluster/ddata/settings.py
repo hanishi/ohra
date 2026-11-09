@@ -1,5 +1,5 @@
 """Pekko's ReplicatorSettings with the defaults of ``pekko.cluster.distributed-data``, in seconds,
-minus roles, durable keys and pruning (which come with the features that use them)."""
+minus roles and durable keys (which come with the features that use them)."""
 
 from __future__ import annotations
 
@@ -27,6 +27,15 @@ class ReplicatorSettings:
     expire_keys_after_inactivity: Mapping[str, float] = field(default_factory=dict[str, float])
     """Key (or ``prefix*`` pattern) to the seconds of inactivity after which it expires; 0 never
     expires."""
+    pruning_interval: float = 120.0
+    """How often the Replicator checks for data of removed nodes to prune; 0 or less turns
+    pruning off, as Pekko's ``off``."""
+    max_pruning_dissemination: float = 300.0
+    """How long a removed node's updates are given to reach every node before its data is
+    pruned. The clock runs only while every node is reachable."""
+    pruning_marker_time_to_live: float = 6 * 3600.0
+    """How long a performed pruning marker is kept, so that a stale write cannot bring the
+    removed node's data back."""
 
     def __post_init__(self) -> None:
         for name in ("gossip_interval", "notify_subscribers_interval", "max_delta_elements"):
@@ -37,6 +46,9 @@ class ReplicatorSettings:
         for key, seconds in self.expire_keys_after_inactivity.items():
             if seconds < 0:
                 raise ValueError(f"expire_keys_after_inactivity[{key!r}] must be >= 0")
+        for name in ("max_pruning_dissemination", "pruning_marker_time_to_live"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0")
 
     @staticmethod
     def name_for(system: ActorSystem[Any], prefix: str | None) -> str:

@@ -10,6 +10,7 @@ from ohra import Behavior
 from ohra.cluster.ddata import GCounter, GCounterKey, GSet, Replicator, SelfUniqueAddress
 from ohra.cluster.ddata.aggregators import read_aggregator
 from ohra.cluster.ddata.envelope import DataEnvelope, Read, ReadRepair, ReadRepairAck, ReadResult
+from ohra.cluster.ddata.pruning_state import PruningPerformed
 from ohra.remote import UniqueAddress
 from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 
@@ -43,6 +44,7 @@ class Setup:
         consistency: Replicator.ReadConsistency,
         local_value: DataEnvelope | None,
         unreachable: frozenset[UniqueAddress] = frozenset(),
+        now: float = 0.0,
     ) -> Behavior[Never]:
         return read_aggregator(
             KeyA,
@@ -55,6 +57,7 @@ class Setup:
             self.replicator.ref,
             self_unique_address,
             shuffle=False,
+            now=lambda: now,
         )
 
 
@@ -70,6 +73,28 @@ async def test_read_majority_merges_replies():
 
         repair = await s.replicator.expect_message_type(ReadRepair)
         assert repair.envelope == DataEnvelope(local.merge(from_a))
+        repair.reply_to.tell(ReadRepairAck())
+        await s.reply.expect_message(Replicator.GetSuccess(KeyA, local.merge(from_a)))
+        await s.reply.expect_terminated(aggr)
+
+
+async def test_the_read_aggregator_merges_with_the_given_now():
+    async with ActorTestKit(manual_time=True) as kit:
+        s = Setup(kit)
+        aggr = kit.spawn(s.aggregator(read_majority, DataEnvelope(local), now=200.0))
+
+        (await s.replicas[node_a].expect_message_type(Read)).reply_to.tell(
+            ReadResult(
+                DataEnvelope(
+                    from_a, {node_d: PruningPerformed(100.0), node_c: PruningPerformed(300.0)}
+                )
+            )
+        )
+        (await s.replicas[node_b].expect_message_type(Read)).reply_to.tell(ReadResult(None))
+
+        repair = await s.replicator.expect_message_type(ReadRepair)
+        # obsolete at 200.0, so the merge dropped it; the wall clock would drop both
+        assert repair.envelope.pruning == {node_c: PruningPerformed(300.0)}
         repair.reply_to.tell(ReadRepairAck())
         await s.reply.expect_message(Replicator.GetSuccess(KeyA, local.merge(from_a)))
         await s.reply.expect_terminated(aggr)

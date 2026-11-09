@@ -3,8 +3,9 @@ responses nested in ``Replicator`` as ``EventStream``'s are, and the actor, whos
 classic ``Replicator.scala`` function for function.
 
 The Replicator tracks the cluster's members, reads and writes at a level other than local
-through aggregator children, and gossips digests to a random replica for anti-entropy. Deltas,
-pruning and durable storage are not here.
+through aggregator children, gossips digests to a random replica for anti-entropy, and prunes
+the data of removed nodes, as the "CRDT Garbage" section of Pekko's Replicator Scaladoc
+describes. Deltas and durable storage are not here.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 
@@ -17,7 +18,7 @@ import time
 import zlib
 from bisect import insort
 from collections.abc import Callable, Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from ...behavior import Behavior, Behaviors
@@ -40,7 +41,8 @@ from .envelope import (
     send_to_replica,
 )
 from .key import Key
-from .replicated_data import ReplicatedData
+from .pruning_state import PruningInitialized, PruningPerformed
+from .replicated_data import RemovedNodePruning, ReplicatedData
 from .settings import ReplicatorSettings
 
 if TYPE_CHECKING:
@@ -379,6 +381,16 @@ class _GossipTick:
 
 
 @dataclass(frozen=True)
+class _ClockTick:
+    pass
+
+
+@dataclass(frozen=True)
+class _RemovedNodePruningTick:
+    pass
+
+
+@dataclass(frozen=True)
 class _SubscriberTerminated:
     """A watched subscriber stopped: Pekko's Terminated, as ``watch_with`` delivers it."""
 
@@ -400,6 +412,8 @@ type _Msg = (
     | Status
     | Gossip
     | _GossipTick
+    | _ClockTick
+    | _RemovedNodePruningTick
     | _SubscriberTerminated
     | _ClusterEvent
 )
@@ -449,6 +463,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             UnreachableMember,
             Unsubscribe,
         )
+        from ..gossip import leader_status_key
 
         # imported here: the aggregators import Replicator from this module
         from .aggregators import read_aggregator, write_aggregator
@@ -487,6 +502,18 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         exiting_nodes: set[UniqueAddress] = set()
         unreachable: set[UniqueAddress] = set()
 
+        removed_nodes: dict[UniqueAddress, float] = {}
+        # all members sorted with the leader first; one entry per unique address
+        leader: list[Member] = []
+
+        def is_leader() -> bool:
+            return bool(leader) and leader[0].address == self_address and leader[0].status == "up"
+
+        # for pruning, timeouts are based on a clock that is only increased when all nodes are
+        # reachable. It runs on the scheduler's monotonic clock, which ManualTime drives.
+        previous_clock_time = scheduler.current_time
+        all_reachable_clock_time = 0.0
+
         # the chunk of the keys the next Status covers, when there are more than max_delta_elements
         status_count = 0
         status_tot_chunks = 0
@@ -497,11 +524,16 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         cluster.subscriptions.tell(Subscribe(cluster_events, MemberEvent))
         cluster.subscriptions.tell(Subscribe(cluster_events, ReachabilityEvent))
 
-        # Pekko's gossipTask and notifyTask; its clockTask feeds only pruning, which is left out
+        # Pekko's gossipTask, notifyTask, pruningTask and clockTask
         ctx.timers.start_timer_with_fixed_delay("gossip", _GossipTick(), settings.gossip_interval)
         ctx.timers.start_timer_with_fixed_delay(
             "notify", Replicator.FlushChanges(), settings.notify_subscribers_interval
         )
+        if settings.pruning_interval > 0:  # Pekko's pruning-interval = off
+            ctx.timers.start_timer_with_fixed_delay(
+                "pruning", _RemovedNodePruningTick(), settings.pruning_interval
+            )
+        ctx.timers.start_timer_with_fixed_delay("clock", _ClockTick(), settings.gossip_interval)
 
         expiry_keys = settings.expire_keys_after_inactivity
         expiry_wildcards = {
@@ -575,6 +607,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         ctx.self,
                         self_unique_address,
                         shuffle=not settings.prefer_oldest,
+                        now=now,
                     )
                 )
 
@@ -611,7 +644,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     case DataEnvelope() as envelope if envelope.is_deleted:
                         pass
                     case DataEnvelope(existing) as envelope:
-                        envelope = envelope.merge(DataEnvelope(modify(existing)))
+                        envelope = envelope.merge(DataEnvelope(modify(existing)), now())
                     case None:
                         envelope = DataEnvelope(modify(initial))
             except Exception as e:  # Pekko's Try: NonFatal
@@ -680,7 +713,6 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 reply_to.tell(WriteAck() if new_envelope is not None else WriteNack())
 
         def write(key: str, write_envelope: DataEnvelope) -> DataEnvelope | None:
-            # Pekko's addSeen feeds only pruning, which is left out
             match get_data(key):
                 case DataEnvelope() as envelope if envelope is write_envelope:
                     return envelope
@@ -688,13 +720,14 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     return DELETED_ENVELOPE  # already deleted
                 case DataEnvelope() as envelope:
                     try:
-                        merged = envelope.merge(write_envelope)
+                        merged = envelope.merge(write_envelope, now()).add_seen(self_address)
                     except TypeError as e:  # Pekko's IllegalArgumentException
                         ctx.log.warning("Couldn't merge [%s], due to: %s", key, e)
                         return None
                     return set_data(key, merged)
                 case None:
-                    return set_data(key, write_envelope)
+                    # no existing data for the key
+                    return set_data(key, write_envelope.add_seen(self_address))
 
         def receive_read_repair(
             key: str, write_envelope: DataEnvelope, reply_to: ActorRef[ReadRepairAck]
@@ -987,7 +1020,8 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     data_size = payload_size_aggregator.get_max_size(key)
                 data_envelope = get_data(key)
                 assert data_envelope is not None  # keys are ones this node holds
-                # Pekko adds the envelope's estimated pruning size, and there is no pruning here
+                # Pekko adds the envelope's estimatedSizeWithoutData, its pruning markers; here
+                # the data size is that of the whole encoded envelope, markers included
                 envelope_size = 100
                 entry_size = key_size + data_size + envelope_size
                 entry = (data_envelope, get_used_timestamp(key) or 0.0)
@@ -1024,8 +1058,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     had_data = key in data_entries
                     write_and_store(key, envelope, None)
                     update_used_timestamp(key, used_timestamp or None)
-                    # Pekko also sends back data with pruning, and there is no pruning here
-                    if send_back and had_data and get_data(key) is not None:
+                    if send_back and (d := get_data(key)) is not None and (had_data or d.pruning):
                         reply_keys.add(key)
             if send_back and reply_keys:
                 for g in create_gossip_messages(reply_keys, False, from_system_uid):
@@ -1119,7 +1152,8 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 joining_nodes.discard(m.unique_address)
 
         def receive_member_up(m: Member) -> None:
-            # Pekko's leader set feeds only pruning, which is left out
+            if m not in leader:  # Pekko's TreeSet: the member is already there
+                insort(leader, m, key=leader_status_key)
             if m.address != self_address:
                 nodes.add(m.unique_address)
                 weakly_up_nodes.discard(m.unique_address)
@@ -1135,24 +1169,136 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             if m.address == self_address:
                 return Behaviors.stopped()
             ctx.log.debug("adding removed node [%s] from MemberRemoved", m.unique_address)
-            # Pekko's leader, removedNodes and delta propagation feed pruning and deltas
+            # remove by unique address: the ordering may have changed, as it is based on status
+            if m in leader:  # members are equal by unique address
+                leader.remove(m)
             nodes.discard(m.unique_address)
             weakly_up_nodes.discard(m.unique_address)
             joining_nodes.discard(m.unique_address)
             exiting_nodes.discard(m.unique_address)
+            removed_nodes[m.unique_address] = all_reachable_clock_time
             unreachable.discard(m.unique_address)
             if settings.prefer_oldest and m in members_by_age:
                 members_by_age.remove(m)
+            # Pekko's deltaPropagationSelector.cleanupRemovedNode comes with deltas
             return Behaviors.same
 
-        def receive_other_member_event(_m: Member) -> None:
-            pass  # Pekko replaces the member in its leader set, which only pruning reads
+        def receive_other_member_event(m: Member) -> None:
+            # replace: the ordering may have changed, as it is based on status
+            if m in leader:  # members are equal by unique address
+                leader.remove(m)
+            insort(leader, m, key=leader_status_key)
 
         def receive_unreachable(m: Member) -> None:
             unreachable.add(m.unique_address)
 
         def receive_reachable(m: Member) -> None:
             unreachable.discard(m.unique_address)
+
+        def receive_clock_tick() -> None:
+            nonlocal previous_clock_time, all_reachable_clock_time
+            now_ = scheduler.current_time
+            if not unreachable:
+                all_reachable_clock_time += now_ - previous_clock_time
+            previous_clock_time = now_
+
+        def receive_removed_node_pruning_tick() -> None:
+            # see the "CRDT Garbage" section of Pekko's Replicator Scaladoc for the process
+            if not unreachable:
+                if is_leader():
+                    collect_removed_nodes()
+                    init_removed_node_pruning()
+                perform_removed_node_pruning()
+                delete_obsolete_pruning_performed()
+
+        def collect_removed_nodes() -> None:
+            known_nodes = all_nodes() | removed_nodes.keys()
+            new_removed_nodes: set[UniqueAddress] = set()
+            for envelope, _, _ in data_entries.values():
+                if isinstance(envelope.data, RemovedNodePruning):
+                    new_removed_nodes |= {
+                        n
+                        for n in envelope.data.modified_by_nodes
+                        if n != self_unique_address and n not in known_nodes
+                    }
+            for n in new_removed_nodes:
+                ctx.log.debug("Adding removed node [%s] from data", n)
+                removed_nodes[n] = all_reachable_clock_time
+
+        def init_removed_node_pruning() -> None:
+            # initiate pruning for removed nodes
+            removed_set = {
+                r
+                for r, t in removed_nodes.items()
+                if all_reachable_clock_time - t > settings.max_pruning_dissemination
+            }
+            if removed_set:
+                # a snapshot, as Pekko iterates over its immutable dataEntries
+                for key, (envelope, _, _) in list(data_entries.items()):
+                    for removed in removed_set:
+
+                        def init() -> None:
+                            new_envelope = envelope.init_removed_node_pruning(
+                                removed, self_unique_address
+                            )
+                            ctx.log.debug(
+                                "Initiated pruning of [%s] for data key [%s] to [%s]",
+                                removed,
+                                key,
+                                self_unique_address,
+                            )
+                            set_data(key, new_envelope)
+
+                        # false for data that is not RemovedNodePruning, deleted data included
+                        if envelope.need_pruning_from(removed):
+                            match envelope.pruning.get(removed):
+                                case None:
+                                    init()
+                                case PruningInitialized(owner) if owner != self_unique_address:
+                                    init()
+                                case _:
+                                    pass  # already in progress
+
+        def perform_removed_node_pruning() -> None:
+            # perform pruning when all seen Init
+            all_ = all_nodes()
+            pruning_performed = PruningPerformed(now() + settings.pruning_marker_time_to_live)
+            for key, (envelope, _, _) in list(data_entries.items()):
+                if not isinstance(envelope.data, RemovedNodePruning):
+                    continue  # deleted, or pruning not needed
+                for removed, state in envelope.pruning.items():
+                    match state:
+                        case PruningInitialized(owner, seen) if owner == self_unique_address and (
+                            not all_ or all(n.address in seen for n in all_)
+                        ):
+                            new_envelope = envelope.prune(removed, pruning_performed)
+                            ctx.log.debug(
+                                "Perform pruning of [%s] from [%s] to [%s]",
+                                key,
+                                removed,
+                                self_unique_address,
+                            )
+                            set_data(key, new_envelope)
+                        case _:
+                            pass
+
+        def delete_obsolete_pruning_performed() -> None:
+            current_time = now()
+            for key, (envelope, _, _) in list(data_entries.items()):
+                if not isinstance(envelope.data, RemovedNodePruning):
+                    continue  # deleted, or pruning not needed
+                new_envelope = envelope
+                for removed, p in envelope.pruning.items():
+                    if isinstance(p, PruningPerformed) and p.is_obsolete(current_time):
+                        ctx.log.debug(
+                            "Removing obsolete pruning marker for [%s] in [%s]", removed, key
+                        )
+                        removed_nodes.pop(removed, None)
+                        pruning = dict(new_envelope.pruning)
+                        del pruning[removed]
+                        new_envelope = replace(new_envelope, pruning=pruning)
+                if new_envelope is not envelope:
+                    set_data(key, new_envelope)
 
         def receive_get_replica_count(reply_to: ActorRef[Replicator.ReplicaCount]) -> None:
             reply_to.tell(Replicator.ReplicaCount(len(nodes) + 1))  # nodes excludes self
@@ -1211,6 +1357,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     receive_flush_changes()
                 case _GossipTick():
                     receive_gossip_tick()
+                case _ClockTick():
+                    receive_clock_tick()
+                case _RemovedNodePruningTick():
+                    receive_removed_node_pruning_tick()
                 case Replicator.Subscribe(key, subscriber):
                     receive_subscribe(key, subscriber)
                 case Replicator.Unsubscribe(key, subscriber):

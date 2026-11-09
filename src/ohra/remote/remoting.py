@@ -215,6 +215,8 @@ async def read_frame(reader: asyncio.StreamReader) -> Json | None:
             raise ValueError(f"frame inflates past {MAX_FRAME} bytes, which exceeds the limit")
         if not inflater.eof:
             raise ValueError("truncated compressed frame")
+        if inflater.unused_data:  # bytes or a second gzip member after the first
+            raise ValueError("trailing data after a compressed frame")
     return json.loads(body)
 
 

@@ -74,14 +74,34 @@ async def test_an_inflating_frame_is_never_inflated_past_max_frame_into_memory()
     bomb = gzip.compress(bytes(64 * limit), mtime=0)  # 4 MiB of zeros in a few KiB
     frame = struct.pack(">I", len(bomb)) + bomb
     with patch.object(remoting_module, "MAX_FRAME", limit):
+        tracing = tracemalloc.is_tracing()
         tracemalloc.start()
+        tracemalloc.reset_peak()
         try:
             with pytest.raises(ValueError, match="exceeds"):
                 await read_frame(reader_of(frame))
             _, peak = tracemalloc.get_traced_memory()
         finally:
-            tracemalloc.stop()
+            if not tracing:
+                tracemalloc.stop()
     assert peak < 16 * limit, peak
+
+
+def large_gzipped() -> bytes:
+    """A large frame's body, as pack gzips it."""
+    return pack({"items": [f"element-{i}" for i in range(10_000)]})[4:]
+
+
+async def test_trailing_data_after_a_compressed_frame_is_refused():
+    body = large_gzipped() + b"garbage"
+    with pytest.raises(ValueError, match="trailing"):
+        await read_frame(reader_of(struct.pack(">I", len(body)) + body))
+
+
+async def test_a_second_gzip_member_in_a_frame_is_refused():
+    body = large_gzipped() + gzip.compress(b'{"kind":"msg"}', mtime=0)
+    with pytest.raises(ValueError, match="trailing"):
+        await read_frame(reader_of(struct.pack(">I", len(body)) + body))
 
 
 async def test_a_body_over_max_frame_is_refused_by_the_sender_before_compression():

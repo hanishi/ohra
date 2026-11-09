@@ -40,6 +40,10 @@ async def test_have_api_for_subscribe_and_unsubscribe(spec: MultiNodeSpec):
 
     c.tell(Unsubscribe())
     c.tell(Increment())
+    c.tell(GetValue(probe.ref))
+    await probe.expect_message(4)  # the Replicator has the increment
+    # a Changed would go out now if we hadn't unsubscribed
+    DistributedData(spec.system).replicator.tell(Replicator.FlushChanges())
     # wait so it would update the cached value if we didn't unsubscribe
     await probe.expect_no_message(0.5)
     c.tell(GetCachedValue(probe.ref))

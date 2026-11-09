@@ -203,7 +203,7 @@ Every type is an immutable value. An update returns a new value, and `merge` com
 
 `DistributedData(system)` starts the Replicator the first time it is called, under `/system/ddataReplicator`, and returns the same extension after that. `DistributedData(system).replicator` is its `ActorRef[Replicator.Command]`; an actor can tell it directly, with a probe or a message adapter as `reply_to`, or go through `with_replicator_message_adapter`. Tell only the Replicator of your own node: its commands are not `@remotable`, and the Replicators reach each other with messages of their own.
 
-The Replicator follows the cluster's membership. Every member that is up, or leaving, is a replica, and `Replicator.GetReplicaCount(reply_to)` answers `ReplicaCount(n)`, this node included. A Replicator that fails restarts empty, and gossip fills it again from the other nodes.
+The Replicator follows the cluster's membership. Every member that has been up is a replica until it is removed, while it is leaving or exiting too, and `Replicator.GetReplicaCount(reply_to)` answers `ReplicaCount(n)`, this node included. A weakly-up member is gossiped to but is not counted, and reads and writes do not wait for it. `Replicator.GetKeyIds(reply_to)` answers `GetKeyIdsResult(key_ids)`, the ids of the keys this node holds and has not deleted; it is internal, as in Pekko, and meant for tests. A Replicator that fails restarts empty, and gossip fills it again from the other nodes.
 
 Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, with Pekko's defaults:
 
@@ -212,8 +212,8 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 | `name` | `"ddataReplicator"` | the actor's name under `/system` |
 | `gossip_interval` | `2.0` | seconds between two gossip rounds |
 | `notify_subscribers_interval` | `0.5` | seconds between two rounds of `Changed` |
-| `max_delta_elements` | `500` | the most keys one gossip round compares |
-| `log_data_size_exceeding` | `10 * 1024` | log a warning for a value whose encoding is larger, in bytes; `None` turns it off |
+| `max_delta_elements` | `500` | the keys per gossip chunk, at least; also the most keys one reply sends back |
+| `log_data_size_exceeding` | `10 * 1024` | log the size of a value whose encoding is at least this large, in bytes, at INFO (a WARNING from 3/4 of the 16 MiB frame on); `None` turns it off |
 | `prefer_oldest` | `False` | read from and write to the oldest nodes first |
 | `expire_keys_after_inactivity` | `{}` | key id, or `"prefix*"`, to the seconds after which an untouched key is removed |
 
@@ -222,7 +222,7 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 `Replicator.Update(key, initial, write_consistency, reply_to, modify)` runs `modify` inside the Replicator, on the current value or on `initial`. The result is merged into the local replica, and then written to as many nodes as the consistency level asks for. The answer is one of:
 
 - **`UpdateSuccess(key)`**: the write reached enough nodes.
-- **`UpdateTimeout(key)`**: it did not, within the level's timeout. The local write stands, and the other nodes may still receive it, from the write in flight or by gossip. A timeout does not undo anything.
+- **`UpdateTimeout(key)`**: it did not, within the level's timeout, or the level asks for more nodes than the cluster has, as `WriteTo(5, ...)` on three nodes does, which is answered at once. The local write stands, and the other nodes may still receive it, from the write in flight or by gossip. A timeout does not undo anything.
 - **`ModifyFailure(key, error_message, cause)`**: `modify` raised, and nothing was written.
 - **`UpdateDataDeleted(key)`**: the key has been deleted.
 - **`StoreFailure(key)`**: for durable storage, which is not here yet; nothing sends it.
@@ -250,9 +250,9 @@ A write and a read each take a level. Every level but the local ones has a `time
 | `WriteMajorityPlus(timeout, additional, min_cap=0)` | `ReadMajorityPlus(timeout, additional, min_cap=0)` | a majority plus `additional`, at most `N` |
 | `WriteAll(timeout)` | `ReadAll(timeout)` | every replica |
 
-A read sees a write when the two sets of nodes overlap: when the nodes written plus the nodes read are more than `N`. `WriteMajority` with `ReadMajority` always overlap. `WriteLocal` with `ReadLocal` is fastest, and still sees the write once gossip has carried it. `WriteAll` and `ReadAll` time out when a single node does not answer, and `WriteTo(n)` or `ReadFrom(n)` with `n` larger than the cluster fails at once. `*MajorityPlus` and `*All` leave out members that are exiting, since they are about to go. On a node alone, the majority levels and `*All` run locally.
+A read sees a write when the two sets of nodes overlap: when the nodes written plus the nodes read are more than `N`. `WriteMajority` with `ReadMajority` always overlap. `WriteLocal` with `ReadLocal` is fastest, and still sees the write once gossip has carried it. `WriteAll` and `ReadAll` time out when a single node does not answer, and `WriteTo(n)` or `ReadFrom(n)` with `n` larger than the cluster fails at once. `*MajorityPlus` and `*All` leave out members that are exiting, since they are about to go. On a node alone, `*Majority` and `*All` run locally, and `*MajorityPlus` starts an aggregator that has no node to wait for and succeeds at once, with the same result.
 
-The Replicator sends the request to the nodes it needs, reachable ones first, and after a fifth of the timeout also to the others, in case some of the first ones are slow or gone. A write with `WriteMajority` on three nodes:
+The Replicator sends the request to the nodes it needs, reachable ones first, and after a fifth of the timeout also to up to 10 of the others (`MAX_SECONDARY_NODES`), in case some of the first ones are slow or gone. A write with `WriteMajority` on three nodes:
 
 ```mermaid
 sequenceDiagram
@@ -421,7 +421,7 @@ The Replicator always answers within the request's own timeout, so the ask's tim
 
 ### Gossip
 
-A write at any level reaches the other nodes in the end through gossip. Every `gossip_interval`, each Replicator picks one other replica at random and sends it a `Status`: one digest per key, a hash of the key's value. The other side compares them with its own, sends back a `Gossip` with the values whose digests differ and the values the first one lacks, and a `Status` of its own for the keys it lacks itself. Each side merges what it receives, and sends back its merge of a value both held, so both end up with the same:
+A write at any level reaches the other nodes in the end through gossip. Every `gossip_interval`, each Replicator picks one other node at random, weakly-up ones included, and sends it a `Status`: one digest per key, a hash of the key's value. The other side compares them with its own, sends back a `Gossip` with the values whose digests differ and the values the first one lacks, and a `Status` of its own for the keys it lacks itself. Each side merges what it receives, and sends back its merge of a value both held, so both end up with the same:
 
 ```mermaid
 sequenceDiagram
@@ -438,13 +438,13 @@ sequenceDiagram
 ```
 
 - **Equal values have equal digests,** whatever order their updates arrived in. A digest is the SHA-1 of the value's JSON with every set and map sorted, so two nodes holding the same merge stop sending it to each other.
-- **A round covers at most `max_delta_elements` keys.** With more keys, each round takes the next chunk.
-- **A gossip message is split to fit a frame.** Remoting sends at most 16 MiB in a frame, and gzips any frame over 32 KiB, so large sets and maps travel compressed.
+- **Many keys go in chunks.** With more than `max_delta_elements` keys, the keys are split by a hash of their ids into `len(keys) // max_delta_elements` chunks, rounded down, so a chunk holds on average from `max_delta_elements` keys to nearly twice as many. A round sends up to 10 chunks, each in a `Status` of its own: the first round starts at a random chunk, and each later one goes on from there. The other side sends back at most `max_delta_elements` keys for each `Status`.
+- **A gossip message is split to fit a frame.** A frame holds at most 16 MiB of JSON, measured before compression. Remoting gzips any frame over 32 KiB, so large sets and maps travel compressed, but compression does not raise that limit.
 - **A restarted node is not confused with its old self.** A `Status` names the system it was meant for, and a node that restarted on the same address ignores one meant for its previous run.
 
 ### Limits
 
-All the data is in memory, on every node, and every change of a key sends the whole value: a write to the nodes its level asks for, and gossip to the rest. That suits many small keys, or a few of moderate size; Pekko's guidance of at most 100,000 top-level keys holds here too. A value whose encoding is larger than `log_data_size_exceeding` logs a warning, and one larger than 16 MiB cannot be sent at all.
+All the data is in memory, on every node, and every change of a key sends the whole value: a write to the nodes its level asks for, and gossip to the rest. That suits many small keys, or a few of moderate size; Pekko's guidance of at most 100,000 top-level keys holds here too. A value whose encoding is at least `log_data_size_exceeding` bytes has its size logged at INFO, and at WARNING once it reaches 3/4 of the frame, as Pekko does. One whose JSON is larger than 16 MiB cannot be sent at all, compressed or not.
 
 CRDTs hold state, not commands. A value that has to be decided once, such as which node owns a cart, needs one owner, a [singleton](06-singleton.md) or [sharding](07-sharding.md), rather than a merge.
 

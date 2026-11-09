@@ -518,20 +518,20 @@ async def test_send_to_and_receive_from_a_remote_node(spec: MultiNodeSpec):
 
 `pytest test_multi_node_sample.py`, with the `pytest.ini` from the first example, prints `1 passed`.
 
-- **`MultiNodeConfig()`** describes the nodes. `sample.role("node1")` declares a role and returns its `RoleName`; the first role declared hosts the barriers and the conductor. `common_config(...)` takes keyword arguments for every node's `ActorSystem`, such as `cluster=` or `downing=`, and `node_config(role, ...)` overrides them for some roles. The runner sets `name` and `address` itself.
+- **`MultiNodeConfig()`** describes the nodes. `sample.role("node1")` declares a role and returns its `RoleName`; the first role declared hosts the barriers and the conductor. `common_config(...)` takes keyword arguments for every node's `ActorSystem`, such as `cluster=ClusterSettings(...)` or `shutdown=CoordinatedShutdownSettings(...)`, and `node_config(role, ...)` overrides them for some roles. The runner sets `name` and `address` itself.
 - **`@multi_node_spec(sample)`** turns the body into a pytest test with no parameters. The test starts one `ActorSystem` per role, runs the body once per role, all at the same time, each with its own `spec`, and stops the systems when every body has returned.
 - **`spec.is_node(node1)`** is true only in node 1's body, so each `if` block runs on one node. `await spec.run_on(node1, thunk=f)` does the same as a call, with `f` sync or async; the `if` reads better and can `await` inside. `spec.myself` is the body's own role.
 - **`await spec.enter_barrier("deployed")`** waits until every node has entered the barrier of that name. Node 2 spawns the ponger before it enters, so node 1 cannot ping before the ponger exists. Every body passes the same barriers in the same order: `startup`, `deployed`, `finished`.
 - **`spec.node(node2)`** is node 2's address, `ohra://<name>@127.0.0.1:<port>`. With an actor path appended, `spec.system.resolve` turns it into a ref, as in [chapter 4](04-remoting.md). `Ping` is `@remotable` because it crosses nodes.
 - **`spec.spawn` and `spec.create_test_probe()`** work as the test kit's do, on the body's own node. The probe is on node 1, and its ref travels in the ping, so the pong comes back to it. `expect_message("pong", 10.0)` waits up to 10 seconds, as Pekko's sample does.
 
-If a body raises, the test fails at once: the other bodies are cancelled, and pytest shows an `ExceptionGroup` named after the role that failed, `role node1 failed`.
+If a body raises, the test fails at once: the other bodies are cancelled, and pytest shows the `TaskGroup`'s `ExceptionGroup`, which holds one named after the role that failed, `role node1 failed`, with the body's error in it.
 
 ### Barriers
 
 A barrier opens when every node still taking part has entered it. `enter_barrier("a", "b")` enters several, one after the other. Each wait lasts at most `max=` seconds, 30 by default, times `timefactor` ([Settings](#settings)), or what is left of an enclosing `async with spec.within(...)`.
 
-When a barrier fails, every node waiting at it raises, and every later barrier fails too, so a spec stops at its first broken step. The errors come from `ohra.testkit`:
+When a barrier fails, every node waiting at it raises, and every later barrier fails too, so a spec stops at its first broken step. The errors come from `ohra.testkit`, and all of them are a `BarrierError`, so `except BarrierError` catches any barrier failure:
 
 | Error | When |
 |---|---|
@@ -539,6 +539,7 @@ When a barrier fails, every node waiting at it raises, and every later barrier f
 | `ClientLost` | a node left while the others waited: its body returned, or its system terminated by itself, for example downed by the [split-brain resolver](05-cluster.md) |
 | `WrongBarrier` | a node entered another barrier than the one the others wait at |
 | `FailedBarrier` | an earlier barrier failed, or a node gave up on this one |
+| `TimeoutError("Server timed out while waiting for barrier X")` | not a `BarrierError`: a call naming several barriers ran out of its `max` or `within` before it reached `X`; the nodes already waiting at `X` get `FailedBarrier` |
 
 A body on a node whose system has terminated cannot enter a barrier: `enter_barrier` raises `RuntimeError("TestConductor unavailable because system is terminated")`.
 
@@ -595,7 +596,7 @@ async def test_a_node_that_exits_leaves_the_barriers(spec: MultiNodeSpec):
 ```
 
 - **`faulty.test_transport(on=True)`** puts a throttler in every node's remoting, which every frame passes on its way out and in. The conductor's network operations need it, and raise `RuntimeError` without it.
-- **`spec.test_conductor`** works on the first role only; on any other, each operation raises `RuntimeError("TestConductorServer was not started")`. So each call sits in `if spec.is_node(first)`, with a barrier after it, and the other node acts only once the link is cut.
+- **`spec.test_conductor`** works on the first role only; on any other, each operation raises `RuntimeError("TestConductorServer was not started")`. The network operations check for the test transport first, so on a node without it they raise the test transport's `RuntimeError` instead. So each call sits in `if spec.is_node(first)`, with a barrier after it, and the other node acts only once the link is cut.
 - **`blackhole(second, first, Direction.BOTH)`** drops every frame between `second` and `first`, on `second`'s side, both ways. `Direction.SEND` drops only what `second` sends to `first`, and `Direction.RECEIVE` only what it receives from it. The connection stays open, and the ping is lost without an error; `expect_no_message(0.5)` checks that no pong came back.
 - **`pass_through(second, first, Direction.BOTH)`** undoes it, and the next ping gets its pong. `throttle(node, target, direction, rate_mbit)` slows a link to a rate in megabits per second instead. `disconnect(node, target)` and `abort(node, target)` close the connections between two nodes, gracefully or at once, and the next message opens a new one.
 - **`exit(second, 0)`** stops a node as a process exit would: it takes the node out of the barriers, crashes its system without the coordinated shutdown, and cancels its body wherever it waits, here at `after-exit`, which `first` then passes alone. An exit value other than 0 fails the test once the other bodies are done. `shutdown(node)` terminates the node's system instead and leaves its body running, so its next barrier raises; `shutdown(node, abort=True)` crashes it.

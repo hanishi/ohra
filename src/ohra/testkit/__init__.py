@@ -8,6 +8,7 @@ from ..remote.throttler import Direction
 from .actor_testkit import ActorTestKit
 from .conductor import (
     BarrierEmpty,
+    BarrierError,
     BarrierTimeout,
     ClientLost,
     DuplicateNode,
@@ -24,6 +25,7 @@ from .settings import TestKitSettings
 __all__ = [
     "ActorTestKit",
     "BarrierEmpty",
+    "BarrierError",
     "BarrierTimeout",
     "ClientLost",
     "Direction",

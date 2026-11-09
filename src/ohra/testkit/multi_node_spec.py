@@ -136,7 +136,7 @@ class _Run:
     ports: dict[RoleName, int] = field(default_factory=lambda: {})
     tasks: dict[RoleName, asyncio.Task[None]] = field(default_factory=lambda: {})
     exit_values: dict[RoleName, int] = field(default_factory=lambda: {})
-    shut_down: set[RoleName] = field(default_factory=lambda: set())  # by their after-all
+    shut_down: set[RoleName] = field(default_factory=lambda: set())  # done by their after-all
 
 
 class MultiNodeSpec:
@@ -229,8 +229,8 @@ class MultiNodeSpec:
                 assert nodes <= {self.myself}, f"Nodes not shutdown: {sorted(nodes, key=str)}"
 
             await self.await_assert(removed, _BARRIER_TIMEOUT)
-        self._run.shut_down.add(self.myself)
         await _shutdown(self.system, self.settings)
+        self._run.shut_down.add(self.myself)  # only once it is done, the warning included
         controller.client_disconnected(self.myself)  # the player's connection drops
 
 

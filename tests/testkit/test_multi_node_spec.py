@@ -166,6 +166,33 @@ async def test_a_node_that_does_not_stop_is_left_after_the_shutdown_timeout(
             await system.when_terminated()
 
 
+async def test_a_node_whose_shutdown_is_cut_short_is_shut_down_at_the_end():
+    config = MultiNodeConfig()
+    a, b = config.role("a"), config.role("b")
+    terminating = asyncio.Event()
+    systems: list[ActorSystem[object]] = []
+
+    @multi_node_spec(config)
+    async def body(spec: MultiNodeSpec) -> None:
+        if spec.is_node(b):
+            systems.append(spec.system)
+
+            async def slow() -> None:
+                terminating.set()
+                await asyncio.sleep(0.5)  # the shutdown is still running when a fails
+
+            spec.system.coordinated_shutdown.add_task("before-service-unbind", "slow", slow)
+            return  # its after-all starts the shutdown
+        assert spec.is_node(a)
+        await terminating.wait()
+        raise ValueError("boom")  # cancels b inside its after-all's shutdown
+
+    with pytest.raises(ExceptionGroup) as info:
+        await asyncio.wait_for(body(), 5.0)
+    assert info.group_contains(ValueError, match="boom")
+    assert systems[0].is_terminated
+
+
 async def test_an_enclosing_within_shortens_a_barrier():
     config = MultiNodeConfig()
     a, _b = config.role("a"), config.role("b")

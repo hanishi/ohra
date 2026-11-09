@@ -2,18 +2,21 @@
 responses nested in ``Replicator`` as ``EventStream``'s are, and the actor, whose handlers port
 classic ``Replicator.scala`` function for function.
 
-Replication between nodes is not here yet: every consistency level runs on the local node.
+The Replicator tracks the cluster's members, but replication between nodes is not here yet:
+every consistency level runs on the local node.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 
 from __future__ import annotations
 
+from bisect import insort
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from ...behavior import Behavior, Behaviors
 from ...cell import watched_ref
+from ...signals import PostStop, PreRestart, Signal
 from .envelope import DELETED_ENVELOPE, DataEnvelope
 from .key import Key
 from .replicated_data import ReplicatedData
@@ -22,7 +25,9 @@ from .settings import ReplicatorSettings
 if TYPE_CHECKING:
     from ...context import ActorContext
     from ...ref import ActorRef
-    from ...remote import UniqueAddress
+    from ...remote import Address, UniqueAddress
+    from ..core import ClusterDomainEvent
+    from ..gossip import Member
 
 
 class Replicator:
@@ -291,7 +296,29 @@ class _SubscriberTerminated:
     ref: ActorRef[Any]
 
 
-type _Msg = Replicator.Command | _GossipTick | _SubscriberTerminated
+@dataclass(frozen=True)
+class _ClusterEvent:
+    """A member or reachability event, through the Replicator's message adapter."""
+
+    event: ClusterDomainEvent
+
+
+@dataclass(frozen=True)
+class _NodesForReadWrite:
+    """Internal, for tests: replies with ``nodes_for_read_write(exclude_exiting)``."""
+
+    exclude_exiting: bool
+    reply_to: ActorRef[tuple[UniqueAddress, ...]]
+
+
+type _Msg = (
+    Replicator.Command | _GossipTick | _SubscriberTerminated | _ClusterEvent | _NodesForReadWrite
+)
+
+
+def _age(m: Member) -> tuple[int, Address]:
+    """Pekko's Member.ageOrdering, oldest first, as a sort key: Member.is_older_than."""
+    return (m.up_number, m.address)
 
 
 def _is_wildcard(key_id: str) -> bool:
@@ -318,9 +345,41 @@ def _remove_binding[K](m: dict[K, set[ActorRef[Any]]], key: K, ref: ActorRef[Any
 def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
     @Behaviors.setup
     def setup(ctx: ActorContext[_Msg]) -> Behavior[_Msg]:
-        # the other members that are Up or Leaving, empty until the Replicator tracks membership
-        nodes: set[UniqueAddress] = set()
+        # imported here: cluster.core imports this package for ReplicatorSettings
+        from ..core import (
+            Cluster,
+            MemberEvent,
+            MemberExited,
+            MemberJoined,
+            MemberRemoved,
+            MemberUp,
+            MemberWeaklyUp,
+            ReachabilityEvent,
+            ReachableMember,
+            Subscribe,
+            UnreachableMember,
+            Unsubscribe,
+        )
+
+        cluster = Cluster(ctx.system)
+        self_address = cluster.self_address
         scheduler = ctx.system.scheduler
+
+        # cluster nodes, without self, joining and weakly up ones
+        nodes: set[UniqueAddress] = set()
+        # the same members, oldest first; only kept when prefer_oldest is on
+        members_by_age: list[Member] = []
+        # weakly up, joining and exiting nodes, without self
+        weakly_up_nodes: set[UniqueAddress] = set()
+        joining_nodes: set[UniqueAddress] = set()
+        exiting_nodes: set[UniqueAddress] = set()
+        unreachable: set[UniqueAddress] = set()
+
+        # Pekko's preStart. No ClusterShuttingDown in ohra: the node's own MemberRemoved stops
+        # the Replicator. The subscription replays the current state, as InitialStateAsEvents.
+        cluster_events = ctx.message_adapter(_ClusterEvent)
+        cluster.subscriptions.tell(Subscribe(cluster_events, MemberEvent))
+        cluster.subscriptions.tell(Subscribe(cluster_events, ReachabilityEvent))
 
         # Pekko's gossipTask and notifyTask; its clockTask feeds only pruning, which is left out
         ctx.timers.start_timer_with_fixed_delay("gossip", _GossipTick(), settings.gossip_interval)
@@ -346,6 +405,19 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         new_subscribers: dict[str, set[ActorRef[Any]]] = {}
         subscription_keys: dict[str, Key[Any]] = {}
         wildcard_subscribers: dict[str, set[ActorRef[Any]]] = {}
+
+        def nodes_for_read_write(exclude_exiting: bool) -> tuple[UniqueAddress, ...]:
+            if exclude_exiting and exiting_nodes:
+                if settings.prefer_oldest:
+                    return tuple(
+                        m.unique_address
+                        for m in members_by_age
+                        if m.unique_address not in exiting_nodes
+                    )
+                return tuple(sorted(nodes - exiting_nodes))
+            if settings.prefer_oldest:
+                return tuple(m.unique_address for m in members_by_age)
+            return tuple(sorted(nodes))
 
         def receive_get(
             key: Key[Any],
@@ -635,6 +707,51 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 if not has_subscriber(key) and key not in new_subscribers:
                     subscription_keys.pop(key, None)
 
+        def receive_member_joining(m: Member) -> None:
+            if m.address != self_address:
+                joining_nodes.add(m.unique_address)
+
+        def receive_member_weakly_up(m: Member) -> None:
+            if m.address != self_address:
+                weakly_up_nodes.add(m.unique_address)
+                joining_nodes.discard(m.unique_address)
+
+        def receive_member_up(m: Member) -> None:
+            # Pekko's leader set feeds only pruning, which is left out
+            if m.address != self_address:
+                nodes.add(m.unique_address)
+                weakly_up_nodes.discard(m.unique_address)
+                joining_nodes.discard(m.unique_address)
+                if settings.prefer_oldest and m not in members_by_age:
+                    insort(members_by_age, m, key=_age)
+
+        def receive_member_exiting(m: Member) -> None:
+            if m.address != self_address:
+                exiting_nodes.add(m.unique_address)
+
+        def receive_member_removed(m: Member) -> Behavior[_Msg]:
+            if m.address == self_address:
+                return Behaviors.stopped()
+            ctx.log.debug("adding removed node [%s] from MemberRemoved", m.unique_address)
+            # Pekko's leader, removedNodes and delta propagation feed pruning and deltas
+            nodes.discard(m.unique_address)
+            weakly_up_nodes.discard(m.unique_address)
+            joining_nodes.discard(m.unique_address)
+            exiting_nodes.discard(m.unique_address)
+            unreachable.discard(m.unique_address)
+            if settings.prefer_oldest and m in members_by_age:
+                members_by_age.remove(m)
+            return Behaviors.same
+
+        def receive_other_member_event(_m: Member) -> None:
+            pass  # Pekko replaces the member in its leader set, which only pruning reads
+
+        def receive_unreachable(m: Member) -> None:
+            unreachable.add(m.unique_address)
+
+        def receive_reachable(m: Member) -> None:
+            unreachable.discard(m.unique_address)
+
         def receive_get_replica_count(reply_to: ActorRef[Replicator.ReplicaCount]) -> None:
             reply_to.tell(Replicator.ReplicaCount(len(nodes) + 1))  # nodes excludes self
 
@@ -661,8 +778,34 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     receive_unsubscribe(key, subscriber)
                 case _SubscriberTerminated(ref):
                     receive_terminated(ref)
+                case _ClusterEvent(MemberJoined(member=m)):
+                    receive_member_joining(m)
+                case _ClusterEvent(MemberWeaklyUp(member=m)):
+                    receive_member_weakly_up(m)
+                case _ClusterEvent(MemberUp(member=m)):
+                    receive_member_up(m)
+                case _ClusterEvent(MemberExited(member=m)):
+                    receive_member_exiting(m)
+                case _ClusterEvent(MemberRemoved(member=m)):
+                    return receive_member_removed(m)
+                case _ClusterEvent(MemberEvent(member=m)):
+                    receive_other_member_event(m)
+                case _ClusterEvent(UnreachableMember(member=m)):
+                    receive_unreachable(m)
+                case _ClusterEvent(ReachableMember(member=m)):
+                    receive_reachable(m)
+                case _ClusterEvent():
+                    pass  # only member and reachability events are subscribed
+                case _NodesForReadWrite(exclude_exiting, reply_to):
+                    reply_to.tell(nodes_for_read_write(exclude_exiting))
             return Behaviors.same
 
-        return normal_receive
+        def on_signal(_ctx: ActorContext[_Msg], sig: Signal) -> Behavior[_Msg]:
+            # Pekko's postStop, which its preRestart also runs
+            if sig is PostStop or sig is PreRestart:
+                cluster.subscriptions.tell(Unsubscribe(cluster_events))
+            return Behaviors.same
+
+        return normal_receive.receive_signal(on_signal)
 
     return setup

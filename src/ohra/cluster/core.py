@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from ..behavior import Behavior, Behaviors
@@ -37,6 +37,7 @@ from .gossip import (
     MemberStatus,
     vclock_name,
 )
+from .ddata.settings import ReplicatorSettings
 from .vector_clock import VectorClock
 
 if TYPE_CHECKING:
@@ -79,6 +80,8 @@ class ClusterSettings:
     down_removal_margin: float = 0.0
     """Pekko's down-removal-margin: 0 means the resolver's stable_after; see
     effective_down_removal_margin."""
+    distributed_data: ReplicatorSettings = field(default_factory=ReplicatorSettings)
+    """Pekko's pekko.cluster.distributed-data settings, for the Replicator."""
 
     def __post_init__(self) -> None:
         positive = (

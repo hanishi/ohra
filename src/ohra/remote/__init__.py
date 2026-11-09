@@ -3,10 +3,12 @@ and the serialization of ``@remotable`` messages."""
 
 from .remoting import Address, RemoteRef, Remoting, UniqueAddress, resolve_local, unique_address
 from .serialization import Json, Serialization, SerializationError, remotable
+from .throttler import Direction
 from .tls import RotatingKeysSSLEngineProvider
 
 __all__ = [
     "Address",
+    "Direction",
     "Json",
     "RemoteRef",
     "Remoting",

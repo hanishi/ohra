@@ -13,11 +13,20 @@ from ohra import (
     ActorSystem,
     Behavior,
     Behaviors,
+    GCounter,
+    GCounterKey,
+    GSet,
     MailboxSelector,
+    ORMap,
+    ORSet,
+    ORSetKey,
+    Replicator,
     Routers,
+    SelfUniqueAddress,
     SpawnProtocol,
     StashBuffer,
     TimerScheduler,
+    UniqueAddress,
     batching,
 )
 from ohra.stream import (
@@ -30,6 +39,7 @@ from ohra.stream import (
     Source,
     UniqueKillSwitch,
 )
+from ohra.testkit import Direction, MultiNodeConfig, MultiNodeSpec
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,15 @@ async def probes_are_typed() -> None:
         del x, s, wrong
 
 
+async def multi_node_specs_are_typed(spec: MultiNodeSpec) -> None:
+    config = MultiNodeConfig()
+    first, second = config.role("first"), config.role("second")
+    spec.is_node(first)
+    spec.is_node("first")  # type: ignore[arg-type]
+    await spec.test_conductor.blackhole(first, second, Direction.BOTH)
+    await spec.test_conductor.blackhole(first, second, "both")  # type: ignore[arg-type]
+
+
 def streams_are_typed(system: ActorSystem[Any]) -> None:
     # Flow.of(str) alone is accepted here: type[T] is covariant, so pyright solves T = int | str,
     # and an identity flow of int | str does take ints. A flow that uses str is rejected.
@@ -203,3 +222,26 @@ def streams_are_typed(system: ActorSystem[Any]) -> None:
     )
     del g, empty, ints, flow, wrong, zipped, switched, from_empty, merged, concat_empty
     del concatenated, either, flow_merged, not_ints
+
+
+GCounter().merge(GSet[int]())  # type: ignore[arg-type]
+GSet[str]().add(1)  # type: ignore[arg-type]
+node = SelfUniqueAddress(UniqueAddress("localhost", 7354, 1, "Sys"))
+ORSet[str]().add(node, 1)  # type: ignore[arg-type]
+GCounter().merge(ORSet[str]())  # type: ignore[arg-type]
+ORMap[str, GCounter]().put(node, "k", 1)  # type: ignore[arg-type]
+
+
+def check_replicator(rep: ActorRef[Replicator.Command], me: ActorRef[Any]) -> None:
+    k = GCounterKey("a")
+    rep.tell(Replicator.Get(k, Replicator.ReadLocal(), me))
+    rep.tell(Replicator.Update(k, GCounter(), Replicator.WriteLocal(), me, lambda c: c))
+    rep.tell(Replicator.Subscribe(k, me))
+    rep.tell("not a command")  # type: ignore[arg-type]
+    s = ORSetKey[str]("s")
+    Replicator.Update(s, ORSet[str](), Replicator.WriteLocal(), me, lambda _: GCounter())  # type: ignore[arg-type]
+
+
+def check_get_success(success: Replicator.GetSuccess[GCounter]) -> None:
+    data: ORSet[str] = success.data  # type: ignore[assignment]
+    del data

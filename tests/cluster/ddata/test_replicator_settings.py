@@ -82,3 +82,23 @@ def test_have_the_pruning_defaults() -> None:
 def test_reject_negative_pruning_durations(kw: str) -> None:
     with pytest.raises(ValueError):
         ReplicatorSettings(**{kw: -1.0})
+
+
+def test_durable_keys_match_exactly_or_by_prefix() -> None:
+    settings = ReplicatorSettings(durable_keys=frozenset({"a", "b*"}))
+    assert settings.is_durable("a")
+    assert not settings.is_durable("ab")
+    assert settings.is_durable("b")
+    assert settings.is_durable("bc")
+    assert not settings.is_durable("c")
+
+
+def test_a_star_makes_every_key_durable() -> None:
+    settings = ReplicatorSettings(durable_keys=frozenset({"*"}))
+    assert settings.is_durable("x")
+    assert settings.is_durable("")
+
+
+def test_a_negative_durable_marker_ttl_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        ReplicatorSettings(durable_pruning_marker_time_to_live=-1.0)

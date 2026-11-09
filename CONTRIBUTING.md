@@ -24,6 +24,7 @@ npx --yes esbuild@0.28.2 src/ohra/ext/clock.ts --format=esm --outfile=src/ohra/e
 uv run pytest        # every test fails if any asyncio task outlives it (tests/conftest.py)
 uv run pytest examples/testing   # the book's chapter 12 tests, run as a reader runs them
 uv run pytest examples/streams   # the book's chapter 13 tests
+uv run pytest examples/distributed_data   # the book's chapter 14 tests
 uv run pyright       # strict mode, 0 errors
 npx --yes -p typescript@7.0.2 tsc --noEmit --strict --target es2022 --lib es2022,dom src/ohra/ext/clock.ts
                      # clock.ts's types

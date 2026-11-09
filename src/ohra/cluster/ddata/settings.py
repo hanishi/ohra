@@ -23,7 +23,7 @@ class ReplicatorSettings:
     log_data_size_exceeding: int | None = 10 * 1024
     """Log a message for data larger than this many bytes; None disables it."""
     prefer_oldest: bool = False
-    """Gossip to the oldest nodes first."""
+    """Read from and write to the oldest nodes first; gossip still picks its node at random."""
     expire_keys_after_inactivity: Mapping[str, float] = field(default_factory=dict[str, float])
     """Key (or ``prefix*`` pattern) to the seconds of inactivity after which it expires; 0 never
     expires."""

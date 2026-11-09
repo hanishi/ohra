@@ -135,9 +135,10 @@ Serialization.register(Gossip, "Replicator.Gossip")
 def send_to_replica[T](
     log: logging.Logger, to: ActorRef[T], msg: T, key_ids: Iterable[str]
 ) -> None:
-    """Send a message to another node's Replicator or aggregator. Pekko's remoting drops a
-    payload over its frame size with an error log, and the sender carries on; ohra's remoting
-    raises SerializationError, which would restart a Replicator or stop an aggregator."""
+    """Send a message to another node's Replicator, aggregator or subscriber. Pekko's remoting
+    drops a payload over its frame size with an error log, and the sender carries on; ohra's
+    remoting raises SerializationError, which would restart a Replicator or stop an
+    aggregator."""
     try:
         to.tell(msg)
     except SerializationError as e:

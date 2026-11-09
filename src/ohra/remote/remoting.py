@@ -5,7 +5,8 @@
         greeter.tell(Greet("pekko", reply_to))        # Greet is @remotable
 
 Modelled on Apache Pekko's Artery and narrowed: no membership, no remote watch, no quarantine. A
-node has a UniqueAddress (host, port, and a uid per incarnation). Frames are length-prefixed JSON.
+node has a UniqueAddress (host, port, and a uid per incarnation). Frames are length-prefixed JSON,
+gzipped over 32 KiB.
 A message for a path nobody owns is a dead letter on the receiving node.
 """
 
@@ -13,12 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
 import json
 import logging
 import secrets
 import ssl
 import struct
 import weakref
+import zlib
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -30,6 +33,8 @@ from .tls import RotatingKeysSSLEngineProvider
 
 _log = logging.getLogger("ohra.remote")
 MAX_FRAME = 16 * 2**20
+# a frame body over this goes gzipped, as Pekko's ddata serializer gzips its large payloads
+COMPRESS_ABOVE = 32 * 1024
 QUEUE_BOUND = 1000  # frames held for a peer while its connection is being opened
 # bytes a connected peer may leave unread before tells to it are dead letters, as Pekko's
 # outbound-message-queue-size: a peer that stopped reading must not grow memory without end
@@ -178,20 +183,41 @@ def resolve_local(system: ActorSystem[Any], path: str) -> ActorRef[Any]:
 
 
 def pack(obj: Json) -> bytes:
-    body = json.dumps(obj, separators=(",", ":")).encode()
+    return _framed(json.dumps(obj, separators=(",", ":")).encode())
+
+
+def _framed(body: bytes) -> bytes:
+    """The length, then the body: gzipped when over COMPRESS_ABOVE, with mtime=0 so the same
+    body is the same bytes. JSON never starts with 0x1f, so gzip's magic marks it."""
+    if len(body) > COMPRESS_ABOVE:
+        body = gzip.compress(body, compresslevel=6, mtime=0)  # Java's GZIPOutputStream level
     return struct.pack(">I", len(body)) + body
 
 
 async def read_frame(reader: asyncio.StreamReader) -> Json | None:
     """The next frame, or None at a clean end of stream. Raises ValueError for an oversized
-    frame."""
+    frame, compressed or inflated: MAX_FRAME bounds the uncompressed body too, and inflation
+    stops one byte past it, so a small frame cannot inflate without end."""
     try:
         (n,) = struct.unpack(">I", await reader.readexactly(4))
         if n > MAX_FRAME:
             raise ValueError(f"frame of {n} bytes exceeds {MAX_FRAME}")
-        return json.loads(await reader.readexactly(n))
+        body = await reader.readexactly(n)
     except asyncio.IncompleteReadError:
         return None
+    if body[:2] == b"\x1f\x8b":
+        inflater = zlib.decompressobj(wbits=31)
+        try:
+            body = inflater.decompress(body, MAX_FRAME + 1)
+        except zlib.error as e:
+            raise ValueError(f"bad compressed frame: {e}") from None
+        if len(body) > MAX_FRAME:
+            raise ValueError(f"frame inflates past {MAX_FRAME} bytes, which exceeds the limit")
+        if not inflater.eof:
+            raise ValueError("truncated compressed frame")
+        if inflater.unused_data:  # bytes or a second gzip member after the first
+            raise ValueError("trailing data after a compressed frame")
+    return json.loads(body)
 
 
 def _authority_of(path: str) -> tuple[str, int]:
@@ -404,19 +430,21 @@ class Remoting:
         await association.drain()
 
     def _frame(self, path: str, msg: object) -> bytes:
-        frame = pack(
+        body = json.dumps(
             {
                 "kind": "msg",
                 "to": path,
                 "from": None,
                 "message": Serialization.encode(msg, self.ref_path),
-            }
-        )
-        if len(frame) - 4 > MAX_FRAME:
+            },
+            separators=(",", ":"),
+        ).encode()
+        # before compression: the receiver bounds the inflated body by the same limit
+        if len(body) > MAX_FRAME:
             raise SerializationError(
-                f"message of {len(frame) - 4} bytes exceeds the {MAX_FRAME} byte frame limit"
+                f"message of {len(body)} bytes exceeds the {MAX_FRAME} byte frame limit"
             )
-        return frame
+        return _framed(body)
 
     def _association(self, path: str) -> _Association:
         key = _authority_of(path)

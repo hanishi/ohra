@@ -128,6 +128,7 @@ The `testkit` fixture gives each test its own actor system and shuts it down aft
 11. [Putting it together](https://github.com/hanishi/ohra/blob/main/docs/book/11-putting-it-together.md): one cart request through every layer
 12. [Testing](https://github.com/hanishi/ohra/blob/main/docs/book/12-testing.md): the test kit, probes, manual time for timers, pytest fixtures
 13. [Streams](https://github.com/hanishi/ohra/blob/main/docs/book/13-streams.md): Source, Flow, Sink and actor stages
+14. [Distributed Data](https://github.com/hanishi/ohra/blob/main/docs/book/14-distributed-data.md): CRDTs, the Replicator, consistency levels, subscriptions
 
 Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-pekko-names.md), [known deviations from Apache Pekko](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-deviations.md), [performance](https://github.com/hanishi/ohra/blob/main/docs/book/appendix-performance.md), and a [glossary](https://github.com/hanishi/ohra/blob/main/docs/book/glossary.md).
 
@@ -165,7 +166,7 @@ Appendices: [Apache Pekko names](https://github.com/hanishi/ohra/blob/main/docs/
 
 ## Development
 
-Layout follows Apache Pekko's modules: `ohra` is the actor core, `ohra.remote` the transport and serialization, `ohra.cluster` membership and the singleton, `ohra.cluster.sharding` the Shard, region and coordinator, `ohra.ext` the FastAPI, Postgres and shared-memory integrations, `ohra.testkit` the test kit. Every public name is importable from `ohra` and from its own subpackage, except the test kit's, which come from `ohra.testkit` only.
+Layout follows Apache Pekko's modules: `ohra` is the actor core, `ohra.remote` the transport and serialization, `ohra.cluster` membership and the singleton, `ohra.cluster.sharding` the Shard, region and coordinator, `ohra.cluster.ddata` Distributed Data's types and Replicator, `ohra.ext` the FastAPI, Postgres and shared-memory integrations, `ohra.testkit` the test kit. Every public name is importable from `ohra` and from its own subpackage, except the test kit's, which come from `ohra.testkit` only.
 
 ```
 pytest      # every test fails if any asyncio task outlives it

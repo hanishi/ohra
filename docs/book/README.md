@@ -12,13 +12,14 @@ Every chapter opens the same way: **the problem** it solves, **the idea** in pla
 
 ## At a glance
 
-Each layer is a set of actors and uses only the layers under it. The core runtime knows nothing about the network. Remoting makes a ref point at another process. The cluster, the singleton and sharding are actors that talk to their peers through remoting. Persistence, streams and management sit beside them, used by whoever needs them. An arrow reads "uses".
+Each layer is a set of actors and uses only the layers under it. The core runtime knows nothing about the network. Remoting makes a ref point at another process. The cluster, the singleton, sharding and Distributed Data are actors that talk to their peers through remoting. Persistence, streams and management sit beside them, used by whoever needs them. An arrow reads "uses".
 
 ```mermaid
 flowchart TB
   mgmt["<b>Management and bootstrap</b><br/>health checks, discovery, the join decision"]
   singleton["<b>Singleton</b><br/>one actor on the oldest member"]
   sharding["<b>Sharding</b><br/>regions, shards, a coordinator"]
+  ddata["<b>Distributed Data</b><br/>CRDTs, a Replicator per node"]
   membership["<b>Cluster membership</b><br/>gossip, failure detector, leader, split-brain resolver"]
   remoting["<b>Remoting</b><br/>RemoteRef, @remotable JSON frames, TCP"]
   persistence["<b>Persistence</b><br/>latest state, write then install"]
@@ -29,6 +30,7 @@ flowchart TB
   sharding -- entities --> persistence
   singleton --> membership
   sharding --> membership
+  ddata --> membership
   membership --> remoting
   remoting --> runtime
   persistence --> runtime
@@ -42,6 +44,7 @@ flowchart TB
 | Cluster membership, split-brain resolver | `cluster/core.py`, `cluster/sbr.py` | cluster-typed |
 | Singleton | `cluster/singleton.py` | cluster-tools |
 | Sharding | `cluster/sharding/` | cluster-sharding-typed |
+| Distributed Data | `cluster/ddata/` | distributed-data, cluster-typed |
 | Persistence | `persistence.py` | persistence-typed (durable state) |
 | Management, bootstrap, discovery | `management/`, `discovery.py` | pekko-management |
 | Streams | `stream/` | stream, stream-typed |
@@ -61,6 +64,7 @@ flowchart TB
 11. [Putting it together: one cart request](11-putting-it-together.md)
 12. [Testing](12-testing.md)
 13. [Streams](13-streams.md)
+14. [Distributed Data](14-distributed-data.md)
 
 Appendices
 

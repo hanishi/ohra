@@ -378,3 +378,43 @@ async def test_an_oversized_gossip_is_dropped_and_the_replicator_keeps_serving(
             assert reply.data.value == 1
             assert {"A", "big"} <= await key_ids(spec, replicator)
     await spec.enter_barrier("after-oversized")
+
+
+@multi_node_spec(config)
+async def test_a_changed_that_cannot_be_sent_to_a_remote_subscriber_is_dropped(
+    spec: MultiNodeSpec,
+):
+    """Changed is not @remotable, so the tell to a subscriber on another node raises
+    SerializationError: the Replicator logs and drops it, as Pekko's remoting drops a message it
+    cannot send, instead of restarting."""
+    replicator = await join(spec)
+    await spec.enter_barrier("after-join")
+
+    if spec.is_node(first):
+        key: GSetKey[str] = GSetKey("subscribed")
+        remote: ActorRef[Replicator.SubscribeResponse[GSet[str]]] = spec.system.resolve(
+            f"{spec.node(second)}/system/subscriber"
+        )
+        with errors_logged() as errors:
+            assert await update(spec, replicator) == Replicator.UpdateSuccess(KeyA)
+            probe: TestProbe[Replicator.UpdateResponse[GSet[str]]] = spec.create_test_probe()
+            empty: GSet[str] = GSet()
+            replicator.tell(
+                Replicator.Update(
+                    key, empty, Replicator.WriteLocal(), probe.ref, lambda s: s.add("x")
+                )
+            )
+            await probe.expect_message(Replicator.UpdateSuccess(key))
+            replicator.tell(Replicator.Subscribe(key, remote))
+            replicator.tell(Replicator.FlushChanges())
+
+            def dropped() -> None:
+                assert any("Dropped Changed" in r.getMessage() for r in errors), errors
+
+            await spec.await_assert(dropped, max=5.0, interval=0.05)
+            # not restarted: the Replicator still holds both keys and serves them
+            reply = await get(spec, replicator)
+            assert isinstance(reply, Replicator.GetSuccess), reply
+            assert reply.data.value == 1
+            assert {"A", "subscribed"} <= await key_ids(spec, replicator)
+    await spec.enter_barrier("after-unsendable-changed")

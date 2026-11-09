@@ -443,7 +443,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         self_address = cluster.self_address
         self_unique_address = cluster.self_unique_address
         self_from_system_uid = self_unique_address.uid
-        name = ReplicatorSettings.name_for(ctx.system, None)
+        self_path = ctx.self.path.removeprefix(self_address.root)  # Pekko's replica: self.path
         scheduler = ctx.system.scheduler
         remoting = ctx.system.remoting
         assert remoting is not None  # a cluster node has remoting
@@ -533,7 +533,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
 
         def replica(node: UniqueAddress) -> ActorRef[Any]:
             """The Replicator on ``node``: this one's path at that node's address."""
-            return ctx.system.resolve(f"{node.root}/system/{name}")
+            return ctx.system.resolve(node.root + self_path)
 
         def receive_get(
             key: Key[Any],

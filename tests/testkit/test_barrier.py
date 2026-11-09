@@ -271,3 +271,17 @@ async def test_timeout_within_the_shortest_timeout_if_the_new_timeout_is_longer(
         assert await error_of(b) == err_a
         with pytest.raises(FailedBarrier):
             await barrier.enter_barrier(C, "bar23")
+
+
+# ohra's own: Pekko's player would time out client-side, as the coordinator never answers
+
+
+async def test_an_enter_from_a_removed_node_fails_at_once_while_others_wait() -> None:
+    async with with_controller(3) as barrier:
+        await register(barrier, A, B, C)
+        b = await enter(barrier, B, "x")
+        barrier.remove(A)
+        with pytest.raises(FailedBarrier):
+            await asyncio.wait_for(barrier.enter_barrier(A, "x"), 2)
+        await asyncio.wait_for(barrier.enter_barrier(C, "x"), 2)
+        await asyncio.wait_for(b, 2)

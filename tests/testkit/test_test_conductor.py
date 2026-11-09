@@ -192,6 +192,26 @@ async def test_after_shutdown_the_body_runs_on_and_a_barrier_raises():
     assert ran_on == [second]
 
 
+@pytest.mark.parametrize("op", ["shutdown", "exit"])
+async def test_a_stopped_node_leaves_get_nodes_at_once(op: str):
+    # Pekko's Controller on Terminate: RemoveClient, then nodes -= node, in one step
+    two = MultiNodeConfig()
+    first, second = two.role("first"), two.role("second")
+    seen: list[tuple[RoleName, ...]] = []
+
+    @multi_node_spec(two)
+    async def body(spec: MultiNodeSpec) -> None:
+        if spec.is_node(first):
+            tc = spec.test_conductor
+            await (tc.shutdown(second) if op == "shutdown" else tc.exit(second, 0))
+            seen.append(await tc.get_nodes())
+        else:
+            await spec.system.when_terminated()
+
+    await asyncio.wait_for(body(), 10.0)
+    assert seen == [(first,)]
+
+
 @pytest.mark.parametrize("abort", [False, True])
 async def test_a_node_shut_down_while_waiting_at_a_barrier_raises_at_once(abort: bool):
     two = MultiNodeConfig()

@@ -224,6 +224,8 @@ class BarrierCoordinator:
         if name in d.clients:
             together = (name, *d.arrived)
             self._waiters.insert(0, (name, fut))
+        else:  # Pekko never answers it, and its player times out
+            fut.set_exception(FailedBarrier(d))
         enter_deadline = self._get_deadline(timeout)
         # we only allow the deadlines to get shorter
         if d.deadline is None or enter_deadline < d.deadline:
@@ -324,6 +326,11 @@ class Controller:
     def remove(self, name: RoleName) -> None:
         self._barrier.remove_client(name)
 
+    def terminate(self, name: RoleName) -> None:
+        """Terminate's bookkeeping: out of the barriers and out of the nodes, at once."""
+        self._barrier.remove_client(name)
+        self._nodes.discard(name)
+
     def get_nodes(self) -> frozenset[RoleName]:
         return frozenset(self._nodes)
 
@@ -421,7 +428,7 @@ class TestConductor:
         body cancelled. A non-zero `exit_value` fails the spec once the other bodies finish."""
         from .multi_node_spec import crash
 
-        self._controller().remove(node)
+        self._controller().terminate(node)
         self._run.exit_values[node] = exit_value
         # an exited process runs nothing more; cancelled first, so the crash cannot wake it
         self._run.tasks[node].cancel()
@@ -432,7 +439,7 @@ class TestConductor:
         Its body runs on, and its next barrier raises."""
         from .multi_node_spec import crash
 
-        self._controller().remove(node)
+        self._controller().terminate(node)
         system = self._run.systems[node]
         if abort:
             await crash(system)

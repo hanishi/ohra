@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -149,12 +150,16 @@ async def test_a_node_that_does_not_stop_is_left_after_the_shutdown_timeout(
             await started.wait()
 
     try:
+        start = time.monotonic()
         with caplog.at_level(logging.WARNING):
             await asyncio.wait_for(body(), 2.0)  # the default bound is 10s
-        assert any(
-            r.getMessage().startswith(f"Failed to stop [{stuck[0].path.removesuffix('/user')}]")
-            for r in caplog.records
-        )
+        took = time.monotonic() - start
+        root = stuck[0].path.removesuffix("/user")
+        warnings = [
+            r for r in caplog.records if r.getMessage().startswith(f"Failed to stop [{root}]")
+        ]
+        assert len(warnings) == 1  # shut down once, by its after-all, not again at the end
+        assert took < 0.4  # one 0.2s bound, not two
     finally:
         release.set()
         for system in stuck:

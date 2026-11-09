@@ -67,6 +67,12 @@ async def _shutdown(system: ActorSystem[Any], settings: TestKitSettings) -> None
         system.log.warning(f"Failed to stop [{root}] within [{seconds(d)}]")
 
 
+async def _final_shutdown(run: _Run, role: RoleName, system: ActorSystem[Any]) -> None:
+    """The runner's last stop, for a node its after-all has not shut down already."""
+    if role not in run.shut_down:
+        await _shutdown(system, run.settings)
+
+
 _RESERVED = ("address", "name")
 
 # Pekko's testconductor barrier-timeout
@@ -130,6 +136,7 @@ class _Run:
     ports: dict[RoleName, int] = field(default_factory=lambda: {})
     tasks: dict[RoleName, asyncio.Task[None]] = field(default_factory=lambda: {})
     exit_values: dict[RoleName, int] = field(default_factory=lambda: {})
+    shut_down: set[RoleName] = field(default_factory=lambda: set())  # by their after-all
 
 
 class MultiNodeSpec:
@@ -222,6 +229,7 @@ class MultiNodeSpec:
                 assert nodes <= {self.myself}, f"Nodes not shutdown: {sorted(nodes, key=str)}"
 
             await self.await_assert(removed, _BARRIER_TIMEOUT)
+        self._run.shut_down.add(self.myself)
         await _shutdown(self.system, self.settings)
         controller.client_disconnected(self.myself)  # the player's connection drops
 
@@ -253,7 +261,7 @@ async def _run_spec(
                     assert system.remoting is not None
                     system.remoting.throttler = Throttler()
                 await system.__aenter__()
-                stack.push_async_callback(_shutdown, system, settings)
+                stack.push_async_callback(_final_shutdown, run, role, system)
                 # the player's connection drops when its system has terminated (ClientDisconnected)
                 system._system_root.done.add_done_callback(  # pyright: ignore[reportPrivateUsage]
                     lambda _, role=role: controller.client_disconnected(role)

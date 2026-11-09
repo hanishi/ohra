@@ -20,7 +20,8 @@ def test_merge_merges_the_data():
     a = GCounter().increment(node1, 2)
     b = GCounter().increment(node2, 3)
     assert DataEnvelope(a).merge(DataEnvelope(b)) == DataEnvelope(a.merge(b))
-    assert DataEnvelope(a).merge(DataEnvelope(b)).data.value == 5  # type: ignore[attr-defined]
+    merged = DataEnvelope(a).merge(DataEnvelope(b)).data
+    assert isinstance(merged, GCounter) and merged.value == 5
 
 
 def test_deleted_wins_on_either_side():

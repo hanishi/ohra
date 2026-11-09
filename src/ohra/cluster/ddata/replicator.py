@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .key import Key
 from .replicated_data import ReplicatedData
@@ -245,11 +245,11 @@ class Replicator:
         reply_to: ActorRef[Replicator.GetKeyIdsResult]
 
     type Command = (
-        Replicator.Get[ReplicatedData]
-        | Replicator.Update[ReplicatedData]
-        | Replicator.Delete[ReplicatedData]
-        | Replicator.Subscribe[ReplicatedData]
-        | Replicator.Unsubscribe[ReplicatedData]
+        Replicator.Get[Any]
+        | Replicator.Update[Any]
+        | Replicator.Delete[Any]
+        | Replicator.Subscribe[Any]
+        | Replicator.Unsubscribe[Any]
         | Replicator.GetReplicaCount
         | Replicator.FlushChanges
         | Replicator.GetKeyIds

@@ -14,6 +14,7 @@ from ohra import (
     Behavior,
     Behaviors,
     GCounter,
+    GCounterKey,
     GSet,
     MailboxSelector,
     ORMap,
@@ -26,6 +27,7 @@ from ohra import (
     UniqueAddress,
     batching,
 )
+from ohra.cluster.ddata.replicator import Replicator
 from ohra.stream import (
     Flow,
     Keep,
@@ -227,3 +229,11 @@ node = SelfUniqueAddress(UniqueAddress("localhost", 7354, 1, "Sys"))
 ORSet[str]().add(node, 1)  # type: ignore[arg-type]
 GCounter().merge(ORSet[str]())  # type: ignore[arg-type]
 ORMap[str, GCounter]().put(node, "k", 1)  # type: ignore[arg-type]
+
+
+def check_replicator(rep: ActorRef[Replicator.Command], me: ActorRef[Any]) -> None:
+    k = GCounterKey("a")
+    rep.tell(Replicator.Get(k, Replicator.ReadLocal(), me))
+    rep.tell(Replicator.Update(k, GCounter(), Replicator.WriteLocal(), me, lambda c: c))
+    rep.tell(Replicator.Subscribe(k, me))
+    rep.tell("not a command")  # type: ignore[arg-type]

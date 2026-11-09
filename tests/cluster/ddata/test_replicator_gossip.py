@@ -19,6 +19,8 @@ from ohra.cluster.ddata import (
     DistributedData,
     GCounter,
     GCounterKey,
+    GSet,
+    GSetKey,
     Replicator,
     ReplicatorSettings,
 )
@@ -26,8 +28,10 @@ from ohra.cluster.ddata import replicator as replicator_module
 from ohra.cluster.ddata.envelope import DataEnvelope, Gossip, Status
 from ohra.ref import ActorRef
 from ohra.remote import Address
+from ohra.remote import remoting as remoting_module
 from ohra.testkit import Direction, MultiNodeConfig, MultiNodeSpec, TestProbe, multi_node_spec
 
+from ...util import errors_logged
 from ..test_cluster import FAST, FAST_SHUTDOWN
 
 GOSSIP = 0.1
@@ -339,3 +343,38 @@ async def test_the_used_timestamp_follows_wall_time_the_loop_clock_misses(spec: 
 
             await spec.await_assert(jumped_ahead, max=5.0, interval=0.05)
     await spec.enter_barrier("after-clock")
+
+
+@multi_node_spec(config)
+async def test_an_oversized_gossip_is_dropped_and_the_replicator_keeps_serving(
+    spec: MultiNodeSpec,
+):
+    """Pekko's remoting drops a payload over its frame size with an error log. Here the send
+    raises, and a raise in the Replicator would restart it and wipe its data."""
+    replicator = await join(spec)
+    await spec.enter_barrier("after-join")
+
+    if spec.is_node(first):
+        big: GSetKey[str] = GSetKey("big")
+        with patch.object(remoting_module, "MAX_FRAME", 2**16), errors_logged() as errors:
+            assert await update(spec, replicator) == Replicator.UpdateSuccess(KeyA)
+            probe: TestProbe[Replicator.UpdateResponse[GSet[str]]] = spec.create_test_probe()
+            empty: GSet[str] = GSet()
+            replicator.tell(
+                Replicator.Update(
+                    big, empty, Replicator.WriteLocal(), probe.ref, lambda s: s.add("x" * 2**17)
+                )
+            )
+            await probe.expect_message(Replicator.UpdateSuccess(big))
+
+            def dropped() -> None:
+                assert any("big" in r.getMessage() for r in errors), errors
+
+            # the other nodes lack both keys, so the next Status exchange gossips them together
+            await spec.await_assert(dropped, max=5.0, interval=0.05)
+            # not restarted: the Replicator still holds both keys and serves them
+            reply = await get(spec, replicator)
+            assert isinstance(reply, Replicator.GetSuccess), reply
+            assert reply.data.value == 1
+            assert {"A", "big"} <= await key_ids(spec, replicator)
+    await spec.enter_barrier("after-oversized")

@@ -37,6 +37,7 @@ from .envelope import (
     Write,
     WriteAck,
     WriteNack,
+    send_to_replica,
 )
 from .key import Key
 from .replicated_data import ReplicatedData
@@ -650,7 +651,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             )
 
         def receive_read(key: str, reply_to: ActorRef[ReadResult]) -> None:
-            reply_to.tell(ReadResult(get_data(key)))
+            send_to_replica(ctx.log, reply_to, ReadResult(get_data(key)), [key])
 
         def receive_write(
             key: str, envelope: DataEnvelope, reply_to: ActorRef[WriteAck | WriteNack]
@@ -853,7 +854,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     self_from_system_uid,
                     ctx.self,
                 )
-                to.tell(status)
+                send_to_replica(ctx.log, to, status, status.digests)
             else:
                 tot_chunks = len(data_entries) // max_delta_elements
                 for _ in range(min(tot_chunks, 10)):
@@ -875,7 +876,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         self_from_system_uid,
                         ctx.self,
                     )
-                    to.tell(status)
+                    send_to_replica(ctx.log, to, status, status.digests)
 
         def select_random_node(addresses: list[UniqueAddress]) -> UniqueAddress | None:
             return random.choice(addresses) if addresses else None
@@ -929,7 +930,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 )
                 send_back = bool(other_different_keys)
                 for g in create_gossip_messages(keys, send_back, from_system_uid):
-                    reply_to.tell(g)
+                    send_to_replica(ctx.log, reply_to, g, g.updated_data)
             my_missing_keys = other_keys - my_keys
             if my_missing_keys:
                 ctx.log.debug(
@@ -945,7 +946,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     self_from_system_uid,
                     ctx.self,
                 )
-                reply_to.tell(status)
+                send_to_replica(ctx.log, reply_to, status, status.digests)
 
         def create_gossip_messages(
             keys: Collection[str], send_back: bool, from_system_uid: int
@@ -1019,7 +1020,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         reply_keys.add(key)
             if send_back and reply_keys:
                 for g in create_gossip_messages(reply_keys, False, from_system_uid):
-                    reply_to.tell(g)
+                    send_to_replica(ctx.log, reply_to, g, g.updated_data)
 
         def receive_subscribe(key: Key[Any], subscriber: ActorRef[Any]) -> None:
             _add_binding(new_subscribers, key.id, subscriber)

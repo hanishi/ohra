@@ -1,5 +1,8 @@
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+import logging
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import contextmanager
+from logging.handlers import BufferingHandler
 
 from ohra.testkit.multi_node_spec import free_port as free_port
 
@@ -29,3 +32,15 @@ def suspending(
             log.append("closed")
 
     return gen
+
+
+@contextmanager
+def errors_logged(logger: str = "ohra.actor") -> Generator[list[logging.LogRecord]]:
+    """The records at ERROR and above that ``logger`` and its children log inside the block."""
+    handler = BufferingHandler(2**31)  # never flushes, so the buffer keeps every record
+    handler.setLevel(logging.ERROR)
+    logging.getLogger(logger).addHandler(handler)
+    try:
+        yield handler.buffer
+    finally:
+        logging.getLogger(logger).removeHandler(handler)

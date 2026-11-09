@@ -10,6 +10,7 @@ out. The spec's B2 (the write, its convergence comes with gossip) and B3, and Re
 from __future__ import annotations
 
 from collections.abc import Callable
+from unittest.mock import patch
 
 from ohra.cluster import Cluster, ClusterSettings, Join
 from ohra.cluster.ddata import (
@@ -23,8 +24,10 @@ from ohra.cluster.ddata import (
 )
 from ohra.ref import ActorRef
 from ohra.remote import Address
+from ohra.remote import remoting as remoting_module
 from ohra.testkit import Direction, MultiNodeConfig, MultiNodeSpec, TestProbe, multi_node_spec
 
+from ...util import errors_logged
 from ..test_cluster import FAST, FAST_SHUTDOWN
 
 config = MultiNodeConfig()
@@ -258,3 +261,28 @@ async def test_a_write_of_another_type_is_nacked(spec: MultiNodeSpec):
         replicator.tell(Replicator.Get(set_x, Replicator.ReadLocal(), got.ref))
         await got.expect_message(Replicator.GetSuccess(set_x, GSet[str]().add("a")))
     await spec.enter_barrier("checked")
+
+
+@multi_node_spec(config)
+async def test_an_oversized_write_is_dropped_and_the_update_times_out(spec: MultiNodeSpec):
+    """Pekko's remoting drops a Write over its frame size with an error log, and the aggregator
+    replies on its timeout. Here the send raises, and a raise would stop it with no reply."""
+    replicator = await join(spec)
+
+    if spec.is_node(first):
+        big: GSetKey[str] = GSetKey("big")
+        with patch.object(remoting_module, "MAX_FRAME", 2**16), errors_logged() as errors:
+            probe: TestProbe[Replicator.UpdateResponse[GSet[str]]] = spec.create_test_probe()
+            empty: GSet[str] = GSet()
+            replicator.tell(
+                Replicator.Update(
+                    big,
+                    empty,
+                    Replicator.WriteAll(spec.settings.dilated(1.0)),
+                    probe.ref,
+                    lambda s: s.add("x" * 2**17),
+                )
+            )
+            await probe.expect_message(Replicator.UpdateTimeout(big), 5.0)
+            assert any("big" in r.getMessage() for r in errors), errors
+    await spec.enter_barrier("after-oversized")

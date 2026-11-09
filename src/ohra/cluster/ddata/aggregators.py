@@ -25,6 +25,7 @@ from .envelope import (
     Write,
     WriteAck,
     WriteNack,
+    send_to_replica,
 )
 from .replicator import Replicator
 
@@ -179,7 +180,7 @@ def write_aggregator(
 
         # Pekko's preStart
         for node in primary_nodes:
-            replica(node).tell(write_msg(node))
+            send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
         if is_done():
             return reply()
 
@@ -196,7 +197,7 @@ def write_aggregator(
                         return reply()
                 case _SendToSecondary():
                     for node in secondary_nodes:
-                        replica(node).tell(write_msg(node))
+                        send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
                 case _ReceiveTimeout():
                     return reply()
             return Behaviors.same
@@ -287,7 +288,7 @@ def read_aggregator(
 
         # Pekko's preStart
         for node in primary_nodes:
-            replica(node).tell(read_msg(node))
+            send_to_replica(ctx.log, replica(node), read_msg(node), [key.id])
         if len(remaining) == done_when_remaining_size:
             return reply(ok=True)
         elif done_when_remaining_size < 0 or len(remaining) < done_when_remaining_size:
@@ -313,7 +314,7 @@ def read_aggregator(
                         return reply(ok=True)
                 case _SendToSecondary():
                     for node in secondary_nodes:
-                        replica(node).tell(read_msg(node))
+                        send_to_replica(ctx.log, replica(node), read_msg(node), [key.id])
                 case _ReceiveTimeout():
                     return reply(ok=False)
                 case ReadRepairAck():

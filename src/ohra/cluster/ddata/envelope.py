@@ -1,6 +1,8 @@
-"""Pekko's ``DataEnvelope`` and ``DeletedData``, from ``Replicator.Internal``.
+"""Pekko's ``DataEnvelope`` and ``DeletedData``, from ``Replicator.Internal``, and the messages
+Replicators send each other.
 
 Pruning and delta versions are not here: they come with the sub-projects that need them.
+A request carries the ``reply_to`` that Pekko answers through ``sender()``.
 """
 
 from __future__ import annotations
@@ -8,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+from ...ref import ActorRef
+from ...remote import UniqueAddress
 from ...remote.serialization import remotable
 from .replicated_data import ReplicatedData
 
@@ -46,3 +50,52 @@ class DataEnvelope:
 
 
 DELETED_ENVELOPE = DataEnvelope(DELETED_DATA)
+
+
+@remotable
+@dataclass(frozen=True)
+class Write:
+    key_id: str
+    envelope: DataEnvelope
+    from_node: UniqueAddress | None
+    reply_to: ActorRef[WriteAck | WriteNack]
+
+
+@remotable
+@dataclass(frozen=True)
+class WriteAck:
+    pass
+
+
+@remotable
+@dataclass(frozen=True)
+class WriteNack:
+    pass
+
+
+@remotable
+@dataclass(frozen=True)
+class Read:
+    key_id: str
+    from_node: UniqueAddress | None
+    reply_to: ActorRef[ReadResult]
+
+
+@remotable
+@dataclass(frozen=True)
+class ReadResult:
+    envelope: DataEnvelope | None
+
+
+@remotable
+@dataclass(frozen=True)
+class ReadRepair:
+    key_id: str
+    envelope: DataEnvelope
+    reply_to: ActorRef[ReadRepairAck]
+
+
+@remotable
+@dataclass(frozen=True)
+class ReadRepairAck:
+    pass

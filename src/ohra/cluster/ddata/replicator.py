@@ -48,6 +48,11 @@ class Replicator:
         n: int
         timeout: float
 
+        def __post_init__(self) -> None:
+            # Pekko requires n >= 2; ohra runs n == 1 locally (appendix B)
+            if self.n < 1:
+                raise ValueError(f"ReadFrom n must be >= 1, was {self.n}")
+
     @dataclass(frozen=True)
     class ReadMajority:
         timeout: float
@@ -71,6 +76,11 @@ class Replicator:
     class WriteTo:
         n: int
         timeout: float
+
+        def __post_init__(self) -> None:
+            # Pekko requires n >= 2; ohra runs n == 1 locally (appendix B)
+            if self.n < 1:
+                raise ValueError(f"WriteTo n must be >= 1, was {self.n}")
 
     @dataclass(frozen=True)
     class WriteMajority:

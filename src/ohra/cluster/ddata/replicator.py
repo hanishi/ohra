@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ...behavior import Behavior, Behaviors
 from ...cell import watched_ref
-from ...remote.remoting import MAX_FRAME, pack
-from ...remote.serialization import Serialization
+from ...remote.remoting import MAX_FRAME
+from ...remote.serialization import Serialization, canonical_json
 from ...signals import PostStop, PreRestart, Signal
 from .envelope import (
     DELETED_ENVELOPE,
@@ -313,6 +313,19 @@ type _Digest = str
 _DELETED_DIGEST: _Digest = ""
 _LAZY_DIGEST: _Digest = "lazy"
 _NOT_FOUND_DIGEST: _Digest = "not-found"
+
+
+def _digest(
+    envelope: DataEnvelope, ref_path: Callable[[ActorRef[Any]], str]
+) -> tuple[_Digest, int]:
+    """The SHA-1 digest of the canonically encoded data, and the size of the encoded data. Pekko
+    hashes its protobuf serialization, which sorts sets and maps: so does the canonical encoding,
+    or equal data built in different orders would be gossiped forever."""
+    if envelope.is_deleted:
+        return _DELETED_DIGEST, 0
+    body = canonical_json(Serialization.encode(envelope, ref_path, canonical=True)).encode()
+    return hashlib.sha1(body).hexdigest(), len(body)
+
 
 # Pekko's used timestamp, in seconds since the epoch. None is Pekko's 0L: not set. On the wire,
 # in Status and Gossip, it is 0.0.
@@ -739,11 +752,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     return _NOT_FOUND_DIGEST
 
         def digest(envelope: DataEnvelope) -> tuple[_Digest, int]:
-            """The SHA-1 digest of the encoded data, and the size of the encoded data."""
-            if envelope.is_deleted:
-                return _DELETED_DIGEST, 0
-            body = pack(Serialization.encode(envelope, remoting.ref_path))[4:]  # no length prefix
-            return hashlib.sha1(body).hexdigest(), len(body)
+            return _digest(envelope, remoting.ref_path)
 
         def get_data(key: str) -> DataEnvelope | None:
             entry = data_entries.get(key)

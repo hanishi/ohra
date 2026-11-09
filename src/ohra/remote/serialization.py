@@ -20,6 +20,7 @@ union-typed fields and nested messages work.
 from __future__ import annotations
 
 import dataclasses
+import json
 import types
 import typing
 from collections.abc import Callable, Iterable
@@ -69,9 +70,13 @@ class Serialization:
         _manifests[klass] = manifest
 
     @staticmethod
-    def encode(value: object, ref_path: Callable[[ActorRef[Any]], str]) -> Json:
-        """``ref_path`` turns a ref into the path another node can send to."""
-        return _encode(value, ref_path, None)
+    def encode(
+        value: object, ref_path: Callable[[ActorRef[Any]], str], canonical: bool = False
+    ) -> Json:
+        """``ref_path`` turns a ref into the path another node can send to. ``canonical`` sorts
+        every set's elements and every ``$map``'s entries by their canonical JSON, at any depth,
+        so equal values encode equal whatever order built them: the Replicator's digests."""
+        return _encode(value, ref_path, None, canonical)
 
     @staticmethod
     def decode(data: Json, resolve: Callable[[str], ActorRef[Any]]) -> object:
@@ -119,7 +124,14 @@ class Serialization:
 _UNKNOWN: Any = object()
 
 
-def _encode(value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any) -> Json:
+def canonical_json(value: Json) -> str:
+    """The JSON text of an encoded value with object keys sorted, as canonical mode sorts by."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _encode(
+    value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any, canonical: bool
+) -> Json:
     """``hint`` is the static type of the position ``value`` sits in: a field's annotation, or
     the element, key or value type of a hinted container. ``None`` is a position with no hint."""
     if value is None or isinstance(value, bool | int | float | str):
@@ -135,9 +147,11 @@ def _encode(value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any) 
     if isinstance(value, list | tuple | frozenset | set):
         elements = list(cast(Iterable[object], value))
         encoded_list: list[Json] = [
-            _encode(v, ref_path, h)
+            _encode(v, ref_path, h, canonical)
             for v, h in zip(elements, _element_hints(hint, len(elements)), strict=True)
         ]
+        if canonical and isinstance(value, frozenset | set):
+            encoded_list.sort(key=canonical_json)
         if isinstance(value, list) or not _loose(hint):
             return encoded_list
         # JSON has no tuples or sets: where no hint says so, the value says it
@@ -147,8 +161,14 @@ def _encode(value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any) 
         kh, vh = _item_hints(hint)
         # a reserved key as a JSON object would decode as a ref, a dataclass or a tag: use $map
         if all(isinstance(k, str) and k not in _RESERVED for k, _ in items):
-            return {cast(str, k): _encode(v, ref_path, vh) for k, v in items}
-        return {"$map": [[_encode(k, ref_path, kh), _encode(v, ref_path, vh)] for k, v in items]}
+            return {cast(str, k): _encode(v, ref_path, vh, canonical) for k, v in items}
+        pairs: list[Json] = [
+            [_encode(k, ref_path, kh, canonical), _encode(v, ref_path, vh, canonical)]
+            for k, v in items
+        ]
+        if canonical:
+            pairs.sort(key=lambda kv: canonical_json(cast(list[Json], kv)[0]))
+        return {"$map": pairs}
     manifest = _manifests.get(type(value))
     if manifest is None or not dataclasses.is_dataclass(value):
         raise SerializationError(
@@ -159,7 +179,9 @@ def _encode(value: object, ref_path: Callable[[ActorRef[Any]], str], hint: Any) 
     for f in dataclasses.fields(value):
         if f.metadata.get("ohra.transient"):  # as Pekko's delta: never on the wire
             continue
-        encoded[f.name] = _encode(getattr(value, f.name), ref_path, hints.get(f.name, _UNKNOWN))
+        encoded[f.name] = _encode(
+            getattr(value, f.name), ref_path, hints.get(f.name, _UNKNOWN), canonical
+        )
     return encoded
 
 

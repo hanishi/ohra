@@ -29,9 +29,9 @@ Mapping:
   ``Some(777)`` and the like are dropped and the replies are compared without them.
 - Pekko's spec starts its own Replicator under ``/user/replicator`` with a gossip interval of one
   second and ``withMaxDeltaElements(10)``. Here the ``DistributedData`` extension's Replicator
-  runs with ``ReplicatorSettings(gossip_interval=0.1, notify_subscribers_interval=0.05)``, so
-  ``max_delta_elements`` keeps its default: deltas are not ported, and the setting only sizes the
-  Status chunks.
+  runs with a gossip interval of 0.1 s, a notify interval of 0.05 s and Pekko's
+  ``max_delta_elements=10``. Deltas are not ported, so the 10 only sizes the Status chunks: with
+  the 30 keys of "converge after partition", Status goes out in chunks.
 - "support prefer oldest members" starts a second Replicator under ``/user/oldestReplicator``, as
   Pekko does. Its long gossip interval is Pekko's; ``withDeltaCrdtEnabled(false)`` has nothing to
   turn off.
@@ -83,7 +83,9 @@ first, second, third = config.role("first"), config.role("second"), config.role(
 config.common_config(
     cluster=ClusterSettings(
         **FAST,
-        distributed_data=ReplicatorSettings(gossip_interval=0.1, notify_subscribers_interval=0.05),
+        distributed_data=ReplicatorSettings(
+            gossip_interval=0.1, notify_subscribers_interval=0.05, max_delta_elements=10
+        ),
     ),
     shutdown=FAST_SHUTDOWN,
 )

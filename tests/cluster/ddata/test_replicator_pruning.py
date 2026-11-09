@@ -95,7 +95,7 @@ async def test_data_from_a_removed_node_is_moved_into_self():
         assert isinstance(envelope.pruning[removed], PruningPerformed)
 
 
-async def test_the_performed_marker_expires_and_the_node_is_forgotten():
+async def test_the_performed_marker_expires():
     async with manual_node(SETTINGS) as (node, manual):
         await write(node, KEY.id, counter_from(removed, node))
         await manual.time_passes(PRUNED_AFTER)

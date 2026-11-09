@@ -118,7 +118,9 @@ async def test_pruning_waits_while_a_node_is_unreachable(spec: MultiNodeSpec):
         await spec.await_assert(unreachable)
         await write_from_removed(spec)
         # Pekko's expectNoMessage: nothing is collected or initialized while a node is
-        # unreachable, however long the split lasts
+        # unreachable, however long the split lasts. The data is written after the split is
+        # seen, so this pins the stopped clock; the tick's own unreachable guard is checked by
+        # reading receive_removed_node_pruning_tick against Pekko, not by this case
         await spec.create_test_probe().expect_no_message(4 * MAX_PRUNING_DISSEMINATION)
         envelope = await read(spec)
         assert envelope is not None and envelope.pruning == {}

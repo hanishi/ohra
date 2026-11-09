@@ -529,14 +529,14 @@ If a body raises, the test fails at once: the other bodies are cancelled, and py
 
 ### Barriers
 
-A barrier opens when every node still taking part has entered it. `enter_barrier("a", "b")` enters several, one after the other. Each wait lasts at most `max=` seconds, 30 by default, times `timefactor` ([Settings](#settings)), or what is left of an enclosing `async with spec.within(...)`.
+A barrier opens when every node still taking part has entered it. `enter_barrier("a", "b")` enters several, one after the other. Each wait lasts at most `max=` seconds, 30 by default, times `timefactor` ([Settings](#settings)), or what is left of an enclosing `async with spec.within(...)`. The settings go to the decorator, as `@multi_node_spec(config, settings=TestKitSettings(timefactor=3))`; `timefactor` and `system_shutdown_default` are the ones the runner uses.
 
 When a barrier fails, every node waiting at it raises, and every later barrier fails too, so a spec stops at its first broken step. The errors come from `ohra.testkit`, and all of them are a `BarrierError`, so `except BarrierError` catches any barrier failure:
 
 | Error | When |
 |---|---|
 | `BarrierTimeout` | the barrier did not open in time |
-| `ClientLost` | a node left while the others waited: its body returned, or its system terminated by itself, for example downed by the [split-brain resolver](05-cluster.md) |
+| `ClientLost` | a node left while the others waited: its body returned (a role other than the first; the first role removes itself, and the others pass without it), or its system terminated by itself, for example downed by the [split-brain resolver](05-cluster.md) |
 | `WrongBarrier` | a node entered another barrier than the one the others wait at |
 | `FailedBarrier` | an earlier barrier failed, or a node gave up on this one |
 | `TimeoutError("Server timed out while waiting for barrier X")` | not a `BarrierError`: a call naming several barriers ran out of its `max` or `within` before it reached `X`; the nodes already waiting at `X` get `FailedBarrier` |

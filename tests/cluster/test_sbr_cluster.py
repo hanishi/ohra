@@ -16,6 +16,7 @@ from ohra.patterns import ask
 from ohra.ref import FunctionRef
 from ohra.cluster.sbr import SplitBrainResolverSettings, _Resolver  # pyright: ignore[reportPrivateUsage]
 from ohra.remote.throttler import Blackhole, Direction, Throttler
+from ohra.testkit.multi_node_spec import crash
 
 from ..util import eventually, free_port
 from .test_cluster import all_up, cluster_node
@@ -27,13 +28,6 @@ from .test_singleton import node as singleton_node
 from .test_singleton import start as start_singleton
 
 SBR: dict[str, Any] = dict(downing=SplitBrainResolverSettings(stable_after=0.3))
-
-
-async def crash(system: ActorSystem[Any]) -> None:
-    assert system.remoting is not None
-    await system.remoting.close()
-    system._final_terminate()  # pyright: ignore[reportPrivateUsage]  # a crash does not run the coordinated shutdown
-    await system.when_terminated()
 
 
 def partition(system: ActorSystem[Any], blocked_ports: set[int]) -> None:

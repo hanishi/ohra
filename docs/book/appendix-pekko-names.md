@@ -90,6 +90,13 @@
 | `TestKitSettings`, `pekko.actor.testkit.typed.*` | `TestKitSettings(timefactor=..., single_expect_default=..., ...)`, in seconds |
 | `ManualTime(system)`, `ManualTime.config`, `timePasses`, `expectNoMessageFor` | `ManualTime(system)`, `ActorTestKit(manual_time=True)` or `@pytest.mark.manual_time`, `await time_passes`, `await expect_no_message_for` |
 | `ScalaTestWithActorTestKit` | the pytest plugin `ohra.testkit.pytest_plugin`: the `testkit` and `manual_time` fixtures |
+| `object Config extends MultiNodeConfig`, `role`, `commonConfig`, `nodeConfig`, `testTransport(on = true)` | `config = MultiNodeConfig()`, `role(name)` returning a `RoleName`, `common_config(**kwargs)`, `node_config(*roles, **kwargs)` with `ActorSystem` keyword arguments, `test_transport(on=True)`; from `ohra.testkit` |
+| `class Spec extends MultiNodeSpec(Config)`, one `SpecMultiJvmNodeN` class per role | one `@multi_node_spec(config)` `async def test_x(spec: MultiNodeSpec)`, run once per role in one process |
+| `myself`, `roles`, `system`, `node(role)`, `isNode`, `runOn`, `enterBarrier`, `initialParticipants` | `spec.myself`, `spec.roles`, `spec.system`, `spec.node(role)` (a path string), `spec.is_node(*roles)`, `await spec.run_on(*roles, thunk=f)`, `await spec.enter_barrier(*names, max=None)`, `spec.initial_participants` (always the number of roles) |
+| `testConductor.throttle / blackhole / passThrough / disconnect / abort / exit / shutdown / getNodes / removeNode` | `spec.test_conductor.throttle(node, target, direction, rate_mbit) / blackhole / pass_through / disconnect / abort / exit(node, exit_value) / shutdown(node, abort=False) / get_nodes() / remove_node`, each awaited; `get_nodes()` is a tuple in role order |
+| `Direction.Send / Receive / Both` | `Direction.SEND / RECEIVE / BOTH`, from `ohra.testkit` or `ohra.remote` |
+| `BarrierCoordinator.BarrierTimeout / FailedBarrier / DuplicateNode / WrongBarrier / ClientLost / BarrierEmpty` | same names from `ohra.testkit`, all subclasses of `BarrierError` (Pekko has no common base) |
+| `ThrottlerTransportAdapter`, `SetThrottle`, `ThrottleMode`, `TokenBucket`, `Unthrottled`, `Blackhole` | `ohra.remote.throttler`: `Throttler.set_throttle(host, port, direction, mode)` on `Remoting.throttler`, `ThrottleMode`, `TokenBucket`, `Unthrottled`, `Blackhole` |
 | `SpawnProtocol()`, `SpawnProtocol.Spawn(behavior, name, props, replyTo)` | `SpawnProtocol.apply()`, `SpawnProtocol.Spawn(behavior, name, reply_to, mailbox=None)` |
 | (implicit) | `Replyable[Res]`, the protocol a request satisfies by having a `reply_to: ActorRef[Res]` field |
 | `system.ignoreRef` | `system.ignore_ref` |

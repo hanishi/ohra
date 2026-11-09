@@ -212,7 +212,7 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 | `name` | `"ddataReplicator"` | the actor's name under `/system` |
 | `gossip_interval` | `2.0` | seconds between two gossip rounds |
 | `notify_subscribers_interval` | `0.5` | seconds between two rounds of `Changed` |
-| `max_delta_elements` | `500` | the keys per gossip chunk, at least; also the most keys one reply sends back |
+| `max_delta_elements` | `500` | the keys per gossip chunk, on average between this and twice this; also the most keys one reply sends back |
 | `log_data_size_exceeding` | `10 * 1024` | log the size of a value whose encoding is at least this large, in bytes, at INFO (a WARNING from 3/4 of the 16 MiB frame on); `None` turns it off |
 | `prefer_oldest` | `False` | read from and write to the oldest nodes first |
 | `expire_keys_after_inactivity` | `{}` | key id, or `"prefix*"`, to the seconds after which an untouched key is removed |

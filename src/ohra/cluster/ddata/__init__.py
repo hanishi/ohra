@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from ...remote import UniqueAddress
 from ...remote.serialization import remotable
 from .distributed_data import DistributedData, ReplicatorMessageAdapter
+from .durable_store import DurableDataEnvelope, DurableStore, sqlite_durable_store
 from .flag import Flag, FlagKey
 from .gcounter import GCounter, GCounterKey
 from .gset import GSet, GSetKey
@@ -55,6 +56,8 @@ __all__ = [
     "GSetKey",
     "DeltaReplicatedData",
     "DistributedData",
+    "DurableDataEnvelope",
+    "DurableStore",
     "Key",
     "LWWMap",
     "LWWMapKey",
@@ -81,8 +84,10 @@ __all__ = [
     "ReplicatorSettings",
     "RequiresCausalDeliveryOfDeltas",
     "SelfUniqueAddress",
+    "sqlite_durable_store",
     "UnspecificKey",
     "VersionVector",
     "default_clock",
+    "sqlite_durable_store",
     "reverse_clock",
 ]

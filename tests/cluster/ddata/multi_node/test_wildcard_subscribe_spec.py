@@ -25,7 +25,9 @@ Mapping:
 - Pekko's ``enterBarrier("done-3")`` sits in the ``must`` block outside any case, so ScalaTest runs
   it when it registers the cases; here it closes the last section.
 
-No assertion is skipped: none of them needs pruning, durable storage, deltas or roles.
+One assertion is replaced: Pekko's ``expectNoMessage(5.seconds)`` before ``Expired`` becomes the
+wait for ``Expired`` above, which does not fail if it arrives early, and Pekko does not check that
+either. No assertion needs pruning, durable storage, deltas or roles.
 """
 
 from __future__ import annotations

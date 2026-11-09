@@ -27,10 +27,12 @@ Mapping:
   Pekko's default two seconds, a notify interval of 0.05 s and ``max_delta_elements=10``.
 - The typed protocol has no request context, so Pekko's ``Some(i)`` on each ``Update`` is dropped.
   Each write awaits its reply before the next, as Pekko's ``receiveOne`` does, so the replies
-  arrive in ``my_data``'s order; the spec checks their count and their types, and a reply missing
-  within the timeout fails the spec, where Pekko's count check would.
+  arrive in ``my_data``'s order; the spec checks their count, and a reply missing within the
+  timeout fails the spec, where Pekko's count check would.
 
-No assertion is skipped: none of them needs pruning, durable storage, deltas or roles.
+One assertion is skipped: Pekko's ``successWriteAcks.map(_.request.get).toSet should
+be(myData.toSet)`` reads the request context. No other assertion needs pruning, durable storage,
+deltas or roles.
 """
 
 from __future__ import annotations

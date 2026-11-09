@@ -69,3 +69,16 @@ def test_reject_non_positive_log_data_size_exceeding(size: int) -> None:
 
 def test_log_data_size_exceeding_can_be_off() -> None:
     assert ReplicatorSettings(log_data_size_exceeding=None).log_data_size_exceeding is None
+
+
+def test_have_the_pruning_defaults() -> None:
+    s = ReplicatorSettings()
+    assert s.pruning_interval == 120.0
+    assert s.max_pruning_dissemination == 300.0
+    assert s.pruning_marker_time_to_live == 21600.0
+
+
+@pytest.mark.parametrize("kw", ["max_pruning_dissemination", "pruning_marker_time_to_live"])
+def test_reject_negative_pruning_durations(kw: str) -> None:
+    with pytest.raises(ValueError):
+        ReplicatorSettings(**{kw: -1.0})

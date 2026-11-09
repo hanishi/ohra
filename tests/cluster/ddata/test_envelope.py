@@ -101,6 +101,10 @@ def test_merge_correctly():
     assert isinstance(d6.data, GCounter)
     assert d6.data.value == 3
     assert d6.data.modified_by_nodes == {u2}
+    d6r = DataEnvelope(g11).merge(d5, NOW)
+    assert isinstance(d6r.data, GCounter)
+    assert d6r.data.value == 3
+    assert d6r.data.modified_by_nodes == {u2}
 
     # remove obsolete
     d7 = dataclasses.replace(d5, pruning={**d5.pruning, u1: PruningPerformed(OLD)})

@@ -88,6 +88,5 @@ __all__ = [
     "UnspecificKey",
     "VersionVector",
     "default_clock",
-    "sqlite_durable_store",
     "reverse_clock",
 ]

@@ -151,7 +151,10 @@ def _delete(dir: Path, keys: frozenset[str]) -> None:
         conn.execute("COMMIT")
 
 
-def _load(dir: Path) -> dict[str, DurableDataEnvelope]:
+def _load(dir: Path) -> dict[str, DurableDataEnvelope] | None:
+    """None when the directory holds no files, as Pekko's check before it opens the store."""
+    if not dir.exists() or not any(dir.iterdir()):
+        return None
     with _connect(dir) as conn:
         return {k: decode_durable(v) for k, v in conn.execute("SELECT key, envelope FROM ddata")}
 
@@ -188,17 +191,9 @@ def sqlite_durable_store(
             except Exception:
                 ctx.log.exception("failed to store [%s]", keys)
 
-        def flush_on_stop() -> None:
-            if pending:
-                try:
-                    _put(folder, {k: encode_durable(v) for k, v in pending.items()})
-                except Exception:
-                    ctx.log.exception("failed to store [%s]", ", ".join(pending))
-                pending.clear()
-
-        def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
+        async def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
             if sig is PostStop:
-                flush_on_stop()
+                await write_behind()
             return Behaviors.same
 
         async def store(msg: DurableStore.Store) -> None:
@@ -243,15 +238,14 @@ def sqlite_durable_store(
         async def init(msg: Any) -> Behavior[Any]:
             match msg:
                 case DurableStore.LoadAll(reply_to):
-                    if folder.exists() and any(folder.iterdir()):
-                        try:
-                            data = await asyncio.to_thread(_load, folder)
-                        except Exception as e:
-                            raise DurableStore.LoadFailed(
-                                "failed to load durable distributed-data"
-                            ) from e
-                        if data:
-                            reply_to.tell(DurableStore.LoadData(data))
+                    try:
+                        data = await asyncio.to_thread(_load, folder)
+                    except Exception as e:
+                        raise DurableStore.LoadFailed(
+                            "failed to load durable distributed-data"
+                        ) from e
+                    if data:
+                        reply_to.tell(DurableStore.LoadData(data))
                     reply_to.tell(DurableStore.LoadAllCompleted())
                     return active.receive_signal(on_signal)
                 case _:

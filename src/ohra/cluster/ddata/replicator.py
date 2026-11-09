@@ -1433,17 +1433,24 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         int((time.monotonic() - start_time) * 1000),
                         len(stash),
                     )
-                    for stashed in stash:
-                        normal_receive(ctx, stashed)
-                    stash.clear()
+                    replay, stash[:] = stash[:], []
+                    for stashed in replay:
+                        result = normal_receive(ctx, stashed)
+                        if result is not Behaviors.same:
+                            return result  # a stop takes effect at once
                     ctx.self.tell(Replicator.FlushChanges())
                     return normal
                 case Replicator.GetReplicaCount(reply_to):
                     # 0 until durable data has been loaded, used by test
                     reply_to.tell(Replicator.ReplicaCount(0))
-                case _RemovedNodePruningTick() | Replicator.FlushChanges() | _GossipTick():
-                    pass  # ignore scheduled ticks when loading durable data
-                case _ClockTick():
+                case (
+                    _RemovedNodePruningTick()
+                    | Replicator.FlushChanges()
+                    | _GossipTick()
+                    | _ClockTick()
+                ):
+                    # ignore scheduled ticks when loading durable data; Pekko stashes the clock
+                    # tick, ohra drops it (the next tick after the load covers the time)
                     pass
                 case Read() | Write() | Status() | Gossip():
                     # ignore gossip and replication when loading durable data
@@ -1453,7 +1460,9 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 case _DurableStoreTerminated():
                     return receive_durable_store_terminated()
                 case _ClusterEvent():
-                    normal_receive(ctx, msg)
+                    result = normal_receive(ctx, msg)
+                    if result is not Behaviors.same:
+                        return result  # the node's own MemberRemoved stops the Replicator
                 case _:
                     stash.append(msg)
             return Behaviors.same

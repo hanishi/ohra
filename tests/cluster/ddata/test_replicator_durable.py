@@ -158,3 +158,16 @@ async def test_a_replicator_without_durable_keys_has_no_store() -> None:
         node.replicator.tell(Replicator.Get(key, Replicator.ReadLocal(), gets.ref))
         assert isinstance(await gets.receive_message(), Replicator.NotFound)
         await store_probe.expect_no_message(0.1)
+
+
+async def test_the_replicator_stops_when_its_own_node_is_removed_while_loading() -> None:
+    from ohra.cluster.core import MemberRemoved
+    from ohra.cluster.ddata.replicator import _ClusterEvent  # pyright: ignore[reportPrivateUsage]
+    from ohra.cluster.gossip import Member
+
+    async with with_store() as (node, store_probe):
+        await store_probe.receive_message()
+        me = Member(node.self_address.unique_address, 1, "removed")
+        cast(ActorRef[Any], node.replicator).tell(_ClusterEvent(MemberRemoved(me, "exiting")))
+        watcher: TestProbe[Any] = node.probe()
+        await watcher.expect_terminated(node.replicator)

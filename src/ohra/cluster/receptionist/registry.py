@@ -1,5 +1,5 @@
 """The cluster receptionist's registry on ``ORMultiMap``, ported from Pekko's Registry.scala and
-``Entry`` of ClusterReceptionist.scala (60-68)."""
+``Entry`` of ClusterReceptionist.scala (65-72)."""
 
 from __future__ import annotations
 

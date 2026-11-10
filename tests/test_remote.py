@@ -618,3 +618,17 @@ async def test_a_payload_ref_to_a_stopped_local_actor_decodes_to_a_dead_letter_r
 
 async def test_a_payload_ref_to_an_expired_temp_path_decodes_to_a_dead_letter_ref():
     await _payload_ref_decodes_as_a_dead_letter_ref("BASE/temp/$999")
+
+
+async def test_a_dead_letter_ref_keeps_its_path_when_sent_on():
+    from ohra.remote.remoting import EmptyLocalActorRef
+    from ohra.remote.serialization import Serialization
+
+    async with node(Behaviors.ignore, "a", free_port()) as a:
+        assert a.remoting is not None
+        path = f"{a.address.root}/user/stopped"  # pyright: ignore[reportOptionalMemberAccess]
+        ref = EmptyLocalActorRef(a, path)
+        assert a.remoting.ref_path(ref) == path
+        assert Serialization.encode(ref, a.remoting.ref_path, canonical=True) == (
+            Serialization.encode(RemoteRef(path, a.remoting), a.remoting.ref_path, canonical=True)
+        )

@@ -407,7 +407,7 @@ class Remoting:
         """The path another node can send to: a local or remote ref's own path, else a temp path
         here."""
         if (
-            isinstance(ref, LocalRef | RemoteRef)
+            isinstance(ref, LocalRef | RemoteRef | EmptyLocalActorRef)
             or ref is self.system
             or ref is self.system.ignore_ref
         ):

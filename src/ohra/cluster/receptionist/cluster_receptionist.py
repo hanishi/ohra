@@ -54,7 +54,7 @@ from .registry import (
 NAME = "clusterReceptionist"
 """ClusterReceptionist.scala 61: ``override val name``."""
 
-type Tombstones = Mapping[ActorRef[Any], frozenset[tuple[ServiceKey[Any], float]]]
+type Tombstones = Mapping[str, frozenset[tuple[ServiceKey[Any], float]]]
 
 
 @dataclass(frozen=True)
@@ -62,8 +62,8 @@ class State:
     """ClusterReceptionist.scala 94-188.
 
     ``registry`` is the last state seen from the replicator; ``services_per_actor`` is needed
-    since an actor can implement several services; ``tombstones`` are local actors that were
-    stopped and are not to be re-added; ``subscriptions`` are local and not replicated.
+    since an actor can implement several services; ``tombstones`` are the paths of local actors
+    that were stopped and are not to be re-added; ``subscriptions`` are local and not replicated.
     Tombstone deadlines are scheduler times.
     """
 
@@ -72,7 +72,7 @@ class State:
         default_factory=dict[ActorRef[Any], frozenset[ServiceKey[Any]]]
     )
     tombstones: Tombstones = field(
-        default_factory=dict[ActorRef[Any], frozenset[tuple[ServiceKey[Any], float]]]
+        default_factory=dict[str, frozenset[tuple[ServiceKey[Any], float]]]
     )
     subscriptions: Mapping[ServiceKey[Any], frozenset[ActorRef[Any]]] = field(
         default_factory=dict[ServiceKey[Any], frozenset[ActorRef[Any]]]
@@ -89,17 +89,17 @@ class State:
         self, actor: ActorRef[Any], key: ServiceKey[Any], deadline: float
     ) -> State:
         """Tombstone the one service the actor is registered for (Scala 108-111)."""
-        mine = self.tombstones.get(actor, frozenset()) | {(key, deadline)}
-        return replace(self, tombstones={**self.tombstones, actor: mine})
+        mine = self.tombstones.get(actor.path, frozenset()) | {(key, deadline)}
+        return replace(self, tombstones={**self.tombstones, actor.path: mine})
 
     def has_tombstone(self, key: ServiceKey[Any], actor: ActorRef[Any]) -> bool:
-        return any(k == key for k, _ in self.tombstones.get(actor, frozenset()))
+        return any(k == key for k, _ in self.tombstones.get(actor.path, frozenset()))
 
     def prune_tombstones(self, now: float) -> State:
         """Drop the tombstones whose deadline has passed (Scala 116-135); ``self`` if none."""
         if not self.tombstones:
             return self
-        new: dict[ActorRef[Any], frozenset[tuple[ServiceKey[Any], float]]] = {}
+        new: dict[str, frozenset[tuple[ServiceKey[Any], float]]] = {}
         for actor, entries in self.tombstones.items():
             keep = frozenset(e for e in entries if e[1] > now)  # Deadline.hasTimeLeft
             if keep:
@@ -130,11 +130,11 @@ class State:
             **self.services_per_actor,
             instance: self.services_per_actor.get(instance, frozenset()) | {key},
         }
-        mine = self.tombstones.get(instance, frozenset())
+        mine = self.tombstones.get(instance.path, frozenset())
         tombstones = (
             self.tombstones
             if not mine
-            else {**self.tombstones, instance: frozenset(t for t in mine if t[0] != key)}
+            else {**self.tombstones, instance.path: frozenset(t for t in mine if t[0] != key)}
         )
         return replace(self, services_per_actor=services, tombstones=tombstones)
 
@@ -560,7 +560,7 @@ def _behavior(s: _Setup, state: State) -> Behavior[Any]:
                             f"{k.id}->[{_entries_text(new_registry.entries_for(k))}]"
                             for k in changed_keys
                         ),
-                        ", ".join(f"{a.path}->{t}" for a, t in state.tombstones.items()),
+                        ", ".join(f"{p}->{t}" for p, t in state.tombstones.items()),
                     )
                 notify_subscribers(changed_keys, True, new_state)
                 for key in changed_keys:

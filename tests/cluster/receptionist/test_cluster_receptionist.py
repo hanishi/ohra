@@ -38,6 +38,7 @@ from ohra.receptionist import (
 )
 from ohra.ref import ActorRef
 from ohra.remote import Address
+from ohra.remote.remoting import EmptyLocalActorRef
 from ohra.system import ActorSystem
 from ohra.testkit import ManualTime, TestProbe
 from ohra.testkit.manual_time import ExplicitlyTriggeredScheduler
@@ -311,6 +312,29 @@ async def test_a_tombstoned_ref_merged_back_is_removed_again():
         uid = node.cluster.self_unique_address.uid
         entry = Entry(a, uid, int(time.time() * 1000))
         # a concurrent registration for the same ref, merged in from elsewhere
+        node.update(KEY, lambda r: r.add_binding(KEY, entry, node.self_node))
+        await node.until(lambda: _has(node, entry)())
+        await node.until(gone)
+        assert (await node.find()).service_instances == frozenset()
+
+
+async def test_a_tombstoned_ref_merged_back_as_a_dead_letter_ref_is_removed_again():
+    # a peer's copy of the entry decodes here as EmptyLocalActorRef, which is not the LocalRef
+    # the tombstone was made for: tombstones match by path
+    async with manual_node() as node:
+        a = node.spawn(service, "a")
+        node.receptionist.tell(Register(KEY, a))
+        await node.listed(KEY, {a})
+        node.receptionist.tell(Deregister(KEY, a))
+
+        async def gone() -> bool:
+            return not (await node.ddata(KEY)).entries_for(KEY)
+
+        await node.until(gone)
+        await node.sync()
+        await node.sync()
+        uid = node.cluster.self_unique_address.uid
+        entry = Entry(EmptyLocalActorRef(node.system, a.path), uid, int(time.time() * 1000))
         node.update(KEY, lambda r: r.add_binding(KEY, entry, node.self_node))
         await node.until(lambda: _has(node, entry)())
         await node.until(gone)

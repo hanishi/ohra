@@ -186,7 +186,48 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Only local actors can register or subscribe, as in Pekko; the receptionist watches them, message adapters included. A `Find` may come from another node: `Listing` and the replies are `@remotable`. On a cluster node the registrations replicate through Distributed Data, as Pekko's `ClusterReceptionist`, so a `Find` follows a `Register` by a notify interval; see the deviations.
+Only local actors can register or subscribe, as in Pekko; the receptionist watches them, message adapters included. A `Find` may come from another node: `Listing` and the replies are `@remotable`. On a cluster node the receptionist is Pekko's `ClusterReceptionist` on [Distributed Data](14-distributed-data.md), and a `Find` sees a registration once the replicator has carried it, which `write_consistency` below can make a majority write; see the deviations.
+
+A cluster node runs two receptionist actors, `/system/localReceptionist` and `/system/clusterReceptionist`, as Pekko does; `Receptionist(system).ref` is the one to send to, and a system without a cluster runs only the local one. The cluster receptionist spawns a Replicator of its own at `/system/clusterReceptionist/replicator`, separate from `DistributedData(system).replicator`, and its durable keys are always empty: the registrations of a node that restarts are gone, since its services are gone too. The services are spread over `distributed_key_count` ddata keys by the hash of the service key. When the cluster announces `ClusterShuttingDown`, the receptionist treats its own node as removed, and the node's services leave the listings.
+
+| `ClusterReceptionistSettings` | Pekko | Default |
+| --- | --- | --- |
+| `write_consistency` | `write-consistency` | `Replicator.WriteLocal()` |
+| `pruning_interval` | `pruning-interval` | `3.0` seconds |
+| `prune_removed_older_than` | `prune-removed-older-than` | `60.0` seconds |
+| `distributed_key_count` | `distributed-key-count` | `5`; every node must use the same count |
+| `replicator_settings` | `replicator` | `None`, the cluster's `distributed_data` settings |
+
+They go in as `ClusterSettings(receptionist=ClusterReceptionistSettings(...))`:
+
+```python
+from ohra import (
+    ActorSystem,
+    Address,
+    Behavior,
+    Behaviors,
+    ClusterReceptionistSettings,
+    ClusterSettings,
+    Replicator,
+)
+
+settings = ClusterSettings(
+    seed_nodes=(Address("app", "127.0.0.1", 2551),),
+    receptionist=ClusterReceptionistSettings(write_consistency=Replicator.WriteMajority(5.0)),
+)
+
+
+async def main() -> None:
+    guardian: Behavior[str] = Behaviors.ignore
+    async with ActorSystem(guardian, "app", address=("127.0.0.1", 2551), cluster=settings):
+        print(settings.receptionist.write_consistency)
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(main())
+```
 
 ### Coordinated shutdown
 

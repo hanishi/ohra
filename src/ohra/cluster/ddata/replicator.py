@@ -1648,7 +1648,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
 
         def normal_receive(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
-                case Read(_, from_node) | Write(_, _, from_node) if (
+                case Read(_, from_node) | Write(_, _, from_node) | DeltaPropagation(from_node) if (
                     from_node is not None and not is_known_node(from_node)
                 ):
                     # When restarting a node with same host:port it is possible that a Replicator

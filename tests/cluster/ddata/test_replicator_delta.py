@@ -100,8 +100,16 @@ async def read(node: Node, key_id: str) -> DataEnvelope | None:
 
 
 async def propagate(
-    node: Node, from_node: UniqueAddress, deltas: dict[str, Delta], reply: bool = True
+    node: Node,
+    from_node: UniqueAddress,
+    deltas: dict[str, Delta],
+    reply: bool = True,
+    known: bool = True,
 ) -> TestProbe[WriteAck | WriteNack | DeltaNack]:
+    """Send a DeltaPropagation; ``known``: the cluster has told the Replicator of the sender first
+    (it ignores a SendingSystemUid message from a node that is no member)."""
+    if known:
+        wire(node).tell(_ClusterEvent(MemberUp(Member(from_node, 1, "up"))))
     probe: TestProbe[WriteAck | WriteNack | DeltaNack] = node.probe()
     wire(node).tell(DeltaPropagation(from_node, reply, deltas, probe.ref))
     return probe
@@ -341,6 +349,15 @@ async def test_a_new_incarnation_starts_its_sequence_again():
         replies = await propagate(node, new, {KEY.id: delta})
         assert await replies.receive_message() == WriteAck()
         assert await elements(node) == {"a", "b", "c"}
+
+
+async def test_a_delta_from_an_unknown_node_is_ignored():
+    async with manual_node(SETTINGS) as (node, _):
+        base = await seeded(node, other, 2)
+        delta = Delta(DataEnvelope(delta_of(base, other, "c")), 3, 3)
+        replies = await propagate(node, other, {KEY.id: delta}, known=False)
+        await replies.expect_no_message(0.1)
+        assert await elements(node) == {"a", "b"}
 
 
 async def test_deltas_from_a_removed_node_are_dropped():

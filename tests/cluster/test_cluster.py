@@ -31,6 +31,7 @@ from ohra.cluster.core import (
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
+    ClusterShuttingDown,
     CurrentClusterState,
     Down,
     GetCurrentState,
@@ -734,3 +735,14 @@ def test_publish_diff_emits_seen_and_reachability_changes_last():
     assert diff_seen(new, new) == [] and diff_reachability(new, new) == []
     # same seen set, same convergence: nothing
     assert diff_seen(old, MembershipState(g.seen(a), a)) == []
+
+
+async def test_a_stopping_cluster_publishes_cluster_shutting_down_before_the_removals():
+    # ClusterDomainEventPublisher.postStop: ClusterShuttingDown, then everyone Removed
+    p = free_port()
+    events: list[ClusterDomainEvent] = []
+    async with cluster_node("c", p, [p]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        Cluster(a).subscriptions.tell(Subscribe(probe(events), ClusterDomainEvent))
+    kinds = [type(e) for e in events if isinstance(e, ClusterShuttingDown | MemberRemoved)]
+    assert kinds == [ClusterShuttingDown, MemberRemoved]

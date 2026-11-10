@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 from ...behavior import Behavior, Behaviors
 from ...context import ActorContext
@@ -145,6 +145,7 @@ class LeastShardAllocationStrategy:
 @dataclass(frozen=True)
 class ShardRegionRegistered:
     region: str
+    node: UniqueAddress
 
 
 @dataclass(frozen=True)
@@ -170,18 +171,26 @@ type DomainEvent = (
 
 @dataclass(frozen=True)
 class CoordinatorState:
-    """shard -> region path, and region path -> its shards. Regions are keyed by path so a local
-    and a remote ref to the same region compare equal."""
+    """ShardCoordinator.State (ShardCoordinator.scala ~455-540): shard -> region path, and region
+    path -> its shards. Regions are keyed by path so a local and a remote ref to the same region
+    compare equal. It is the value of the coordinator's LWWRegister, so it travels on the wire.
+    Actor paths carry no uid here, so ``region_nodes`` records each region's node."""
 
-    shards: dict[str, str] = field(default_factory=lambda: {})
-    regions: dict[str, tuple[str, ...]] = field(default_factory=lambda: {})
+    shards: dict[str, str]
+    regions: dict[str, tuple[str, ...]]
+    region_nodes: dict[str, UniqueAddress]
+    EMPTY: ClassVar[CoordinatorState]
 
     def updated(self, event: DomainEvent) -> CoordinatorState:
         match event:
-            case ShardRegionRegistered(region):
+            case ShardRegionRegistered(region, node):
                 if region in self.regions:
                     raise ValueError(f"Region {region} already registered: {self}")
-                return CoordinatorState(dict(self.shards), {**self.regions, region: ()})
+                return CoordinatorState(
+                    dict(self.shards),
+                    {**self.regions, region: ()},
+                    {**self.region_nodes, region: node},
+                )
             case ShardRegionTerminated(region):
                 if region not in self.regions:
                     raise ValueError(f"Terminated region {region} not registered: {self}")
@@ -189,6 +198,7 @@ class CoordinatorState:
                 return CoordinatorState(
                     {s: r for s, r in self.shards.items() if s not in gone},
                     {r: ids for r, ids in self.regions.items() if r != region},
+                    {r: n for r, n in self.region_nodes.items() if r != region},
                 )
             case ShardHomeAllocated(shard, region):
                 if region not in self.regions:
@@ -198,6 +208,7 @@ class CoordinatorState:
                 return CoordinatorState(
                     {**self.shards, shard: region},
                     {**self.regions, region: (*self.regions[region], shard)},
+                    self.region_nodes,
                 )
             case ShardHomeDeallocated(shard):
                 if shard not in self.shards:
@@ -208,11 +219,15 @@ class CoordinatorState:
                 return CoordinatorState(
                     {s: r for s, r in self.shards.items() if s != shard},
                     {**self.regions, region: tuple(s for s in self.regions[region] if s != shard)},
+                    self.region_nodes,
                 )
 
     @property
     def all_shards(self) -> frozenset[str]:
         return frozenset(self.shards)
+
+
+CoordinatorState.EMPTY = CoordinatorState({}, {}, {})
 
 
 # --- wire messages (ShardCoordinator.Internal), with explicit refs where Pekko uses sender() -----
@@ -308,6 +323,8 @@ for _cls in (
 ):
     # the Receptionist already owns the manifest "Register"
     Serialization.register(_cls, f"Sharding.{_cls.__name__}")
+# the Receptionist owns plain names; the state is remotable under its Sharding name
+Serialization.register(CoordinatorState, "Sharding.CoordinatorState")
 
 
 # --- internal messages ---------------------------------------------------------------------------
@@ -465,7 +482,7 @@ class _Coordinator:
         self.strategy = LeastShardAllocationStrategy(
             settings.rebalance_absolute_limit, settings.rebalance_relative_limit
         )
-        self.state = CoordinatorState()
+        self.state = CoordinatorState.EMPTY
         self.refs: dict[str, ActorRef[Any]] = {}
         self.alive_regions: set[str] = set()
         self.graceful_shutdown_in_progress: set[str] = set()
@@ -545,7 +562,8 @@ class _Coordinator:
         if member is not None:
             self.registered_addresses.add(member.unique_address)
         if path not in self.state.regions:
-            self.state = self.state.updated(ShardRegionRegistered(path))
+            assert member is not None  # is_member above
+            self.state = self.state.updated(ShardRegionRegistered(path, member.unique_address))
             # Pekko's RegionStopped: the local region's end is what Terminate waits for
             if is_local_actor(region):
                 self.ctx.watch_with(region, RegionStopped(path))

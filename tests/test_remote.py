@@ -583,3 +583,38 @@ async def test_tells_to_a_peer_that_stopped_reading_are_dead_letters_past_the_bo
             remote.tell(Greeted(MIB_ON_THE_WIRE))
         await eventually(lambda: any(isinstance(d.message, Greeted) for d in dead))
         assert unsent(a) <= MAX_FRAME + 2**21  # the bound, plus the one frame that crossed it
+
+
+async def _payload_ref_decodes_as_a_dead_letter_ref(path_on_b: str):
+    """Pekko's resolveActorRef: a payload ref to a local path with no actor is an
+    EmptyLocalActorRef, so the message that carries it is still delivered."""
+    got: list[Greet] = []
+
+    @Behaviors.receive_message
+    def collect(msg: Greet) -> Behavior[Greet]:
+        got.append(msg)
+        return Behaviors.same
+
+    async with node(Behaviors.ignore, "a", free_port()) as a, node(collect, "b", free_port()) as b:
+        dead: list[DeadLetter] = []
+        b.event_stream.tell(EventStream.Subscribe(DeadLetter, FunctionRef("dl", dead.append)))
+        path = path_on_b.replace("BASE", b.address.root) if b.address else path_on_b
+        a.resolve(b.path).tell(Greet("one", a.resolve(path)))
+        a.resolve(b.path).tell(Greet("two", a.resolve(path)))
+        await eventually(lambda: len(got) == 2)
+        ref = got[0].reply_to
+        assert ref.path == path
+        assert ref == got[1].reply_to
+        assert hash(ref) == hash(got[1].reply_to)
+        ref.tell(Greet("late", b.ignore_ref))
+        await eventually(lambda: bool(dead))
+        assert dead[0].recipient == ref
+        assert dead[0].message == Greet("late", b.ignore_ref)
+
+
+async def test_a_payload_ref_to_a_stopped_local_actor_decodes_to_a_dead_letter_ref():
+    await _payload_ref_decodes_as_a_dead_letter_ref("BASE/user/stopped")
+
+
+async def test_a_payload_ref_to_an_expired_temp_path_decodes_to_a_dead_letter_ref():
+    await _payload_ref_decodes_as_a_dead_letter_ref("BASE/temp/$999")

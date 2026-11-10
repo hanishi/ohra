@@ -134,6 +134,30 @@ class RemoteRef[T](ActorRef[T]):
         return hash(self._path)
 
 
+class EmptyLocalActorRef[T](ActorRef[T]):
+    """Pekko's EmptyLocalActorRef: what a payload ref to a local path with no actor decodes to.
+    It keeps the path and sends what it receives to dead letters."""
+
+    __slots__ = ("_path", "_system")
+
+    def __init__(self, system: ActorSystem[Any], path: str) -> None:
+        self._system = system
+        self._path = path
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def tell(self, msg: T) -> None:
+        self._system.dead_letter(msg, self)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, EmptyLocalActorRef) and other.path == self._path
+
+    def __hash__(self) -> int:
+        return hash(self._path)
+
+
 class TempRefs:
     """Paths for refs that have no actor behind them: ask reply refs and adapters.
     Weakly held, so an entry lives exactly as long as the ref it stands for."""
@@ -404,6 +428,22 @@ class Remoting:
         _authority_of(path)  # validates host:port
         return RemoteRef(path, self)
 
+    def resolve_payload(self, path: str) -> ActorRef[Any]:
+        """Pekko's resolveActorRef for a ref inside a message: decoding never fails on a local
+        /user, /system or /temp path, an unknown one is an EmptyLocalActorRef."""
+        try:
+            return self.resolve(path)
+        except LookupError:
+            root = self.address.root
+            if path[len(root) :].split("/")[1:2] not in (["user"], ["system"], ["temp"]):
+                raise
+            _log.debug(
+                "Resolve (deserialization) of path [%s] doesn't match an active actor. "
+                "It has probably been stopped, using dead letters.",
+                path,
+            )
+            return EmptyLocalActorRef(self.system, path)
+
     # --- outbound -------------------------------------------------------------------------------
 
     def send(self, path: str, msg: object) -> None:
@@ -592,7 +632,7 @@ class Remoting:
                 to, wire = frame.get("to"), frame.get("message")
                 message: object = wire  # the dead letter's message, if decoding fails
                 try:
-                    message = Serialization.decode(wire, self.resolve)
+                    message = Serialization.decode(wire, self.resolve_payload)
                     if not isinstance(to, str):
                         raise LookupError("frame has no recipient")
                     target = self.resolve(to)

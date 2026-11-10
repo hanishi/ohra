@@ -169,3 +169,14 @@ async def test_a_failing_store_replies_the_failure_message(tmp_path: Path):
         await probe.expect_message("failed")
         store.tell(DurableStore.Store("a", counter(1), reply))
         await probe.expect_message("failed")
+
+
+async def test_a_negative_write_behind_interval_is_off(tmp_path: Path):
+    async with ActorTestKit() as kit:
+        store, probe = load_all(kit, tmp_path, write_behind_interval=-1.0)
+        await probe.expect_message(DurableStore.LoadAllCompleted())
+        store.tell(
+            DurableStore.Store("a", counter(1), DurableStore.StoreReply("ok", "x", probe.ref))
+        )
+        await probe.expect_message("ok")
+        assert await loaded(kit, tmp_path) == {"a": counter(1)}

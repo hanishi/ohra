@@ -198,7 +198,7 @@ def sqlite_durable_store(
 
         async def store(msg: DurableStore.Store) -> None:
             try:
-                if write_behind_interval == 0:
+                if write_behind_interval <= 0:
                     await asyncio.to_thread(_put, folder, {msg.key: encode_durable(msg.data)})
                 else:
                     if not pending:

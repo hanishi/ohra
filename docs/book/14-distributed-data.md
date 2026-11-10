@@ -176,7 +176,7 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
 > - The API is cluster-typed's `DistributedData` and `Replicator` in snake_case: `Replicator.Update`, `Get`, `Delete`, `Subscribe` and their responses are nested in `Replicator`, and the consistency levels are dataclasses, `Replicator.WriteLocal()` and `Replicator.ReadMajority(timeout=3.0)`. Timeouts are seconds.
 > - `Update(key, initial, writeConsistency, replyTo)(modify)` is `Update(key, initial, write_consistency, reply_to, modify)`, with `modify` as its last field. The types' symbolic operators are named methods taking the node: `c :+ 1` is `c.increment(node, 1)`.
 > - The settings are `ReplicatorSettings`, a field of `ClusterSettings` (`distributed_data=`), not HOCON under `pekko.cluster.distributed-data`.
-> - Delta propagation, durable storage and roles are not here yet: every write and every gossip carries the full value, and every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
+> - Delta propagation and roles are not here yet: every write and every gossip carries the full value, and every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
 
 ## How it works
 
@@ -219,6 +219,9 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 | `pruning_interval` | `120.0` | seconds between two [pruning](#pruning) rounds; `0` or less turns pruning off |
 | `max_pruning_dissemination` | `300.0` | seconds a removed node's updates are given to reach every node before its data is pruned, counted only while every node is reachable |
 | `pruning_marker_time_to_live` | `6 * 3600.0` | seconds the marker that a removed node's data was pruned is kept after the pruning |
+| `durable_keys` | `frozenset()` | the [durable](#durable-storage) keys: key ids, or `"prefix*"` |
+| `durable_pruning_marker_time_to_live` | `10 * 86400.0` | the same, for durable keys; a durable replica must not stay down longer; negative raises `ValueError` |
+| `durable_store` | `sqlite_durable_store` | a function that returns the store's behavior; `functools.partial` sets its options |
 
 ### Update
 
@@ -228,7 +231,7 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 - **`UpdateTimeout(key)`**: it did not, within the level's timeout, or the level asks for more nodes than the cluster has, as `WriteTo(5, ...)` on three nodes does, which is answered at once. The local write stands, and the other nodes may still receive it, from the write in flight or by gossip. A timeout does not undo anything.
 - **`ModifyFailure(key, error_message, cause)`**: `modify` raised, and nothing was written.
 - **`UpdateDataDeleted(key)`**: the key has been deleted.
-- **`StoreFailure(key)`**: for durable storage, which is not here yet; nothing sends it.
+- **`StoreFailure(key)`**: the key is [durable](#durable-storage) and its store could not write the value. The value is merged into the local replica all the same.
 
 `modify` must be a pure function of the value it is given. It runs in the Replicator, not in your actor, so it must not touch your actor's state, and it may run on a value that already holds updates from other nodes.
 
@@ -494,6 +497,40 @@ settings = ClusterSettings(
 
 `pruning_interval=0` turns pruning off, as Pekko's `pruning-interval = off` does, and every value then keeps the entries of every node that ever wrote to it.
 
+### Durable storage
+
+By default every replica lives in memory, so a cluster that stops as a whole loses its data. A **durable key** is kept on disk as well. The Replicator writes every change to a durable key to its store before it counts the change as written on this node, and a node that restarts loads its durable keys back before it serves anything. Keys that are not durable never reach the store.
+
+`durable_keys` lists them, as exact key ids or as `prefix*`:
+
+```python
+from functools import partial
+
+from ohra import ClusterSettings
+from ohra.cluster.ddata import ReplicatorSettings, sqlite_durable_store
+
+settings = ClusterSettings(
+    distributed_data=ReplicatorSettings(
+        durable_keys=frozenset({"cart-total", "session-*"}),
+        durable_store=partial(
+            sqlite_durable_store, "/var/lib/app/ddata-store", write_behind_interval=0.2
+        ),
+    )
+)
+```
+
+- **What a store does.** A local `Update` or `Delete` of a durable key is answered after the store has answered: `UpdateSuccess` or `DeleteSuccess` when it wrote the value, `StoreFailure(key)` when it could not. At a level above `WriteLocal`, the write also waits for the local store, next to the other nodes. A `Write`, a `ReadRepair` or a gossip that changes a durable key is stored before the node answers it.
+- **While it loads.** A Replicator with durable keys starts by asking its store for everything. Until the load is done it stashes your commands and answers them, in order, afterwards. It drops the traffic of other Replicators, so a node that is still loading does not take part in reads, writes or gossip, and `GetReplicaCount` answers `0`. If the load fails, or the store stops later, the Replicator logs an error and stops.
+- **Where the files go.** `sqlite_durable_store(dir="ddata", write_behind_interval=0.0)` keeps one SQLite file, `<dir>/ddata.db`, created on first use. A `dir` that ends in `ddata` becomes `<dir>-<system name>-<replicator name>-<port>`, so that several nodes on one host do not share a directory. Any other path is used as given. A node on a dynamic port (`0`) gets a new directory on every start and never finds its old data, so production sets a fixed path of its own, as in the example, one for each node.
+- **Write-behind.** With `write_behind_interval=0.0` each change is committed before it is answered. A positive interval collects the changes and commits them together once it has passed, writing only the last value of each key, which pays when a few keys change often. The answer then comes as soon as the store has accepted the change, not when it is on disk, so a process that is killed loses up to one interval of changes. Stopping the store writes what is waiting first.
+- **A durable replica must not stay down too long.** Pruning (above) leaves a marker that a removed node's data was pruned, and drops it after a time. A durable replica that was down while the others pruned still holds that node's old entries. If it comes back while the markers exist, the markers clean the entries out. If it comes back after they are gone, nothing recognizes the entries as old, and they are merged in as if the removed node were new, which leaves the value wrong. So for durable keys the marker is kept for `durable_pruning_marker_time_to_live`, ten days by default, and a durable replica must not be stopped for longer than that. One that has to be, joins again only after its directory is deleted.
+- **Another store.** `durable_store` is a function that returns the store's behavior, and the Replicator spawns it as a child. The behavior handles `DurableStore.LoadAll(reply_to)`, to which it answers with at most one `LoadData(data)`, a mapping of key to `DurableDataEnvelope`, and then `LoadAllCompleted()`; `DurableStore.Store(key, data, reply)`, to which it answers `reply.success` or `reply.failure` to `reply.reply_to` when `reply` is not `None`; and `DurableStore.Expire(keys)`, which removes keys. A store that cannot load raises `DurableStore.LoadFailed`. The stored value is the JSON of `DurableDataEnvelope`, which holds the data and the `PruningPerformed` markers and nothing else.
+
+> **Coming from Apache Pekko**
+>
+> - `sqlite_durable_store` takes the place of `LmdbDurableStore`: SQLite is in the standard library, and the core has no dependencies. `durable.store-actor-class` is `durable_store`, a behavior factory.
+> - `durable.lmdb.dir` and `durable.lmdb.write-behind-interval` are the parameters of `sqlite_durable_store`, and there is no `map-size`. [Appendix B](appendix-deviations.md) has the rest.
+
 ### Limits
 
 All the data is in memory, on every node, and every change of a key sends the whole value: a write to the nodes its level asks for, and gossip to the rest. That suits many small keys, or a few of moderate size; Pekko's guidance of at most 100,000 top-level keys holds here too. A value whose encoding is at least `log_data_size_exceeding` bytes has its size logged at INFO, and at WARNING once it reaches 3/4 of the frame, as Pekko does. One whose JSON is larger than 16 MiB cannot be sent at all, compressed or not.
@@ -504,7 +541,6 @@ CRDTs hold state, not commands. A value that has to be decided once, such as whi
 
 Distributed Data comes in parts, and these are still to come:
 
-- **Durable storage.** Every replica is in memory, so a cluster that stops as a whole loses the data. Pekko can keep chosen keys in LMDB.
 - **Delta propagation.** Every write and gossip carries the full value, as Pekko's Replicator does with `delta-crdt.enabled = off`. With deltas on, Pekko sends only the change.
 
 Later parts are planned to move the receptionist ([chapter 2](02-actor-system.md)) onto an `ORMultiMap`, and the sharding coordinator's state ([chapter 7](07-sharding.md)) onto Distributed Data, as Pekko keeps them.

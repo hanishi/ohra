@@ -34,8 +34,9 @@ class ReplicatorSettings:
     delta_crdt_enabled: bool = True
     """Propagate the deltas of delta-CRDTs instead of their full state."""
     max_delta_size: int = 50
-    """The element count a merged ORSet or ORMap delta may reach before it is replaced by the
-    placeholder and the full state is sent instead."""
+    """The number of operations a merged ORSet or ORMap delta may hold before it is replaced by
+    the placeholder and the full state is sent instead; adds in a row merge into one operation.
+    Pekko's "number of elements or similar size hint, not size in bytes"."""
     log_data_size_exceeding: int | None = 10 * 1024
     """Log a message for data larger than this many bytes; None disables it."""
     prefer_oldest: bool = False

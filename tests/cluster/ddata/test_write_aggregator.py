@@ -444,8 +444,9 @@ async def test_delta_timeout_when_less_than_required_acks():
 
         await manual_time.time_passes(timeout / 5)
         # only 1 ack so we expect 3 full state Write
-        for _ in range(3):
-            await probe.expect_message_type(Write)
+        ack(await probe.expect_message_type(Write))
+        await probe.expect_message_type(Write)
+        await probe.expect_message_type(Write)
 
         # still not enough acks
         await manual_time.time_passes(timeout)

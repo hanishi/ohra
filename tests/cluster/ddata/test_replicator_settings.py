@@ -102,3 +102,14 @@ def test_a_star_makes_every_key_durable() -> None:
 def test_a_negative_durable_marker_ttl_is_rejected() -> None:
     with pytest.raises(ValueError):
         ReplicatorSettings(durable_pruning_marker_time_to_live=-1.0)
+
+
+def test_delta_defaults() -> None:
+    settings = ReplicatorSettings()
+    assert settings.delta_crdt_enabled is True
+    assert settings.max_delta_size == 50
+
+
+def test_max_delta_size_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        ReplicatorSettings(max_delta_size=0)

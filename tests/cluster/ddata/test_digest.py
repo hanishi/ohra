@@ -37,8 +37,12 @@ def ref_path(ref: ActorRef[Any]) -> str:
     return ref.path
 
 
+def digest_of(envelope: DataEnvelope) -> str:
+    return replicator_module._digest(envelope, ref_path)[0]  # pyright: ignore[reportPrivateUsage]
+
+
 def digest(data: Any) -> str:
-    return replicator_module._digest(DataEnvelope(data), ref_path)[0]  # pyright: ignore[reportPrivateUsage]
+    return digest_of(DataEnvelope(data))
 
 
 def test_equal_orsets_built_in_different_orders_have_equal_digests():
@@ -173,3 +177,10 @@ async def test_converged_key_stops_being_gossiped(spec: MultiNodeSpec):
     assert KeyS.id not in gossiped
     assert set(msg.digests) == {"absent"}
     await spec.enter_barrier("after-b5")
+
+
+def test_the_digest_ignores_delta_versions():
+    data = ORSet[str].empty.add(node1, "a")
+    plain = DataEnvelope(data)
+    versioned = DataEnvelope(data, delta_versions=VersionVector.create({node1.unique_address: 5}))
+    assert digest_of(plain) == digest_of(versioned)

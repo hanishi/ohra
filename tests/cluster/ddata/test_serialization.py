@@ -24,6 +24,7 @@ from ohra.cluster.ddata import (
     SelfUniqueAddress,
     UnspecificKey,
 )
+from ohra.cluster.ddata.envelope import DataEnvelope, Delta, DeltaNack, DeltaPropagation
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
 from ohra.cluster.ddata.gset import GSet
@@ -407,3 +408,66 @@ def test_serialize_version_vector():
 
 def test_serialize_unspecific_key():
     check_serialization(UnspecificKey("id"))
+
+
+def test_serialize_delta_group_and_orset_in_ormap_deltas():
+    group = ORSet()._add(address1, "a")._add(address1, "b").delta
+    assert group is not None
+    check_serialization(group)
+    d = ORMap[str, ORSet[str]]()._put(address1, "a", ORSet[str]()._add(address1, "A")).delta
+    assert d is not None
+    check_serialization(d)
+
+
+def test_serialize_delta_messages():
+    set_delta = ORSet()._add(address1, "a").delta
+    assert set_delta is not None
+    d1 = Delta(DataEnvelope(set_delta), 1, 1)
+    d2 = Delta(DataEnvelope(set_delta), 2, 5)
+    check_serialization(d1)
+    check_serialization(DeltaPropagation(address1, True, {"a": d1, "b": d2}, ref1))
+    check_serialization(DeltaPropagation(address1, False, {"a": d1}, None))
+    check_serialization(DeltaNack())
+
+
+def test_serialize_envelope_with_delta_versions():
+    env = DataEnvelope(
+        GSet().add("a"), delta_versions=VersionVector.create({address1: 3, address2: 1})
+    )
+    assert check_serialization(env).delta_versions == env.delta_versions
+
+
+def test_delta_op_wire_names():
+    set_delta = ORSet()._add(address1, "a").delta
+    assert set_delta is not None
+    ops: dict[str, object] = {
+        "ORSet.AddDeltaOp": set_delta,
+        "ORSet.RemoveDeltaOp": ORSet()
+        ._add(address1, "a")
+        .reset_delta()
+        ._remove(address2, "a")
+        .delta,
+        "ORSet.FullStateDeltaOp": ORSet()._add(address1, "a").reset_delta()._clear().delta,
+        "ORSet.DeltaGroup": ORSet()
+        ._add(address1, "a")
+        .reset_delta()
+        ._add(address1, "b")
+        ._remove(address1, "a")
+        .delta,
+        "ORMap.PutDeltaOp": ORMap()._put(address1, "a", GSet().add("A")).delta,
+        "ORMap.RemoveDeltaOp": ORMap()
+        ._put(address1, "a", GSet().add("A"))
+        .reset_delta()
+        ._remove(address2, "a")
+        .delta,
+        "ORMap.DeltaGroup": ORMap()
+        ._put(address1, "a", GSet().add("A"))
+        ._put(address1, "b", GSet().add("B"))
+        .delta,
+        "Replicator.DeltaNack": DeltaNack(),
+        "Replicator.Delta": Delta(DataEnvelope(GSet()), 1, 1),
+        "Replicator.DeltaPropagation": DeltaPropagation(address1, False, {}, None),
+    }
+    for name, op in ops.items():
+        encoded: Any = Serialization.encode(op, lambda r: r.path)
+        assert encoded["$type"] == name

@@ -331,7 +331,9 @@ def _digest(
     or equal data built in different orders would be gossiped forever."""
     if envelope.is_deleted:
         return _DELETED_DIGEST, 0
-    body = canonical_json(Serialization.encode(envelope, ref_path, canonical=True)).encode()
+    body = canonical_json(
+        Serialization.encode(envelope.without_delta_versions(), ref_path, canonical=True)
+    ).encode()
     return hashlib.sha1(body).hexdigest(), len(body)
 
 

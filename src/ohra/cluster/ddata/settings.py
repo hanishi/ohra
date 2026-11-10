@@ -31,6 +31,11 @@ class ReplicatorSettings:
     gossip_interval: float = 2.0
     notify_subscribers_interval: float = 0.5
     max_delta_elements: int = 500
+    delta_crdt_enabled: bool = True
+    """Propagate the deltas of delta-CRDTs instead of their full state."""
+    max_delta_size: int = 50
+    """How many deltas of a key are kept for propagation before they are cut off and the full
+    state is sent instead."""
     log_data_size_exceeding: int | None = 10 * 1024
     """Log a message for data larger than this many bytes; None disables it."""
     prefer_oldest: bool = False
@@ -58,7 +63,12 @@ class ReplicatorSettings:
     keys; Pekko's ``durable.store-actor-class``."""
 
     def __post_init__(self) -> None:
-        for name in ("gossip_interval", "notify_subscribers_interval", "max_delta_elements"):
+        for name in (
+            "gossip_interval",
+            "notify_subscribers_interval",
+            "max_delta_elements",
+            "max_delta_size",
+        ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be > 0")
         if self.log_data_size_exceeding is not None and self.log_data_size_exceeding <= 0:

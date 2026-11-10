@@ -57,6 +57,10 @@ NAME = "clusterReceptionist"
 type Tombstones = Mapping[str, frozenset[tuple[ServiceKey[Any], float]]]
 
 
+def _own_path(ref: ActorRef[Any]) -> str:
+    return ref.path
+
+
 @dataclass(frozen=True)
 class State:
     """ClusterReceptionist.scala 94-188.
@@ -71,6 +75,9 @@ class State:
     services_per_actor: Mapping[ActorRef[Any], frozenset[ServiceKey[Any]]] = field(
         default_factory=dict[ActorRef[Any], frozenset[ServiceKey[Any]]]
     )
+    wire_path: Callable[[ActorRef[Any]], str] = _own_path
+    """The path a ref has on the wire (``Remoting.ref_path``); tombstones go by it, as it differs
+    for each message adapter of one actor."""
     tombstones: Tombstones = field(
         default_factory=dict[str, frozenset[tuple[ServiceKey[Any], float]]]
     )
@@ -89,11 +96,12 @@ class State:
         self, actor: ActorRef[Any], key: ServiceKey[Any], deadline: float
     ) -> State:
         """Tombstone the one service the actor is registered for (Scala 108-111)."""
-        mine = self.tombstones.get(actor.path, frozenset()) | {(key, deadline)}
-        return replace(self, tombstones={**self.tombstones, actor.path: mine})
+        wire = self.wire_path(actor)
+        mine = self.tombstones.get(wire, frozenset()) | {(key, deadline)}
+        return replace(self, tombstones={**self.tombstones, wire: mine})
 
     def has_tombstone(self, key: ServiceKey[Any], actor: ActorRef[Any]) -> bool:
-        return any(k == key for k, _ in self.tombstones.get(actor.path, frozenset()))
+        return any(k == key for k, _ in self.tombstones.get(self.wire_path(actor), frozenset()))
 
     def prune_tombstones(self, now: float) -> State:
         """Drop the tombstones whose deadline has passed (Scala 116-135); ``self`` if none."""
@@ -130,11 +138,12 @@ class State:
             **self.services_per_actor,
             instance: self.services_per_actor.get(instance, frozenset()) | {key},
         }
-        mine = self.tombstones.get(instance.path, frozenset())
+        wire = self.wire_path(instance)
+        mine = self.tombstones.get(wire, frozenset())
         tombstones = (
             self.tombstones
             if not mine
-            else {**self.tombstones, instance.path: frozenset(t for t in mine if t[0] != key)}
+            else {**self.tombstones, wire: frozenset(t for t in mine if t[0] != key)}
         )
         return replace(self, services_per_actor=services, tombstones=tombstones)
 
@@ -321,7 +330,7 @@ def cluster_receptionist(system: ActorSystem[Any]) -> Behavior[Any]:
         ctx.timers.start_timer_with_fixed_delay(
             "prune-tombstones", _PruneTombstonesTick(), s.keep_tombstones_for / 24
         )
-        return _behavior(s, State(registry=initial_registry))
+        return _behavior(s, State(registry=initial_registry, wire_path=_wire_path(ctx)))
 
     return setup
 
@@ -692,3 +701,8 @@ def _behavior(s: _Setup, state: State) -> Behavior[Any]:
                 return Behaviors.unhandled
 
     return receive
+
+
+def _wire_path(ctx: ActorContext[Any]) -> Callable[[ActorRef[Any]], str]:
+    remoting = ctx.system.remoting
+    return remoting.ref_path if remoting is not None else _own_path

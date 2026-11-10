@@ -4,6 +4,7 @@ involved; the registry changes come back through the Replicator, so ``sync`` let
 interval pass."""
 
 import asyncio
+import gc
 import pytest
 import time
 import logging
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ohra.behavior import Behavior, Behaviors
+from ohra.context import ActorContext
 from ohra.cluster import ClusterSettings
 from ohra.cluster.core import Cluster, Leave
 from ohra.cluster.ddata import ORMultiMap, ORMultiMapKey, Replicator, ReplicatorSettings
@@ -338,6 +340,56 @@ async def test_a_tombstoned_ref_merged_back_as_a_dead_letter_ref_is_removed_agai
         node.update(KEY, lambda r: r.add_binding(KEY, entry, node.self_node))
         await node.until(lambda: _has(node, entry)())
         await node.until(gone)
+        assert (await node.find()).service_instances == frozenset()
+
+
+def adapter_owner(to: ActorRef[Any]) -> Behavior[Any]:
+    """Hands two message adapters of itself to ``to``; they share one path."""
+
+    @Behaviors.setup
+    def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+        to.tell((ctx.message_adapter(lambda m: m), ctx.message_adapter(lambda m: m)))
+        return service
+
+    return setup
+
+
+async def test_deregistering_one_message_adapter_keeps_the_actors_other_adapter_listed():
+    async with manual_node() as node:
+        probe: TestProbe[Any] = node.probe()
+        node.spawn(adapter_owner(probe.ref), "owner")
+        ad1, ad2 = await probe.receive_message()
+        assert ad1.path == ad2.path
+        node.receptionist.tell(Register(KEY, ad1))
+        node.receptionist.tell(Register(KEY, ad2))
+        await node.listed(KEY, {ad1, ad2})
+        node.receptionist.tell(Deregister(KEY, ad1))
+        await node.listed(KEY, {ad2})
+        for _ in range(5):  # a wrong tombstone would hide ad2 and re-remove its binding
+            await node.sync()
+        assert (await node.find()).service_instances == {ad2}
+
+
+async def test_a_stopped_adapter_service_merged_back_as_a_dead_letter_ref_is_removed_again():
+    async with manual_node() as node:
+        probe: TestProbe[Any] = node.probe()
+        owner = node.spawn(adapter_owner(probe.ref), "owner")
+        ad1, _ = await probe.receive_message()
+        wire = node.system.remoting.ref_path(ad1)  # pyright: ignore[reportOptionalMemberAccess]
+        node.receptionist.tell(Register(KEY, ad1))
+        await node.listed(KEY, {ad1})
+        owner.tell(Stop())
+        await node.listed(KEY, set())
+        await node.sync()
+        await node.sync()
+        del ad1, _
+        gc.collect()  # the peer's copy of the entry decodes to a dead-letter ref
+        uid = node.cluster.self_unique_address.uid
+        entry = Entry(EmptyLocalActorRef(node.system, wire), uid, int(time.time() * 1000))
+        node.update(KEY, lambda r: r.add_binding(KEY, entry, node.self_node))
+        await node.until(lambda: _has(node, entry)())
+        for _ in range(5):
+            await node.sync()
         assert (await node.find()).service_instances == frozenset()
 
 

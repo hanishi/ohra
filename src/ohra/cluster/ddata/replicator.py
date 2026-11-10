@@ -196,7 +196,8 @@ class Replicator:
 
     @dataclass(frozen=True)
     class StoreFailure[A: ReplicatedData]:
-        """Nothing produces it until durable storage comes."""
+        """The durable store could not store the entry, or, for a write to several nodes, the
+        store's failure and the other nodes' nacks left too few acks."""
 
         key: Key[A]
 
@@ -233,7 +234,10 @@ class Replicator:
         key: Key[A]
 
     type DeleteResponse[A: ReplicatedData] = (
-        Replicator.DeleteSuccess[A] | Replicator.DeleteFailure[A] | Replicator.DataDeleted[A]
+        Replicator.DeleteSuccess[A]
+        | Replicator.DeleteFailure[A]
+        | Replicator.DataDeleted[A]
+        | Replicator.StoreFailure[A]
     )
 
     @dataclass(frozen=True)
@@ -664,10 +668,38 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             ctx.log.debug("Received Update for key [%s].", key)
             set_data(key.id, envelope)
             update_used_timestamp(key.id, current_used_timestamp)
+            durable = settings.is_durable(key.id)
             if is_local_update(write_consistency):
-                reply_to.tell(Replicator.UpdateSuccess(key))
+                if durable_store_ref is not None and durable:
+                    durable_store_ref.tell(
+                        DurableStore.Store(
+                            key.id,
+                            DurableDataEnvelope(envelope),
+                            DurableStore.StoreReply(
+                                Replicator.UpdateSuccess(key),
+                                Replicator.StoreFailure(key),
+                                reply_to,
+                            ),
+                        )
+                    )
+                else:
+                    reply_to.tell(Replicator.UpdateSuccess(key))
             else:
-                start_write_aggregator(key, envelope, write_consistency, reply_to)
+                aggregator = start_write_aggregator(
+                    key, envelope, write_consistency, reply_to, durable
+                )
+                if durable_store_ref is not None and durable:
+                    durable_store_ref.tell(
+                        DurableStore.Store(
+                            key.id,
+                            DurableDataEnvelope(envelope),
+                            DurableStore.StoreReply(
+                                Replicator.UpdateSuccess(key),
+                                Replicator.StoreFailure(key),
+                                aggregator,
+                            ),
+                        )
+                    )
 
         def is_local_update(write_consistency: Replicator.WriteConsistency) -> bool:
             match write_consistency:
@@ -683,12 +715,13 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             envelope: DataEnvelope,
             consistency: Replicator.WriteConsistency,
             reply_to: ActorRef[Any],
-        ) -> None:
+            durable: bool,
+        ) -> ActorRef[Any]:
             """The WriteAggregator that receiveUpdate and receiveDelete start, without deltas."""
             exclude_exiting = isinstance(
                 consistency, Replicator.WriteMajorityPlus | Replicator.WriteAll
             )
-            ctx.spawn_anonymous(
+            aggregator = ctx.spawn_anonymous(
                 write_aggregator(
                     key,
                     envelope,
@@ -699,8 +732,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     replica,
                     self_unique_address,
                     shuffle=not settings.prefer_oldest,
+                    durable=durable,
                 )
             )
+            return cast("ActorRef[Any]", aggregator)  # the store's reply is not its Never
 
         def receive_read(key: str, reply_to: ActorRef[ReadResult]) -> None:
             send_to_replica(ctx.log, reply_to, ReadResult(get_data(key)), [key])
@@ -713,10 +748,21 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         def write_and_store(
             key: str, write_envelope: DataEnvelope, reply_to: ActorRef[WriteAck | WriteNack] | None
         ) -> None:
-            """Without durable storage, the store is left out: a reply, if any, goes at once."""
             new_envelope = write(key, write_envelope)
-            if reply_to is not None:
-                reply_to.tell(WriteAck() if new_envelope is not None else WriteNack())
+            if new_envelope is not None:
+                if durable_store_ref is not None and settings.is_durable(key):
+                    store_reply = (
+                        None
+                        if reply_to is None
+                        else DurableStore.StoreReply(WriteAck(), WriteNack(), reply_to)
+                    )
+                    durable_store_ref.tell(
+                        DurableStore.Store(key, DurableDataEnvelope(new_envelope), store_reply)
+                    )
+                elif reply_to is not None:
+                    reply_to.tell(WriteAck())
+            elif reply_to is not None:
+                reply_to.tell(WriteNack())
 
         def write(key: str, write_envelope: DataEnvelope) -> DataEnvelope | None:
             match get_data(key):
@@ -759,10 +805,33 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     set_data(key.id, DELETED_ENVELOPE)
                     update_used_timestamp(key.id, current_used_timestamp)
                     payload_size_aggregator.remove(key.id)
+                    durable = settings.is_durable(key.id)
+                    deleted = DurableDataEnvelope(DELETED_ENVELOPE)
+                    success = Replicator.DeleteSuccess(key)
+                    failure = Replicator.StoreFailure(key)
                     if is_local_update(consistency):
-                        reply_to.tell(Replicator.DeleteSuccess(key))
+                        if durable_store_ref is not None and durable:
+                            durable_store_ref.tell(
+                                DurableStore.Store(
+                                    key.id,
+                                    deleted,
+                                    DurableStore.StoreReply(success, failure, reply_to),
+                                )
+                            )
+                        else:
+                            reply_to.tell(success)
                     else:
-                        start_write_aggregator(key, DELETED_ENVELOPE, consistency, reply_to)
+                        aggregator = start_write_aggregator(
+                            key, DELETED_ENVELOPE, consistency, reply_to, durable
+                        )
+                        if durable_store_ref is not None and durable:
+                            durable_store_ref.tell(
+                                DurableStore.Store(
+                                    key.id,
+                                    deleted,
+                                    DurableStore.StoreReply(success, failure, aggregator),
+                                )
+                            )
 
         def set_data(key: str, envelope: DataEnvelope) -> DataEnvelope:
             if has_subscriber(key) and key not in changed:
@@ -1098,6 +1167,11 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         payload_size_aggregator.remove(key)
                         changed.add(key)  # notify subscribers, later
                         del data_entries[key]
+                    durable_expired_keys = frozenset(
+                        k for k in expired_keys if settings.is_durable(k)
+                    )
+                    if durable_store_ref is not None and durable_expired_keys:
+                        durable_store_ref.tell(DurableStore.Expire(durable_expired_keys))
 
         def receive_unsubscribe(key: Key[Any], subscriber: ActorRef[Any]) -> None:
             if is_wildcard(key.id):
@@ -1269,6 +1343,9 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             # perform pruning when all seen Init
             all_ = all_nodes()
             pruning_performed = PruningPerformed(now() + settings.pruning_marker_time_to_live)
+            durable_pruning_performed = PruningPerformed(
+                now() + settings.durable_pruning_marker_time_to_live
+            )
             for key, (envelope, _, _) in list(data_entries.items()):
                 if not isinstance(envelope.data, RemovedNodePruning):
                     continue  # deleted, or pruning not needed
@@ -1277,7 +1354,11 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         case PruningInitialized(owner, seen) if owner == self_unique_address and (
                             not all_ or all(n.address in seen for n in all_)
                         ):
-                            new_envelope = envelope.prune(removed, pruning_performed)
+                            durable = durable_store_ref is not None and settings.is_durable(key)
+                            new_envelope = envelope.prune(
+                                removed,
+                                durable_pruning_performed if durable else pruning_performed,
+                            )
                             ctx.log.debug(
                                 "Perform pruning of [%s] from [%s] to [%s]",
                                 key,
@@ -1285,6 +1366,14 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                                 self_unique_address,
                             )
                             set_data(key, new_envelope)
+                            if durable_store_ref is not None and (
+                                new_envelope.data is not envelope.data and durable
+                            ):
+                                durable_store_ref.tell(
+                                    DurableStore.Store(
+                                        key, DurableDataEnvelope(new_envelope), None
+                                    )
+                                )
                         case _:
                             pass
 

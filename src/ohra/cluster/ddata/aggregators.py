@@ -2,7 +2,7 @@
 ``Replicator.scala``: the children a Replicator starts for a Get or an Update with a consistency
 level other than local.
 
-Delta writes and the durable store's replies are left out, until sub-projects 6 and 5.
+Delta writes are left out, until sub-project 6.
 Typed actors have no ``sender()``. Each request goes out with a message adapter of its own as
 ``reply_to``, and the adapter names the node it was sent to, where Pekko reads the sender's
 address. Pekko's ``replica(address)`` is the ``replica`` parameter.
@@ -69,7 +69,14 @@ class _ReadReply:
     msg: ReadResult
 
 
-type _WriteMsg = _WriteReply | _SendToSecondary | _ReceiveTimeout
+type _WriteMsg = (
+    _WriteReply
+    | Replicator.UpdateSuccess[Any]
+    | Replicator.DeleteSuccess[Any]
+    | Replicator.StoreFailure[Any]
+    | _SendToSecondary
+    | _ReceiveTimeout
+)
 type _ReadMsg = _ReadReply | ReadRepairAck | _SendToSecondary | _ReceiveTimeout
 
 
@@ -112,9 +119,11 @@ def write_aggregator(
     self_unique_address: UniqueAddress,
     *,
     shuffle: bool,
+    durable: bool = False,
 ) -> Behavior[Never]:
     """Pekko's WriteAggregator. It replies once to ``reply_to``, which is an Update's or a
-    Delete's, and stops. It takes no messages from outside."""
+    Delete's, and stops. With ``durable`` it also waits for the local store's reply, which the
+    Replicator has the store send to it. It takes no other messages from outside."""
 
     @Behaviors.setup
     def setup(ctx: ActorContext[_WriteMsg]) -> Behavior[_WriteMsg]:
@@ -139,6 +148,7 @@ def write_aggregator(
         _start_timers(ctx, timeout)
 
         remaining = set(nodes)
+        got_local_store_reply = not durable
         got_write_nack_from: set[UniqueAddress] = set()
         primary_nodes, secondary_nodes = _primary_and_secondary_nodes(
             nodes, unreachable, done_when_remaining_size, shuffle
@@ -151,7 +161,7 @@ def write_aggregator(
             return Write(key.id, envelope, self_unique_address, ctx.message_adapter(adapt))
 
         def is_done() -> bool:
-            return (
+            return got_local_store_reply and (
                 len(remaining) <= done_when_remaining_size
                 or not (remaining - got_write_nack_from)
                 or not_enough_nodes()
@@ -160,21 +170,27 @@ def write_aggregator(
         def not_enough_nodes() -> bool:
             return done_when_remaining_size < 0 or len(nodes) < done_when_remaining_size
 
-        def reply() -> Behavior[_WriteMsg]:
+        def reply(is_timeout: bool) -> Behavior[_WriteMsg]:
             is_success = len(remaining) <= done_when_remaining_size and not not_enough_nodes()
-            # Without durable storage Pekko replies UpdateTimeout, or ReplicationDeleteFailure to
-            # a Delete on a timeout or too few nodes. A Delete that fails by WriteNacks gets
-            # UpdateTimeout there, which is not a DeleteResponse: here it gets DeleteFailure.
-            # Pekko's isTimeout only tells those apart, and picks StoreFailure, so it is left out.
+            is_timeout_or_not_enough_nodes = (
+                is_timeout or not_enough_nodes() or not got_write_nack_from
+            )
+            # Pekko replies UpdateTimeout, or ReplicationDeleteFailure to a Delete on a timeout or
+            # too few nodes. A Delete that fails by WriteNacks gets UpdateTimeout there, which is
+            # not a DeleteResponse: here it gets DeleteFailure. A durable Update that fails by
+            # WriteNacks, the local store's among them, gets StoreFailure.
             reply_msg: Any
             if is_success and envelope.is_deleted:
                 reply_msg = Replicator.DeleteSuccess(key)
             elif is_success:
                 reply_msg = Replicator.UpdateSuccess(key)
-            elif envelope.is_deleted:
-                reply_msg = Replicator.DeleteFailure(key)
+            elif is_timeout_or_not_enough_nodes or not durable:
+                if envelope.is_deleted:
+                    reply_msg = Replicator.DeleteFailure(key)
+                else:
+                    reply_msg = Replicator.UpdateTimeout(key)
             else:
-                reply_msg = Replicator.UpdateTimeout(key)
+                reply_msg = Replicator.StoreFailure(key)
             reply_to.tell(reply_msg)
             return Behaviors.stopped()
 
@@ -182,24 +198,36 @@ def write_aggregator(
         for node in primary_nodes:
             send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
         if is_done():
-            return reply()
+            return reply(False)
 
         @Behaviors.receive_message
         def receive(msg: _WriteMsg) -> Behavior[_WriteMsg]:
+            nonlocal got_local_store_reply
             match msg:
                 case _WriteReply(node, WriteAck()):
                     remaining.discard(node)
                     if is_done():
-                        return reply()
+                        return reply(False)
                 case _WriteReply(node, _):  # WriteNack
                     got_write_nack_from.add(node)
                     if is_done():
-                        return reply()
+                        return reply(False)
+                # D10: Pekko matches only UpdateSuccess here, so its durable Delete waits out the
+                # timeout; the store's DeleteSuccess ends the wait here.
+                case Replicator.UpdateSuccess() | Replicator.DeleteSuccess():
+                    got_local_store_reply = True
+                    if is_done():
+                        return reply(False)
+                case Replicator.StoreFailure():
+                    got_local_store_reply = True
+                    got_write_nack_from.add(self_unique_address)
+                    if is_done():
+                        return reply(False)
                 case _SendToSecondary():
                     for node in secondary_nodes:
                         send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
                 case _ReceiveTimeout():
-                    return reply()
+                    return reply(True)
             return Behaviors.same
 
         return receive

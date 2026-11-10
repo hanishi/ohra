@@ -2,17 +2,19 @@
 
 The replicas are probes, through the aggregator's ``replica`` parameter as Pekko's
 ``TestWriteAggregator`` overrides ``replica``. A probe answers a ``Write`` through its
-``reply_to``, which stands for Pekko's sender. The groups "with delta" and "with durable" wait for
-sub-projects 6 and 5.
+``reply_to``, which stands for Pekko's sender. The groups "with delta" waits for
+sub-project 6. The group "Durable WriteAggregator" is below: the Replicator's own store reply
+goes straight to the aggregator, as Pekko's ``aggr ! UpdateSuccess``.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from ohra.cluster.ddata import GSet, GSetKey, Replicator
 from ohra.cluster.ddata.aggregators import calculate_majority, write_aggregator
 from ohra.cluster.ddata.envelope import DELETED_ENVELOPE, DataEnvelope, Write, WriteAck, WriteNack
+from ohra.ref import ActorRef
 from ohra.remote import UniqueAddress
 from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 
@@ -212,4 +214,117 @@ async def test_a_delete_that_gets_nacks_replies_delete_failure():
         (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
         (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
         await reply.expect_message(Replicator.DeleteFailure(KeyA))
+        await reply.expect_terminated(aggr)
+
+
+# Pekko's "Durable WriteAggregator"
+
+write_three = Replicator.WriteTo(3, timeout)
+
+
+def durable_aggregator(
+    kit: ActorTestKit,
+    consistency: Replicator.WriteConsistency,
+    probe: TestProbe[Write],
+    reply: TestProbe[Reply],
+    envelope: DataEnvelope = DataEnvelope(data),
+) -> ActorRef[Any]:
+    return cast(
+        ActorRef[Any],
+        kit.spawn(
+            write_aggregator(
+                KeyA,
+                envelope,
+                consistency,
+                reply.ref,
+                nodes,
+                frozenset(),
+                lambda _: probe.ref,
+                self_unique_address,
+                shuffle=False,
+                durable=True,
+            )
+        ),
+    )
+
+
+async def test_durable_not_reply_before_local_confirmation():
+    async with ActorTestKit(manual_time=True) as kit:
+        probe: TestProbe[Write] = kit.create_test_probe()
+        reply: TestProbe[Reply] = kit.create_test_probe()
+        aggr = durable_aggregator(kit, write_three, probe, reply)
+
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        await reply.expect_no_message(0.2)
+
+        aggr.tell(Replicator.UpdateSuccess(KeyA))  # the local write
+        await reply.expect_message(Replicator.UpdateSuccess(KeyA))
+        await reply.expect_terminated(aggr)
+
+
+async def test_durable_tolerate_write_nack_if_enough_write_ack():
+    async with ActorTestKit(manual_time=True) as kit:
+        probe: TestProbe[Write] = kit.create_test_probe()
+        reply: TestProbe[Reply] = kit.create_test_probe()
+        aggr = durable_aggregator(kit, write_three, probe, reply)
+
+        aggr.tell(Replicator.UpdateSuccess(KeyA))  # the local write
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
+        await ManualTime(kit.system).time_passes(timeout / 5)  # the secondary nodes
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+
+        await reply.expect_message(Replicator.UpdateSuccess(KeyA))
+        await reply.expect_terminated(aggr)
+
+
+async def test_durable_reply_with_store_failure_when_too_many_nacks():
+    async with ActorTestKit(manual_time=True) as kit:
+        probe: TestProbe[Write] = kit.create_test_probe()
+        reply: TestProbe[Reply] = kit.create_test_probe()
+        aggr = durable_aggregator(kit, write_majority, probe, reply)
+
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
+        aggr.tell(Replicator.UpdateSuccess(KeyA))  # the local write
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        await ManualTime(kit.system).time_passes(timeout / 5)  # the secondary nodes
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
+
+        await reply.expect_message(Replicator.StoreFailure(KeyA))
+        await reply.expect_terminated(aggr)
+
+
+async def test_durable_timeout_when_less_than_required_acks():
+    async with ActorTestKit(manual_time=True) as kit:
+        manual_time = ManualTime(kit.system)
+        probe: TestProbe[Write] = kit.create_test_probe()
+        reply: TestProbe[Reply] = kit.create_test_probe()
+        aggr = durable_aggregator(kit, write_majority, probe, reply)
+
+        await probe.expect_message_type(Write)  # no reply
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        await manual_time.time_passes(timeout / 5)  # the secondary nodes
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteNack())
+
+        await manual_time.time_passes(timeout)
+        await reply.expect_message(Replicator.UpdateTimeout(KeyA))
+        await reply.expect_terminated(aggr)
+
+
+async def test_a_durable_delete_does_not_wait_for_its_timeout():
+    # Pekko's aggregator matches only UpdateSuccess and StoreFailure from the store, so a durable
+    # Delete there waits out its timeout; here the store's DeleteSuccess ends the wait.
+    async with ActorTestKit(manual_time=True) as kit:
+        probe: TestProbe[Write] = kit.create_test_probe()
+        reply: TestProbe[Reply] = kit.create_test_probe()
+        aggr = durable_aggregator(kit, write_three, probe, reply, DELETED_ENVELOPE)
+
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        (await probe.expect_message_type(Write)).reply_to.tell(WriteAck())
+        aggr.tell(Replicator.DeleteSuccess(KeyA))
+        async with reply.within(timeout / 2):
+            await reply.expect_message(Replicator.DeleteSuccess(KeyA))
         await reply.expect_terminated(aggr)

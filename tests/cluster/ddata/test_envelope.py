@@ -12,6 +12,7 @@ from ohra.cluster.ddata import GCounterKey, SelfUniqueAddress
 from ohra.cluster.ddata.envelope import (
     DELETED_DATA,
     DELETED_ENVELOPE,
+    NO_DELTA_PLACEHOLDER,
     DataEnvelope,
     Read,
     ReadRepair,
@@ -23,8 +24,10 @@ from ohra.cluster.ddata.envelope import (
 )
 from ohra.cluster.ddata.flag import Flag
 from ohra.cluster.ddata.gcounter import GCounter
+from ohra.cluster.ddata.orset import ORSet
 from ohra.cluster.ddata.pruning_state import PruningInitialized, PruningPerformed
 from ohra.cluster.ddata.replicator import Replicator
+from ohra.cluster.ddata.version_vector import VersionVector
 from ohra.ref import ActorRef, FunctionRef
 from ohra.remote import UniqueAddress
 from ohra.remote.serialization import Serialization
@@ -184,3 +187,58 @@ def test_a_wire_message_round_trips_over_serialization(msg: object):
     )
     assert back == msg
     assert type(back) is type(msg)
+
+
+def vv(**kw: int) -> VersionVector:
+    nodes = {"a": u1, "removed": u2, "owner": u3}
+    return VersionVector.create({nodes[k]: v for k, v in kw.items()})
+
+
+def test_prune_cleans_the_removed_node_out_of_delta_versions():
+    env = DataEnvelope(GCounter().increment(node2, 1), delta_versions=vv(removed=2, owner=3))
+    initialized = env.init_removed_node_pruning(u2, u3)
+    assert not initialized.delta_versions.contains(u2)
+    assert initialized.delta_versions.contains(u3)
+    env = DataEnvelope(GCounter().increment(node2, 1), delta_versions=vv(removed=2, owner=3))
+    initialized = env.init_removed_node_pruning(u2, u3)
+    initialized = dataclasses.replace(initialized, delta_versions=vv(removed=2, owner=3))
+    pruned = initialized.prune(u2, PruningPerformed(IN_FUTURE))
+    assert not pruned.delta_versions.contains(u2)
+    assert pruned.delta_versions.version_at(u3) == 3
+
+
+def test_merge_merges_delta_versions_and_drops_pruned_nodes():
+    d1 = DataEnvelope(GCounter(), delta_versions=vv(a=1))
+    d2 = DataEnvelope(
+        GCounter(),
+        {u2: PruningPerformed(IN_FUTURE)},
+        delta_versions=vv(a=3, removed=2),
+    )
+    merged = d1.merge(d2, NOW)
+    assert merged.delta_versions == vv(a=3)
+
+
+def test_merge_applies_a_delta_with_merge_delta():
+    with_a = ORSet[str]().add(node1, "a")
+    b_delta = with_a.reset_delta().add(node2, "b").delta
+    assert b_delta is not None
+    merged = DataEnvelope(with_a).merge(DataEnvelope(b_delta), NOW)
+    assert isinstance(merged.data, ORSet)
+    assert merged.data.elements == {"a", "b"}
+
+
+def test_without_delta_versions():
+    env = DataEnvelope(GCounter(), delta_versions=vv(a=1))
+    assert env.without_delta_versions().delta_versions.is_empty
+    assert env.without_delta_versions().data is env.data
+    plain = DataEnvelope(GCounter())
+    assert plain.without_delta_versions() is plain
+
+
+def test_the_placeholder_merges_to_itself():
+    assert NO_DELTA_PLACEHOLDER.merge(NO_DELTA_PLACEHOLDER) is NO_DELTA_PLACEHOLDER
+    assert NO_DELTA_PLACEHOLDER.delta is None
+    assert NO_DELTA_PLACEHOLDER.zero() is NO_DELTA_PLACEHOLDER
+    assert NO_DELTA_PLACEHOLDER.merge_delta(NO_DELTA_PLACEHOLDER) is NO_DELTA_PLACEHOLDER
+    assert NO_DELTA_PLACEHOLDER.reset_delta() is NO_DELTA_PLACEHOLDER
+    assert repr(NO_DELTA_PLACEHOLDER) == "NoDeltaPlaceholder"

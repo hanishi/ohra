@@ -176,7 +176,7 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
 > - The API is cluster-typed's `DistributedData` and `Replicator` in snake_case: `Replicator.Update`, `Get`, `Delete`, `Subscribe` and their responses are nested in `Replicator`, and the consistency levels are dataclasses, `Replicator.WriteLocal()` and `Replicator.ReadMajority(timeout=3.0)`. Timeouts are seconds.
 > - `Update(key, initial, writeConsistency, replyTo)(modify)` is `Update(key, initial, write_consistency, reply_to, modify)`, with `modify` as its last field. The types' symbolic operators are named methods taking the node: `c :+ 1` is `c.increment(node, 1)`.
 > - The settings are `ReplicatorSettings`, a field of `ClusterSettings` (`distributed_data=`), not HOCON under `pekko.cluster.distributed-data`.
-> - Delta propagation and roles are not here yet: every write and every gossip carries the full value, and every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
+> - Roles are not here: every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
 
 ## How it works
 
@@ -213,6 +213,8 @@ Its settings are `ClusterSettings(distributed_data=ReplicatorSettings(...))`, wi
 | `gossip_interval` | `2.0` | seconds between two gossip rounds |
 | `notify_subscribers_interval` | `0.5` | seconds between two rounds of `Changed` |
 | `max_delta_elements` | `500` | the keys per gossip chunk, on average between this and twice this; also the most keys one reply sends back |
+| `delta_crdt_enabled` | `True` | send [deltas](#delta-propagation) for the types that have them, instead of the full value |
+| `max_delta_size` | `50` | the number of operations a merged `ORSet` or `ORMap` delta may hold before it is replaced by a placeholder and the full value is sent instead (adds in a row merge into one operation); must be above `0` |
 | `log_data_size_exceeding` | `10 * 1024` | log the size of a value whose encoding is at least this large, in bytes, at INFO (a WARNING from 3/4 of the 16 MiB frame on); `None` turns it off |
 | `prefer_oldest` | `False` | read from and write to the oldest nodes first |
 | `expire_keys_after_inactivity` | `{}` | key id, or `"prefix*"`, to the seconds after which an untouched key is removed |
@@ -531,17 +533,39 @@ settings = ClusterSettings(
 > - `sqlite_durable_store` takes the place of `LmdbDurableStore`: SQLite is in the standard library, and the core has no dependencies. `durable.store-actor-class` is `durable_store`, a behavior factory.
 > - `durable.lmdb.dir` and `durable.lmdb.write-behind-interval` are the parameters of `sqlite_durable_store`, and there is no `map-size`. [Appendix B](appendix-deviations.md) has the rest.
 
+### Delta propagation
+
+A **delta** is the change an `Update` made, without the rest of the value: adding one element to an `ORSet` of ten thousand sends that one `add`, not the set. The types that can describe their changes this way are the delta-CRDTs, and each reports its change through `delta`. The Replicator takes it right after `modify` runs, files it under the key with a version number, and then sends it in two ways. A write that reaches other nodes sends the delta first: a causal delta as a `DeltaPropagation`, which the other nodes merge into their copy, and any other delta inside the `Write` itself. And a tick sends a few nodes at a time the deltas they have not been sent yet.
+
+Deltas come in two kinds. Some may be applied in any order and any number of times: `GCounter`, `PNCounter` and `GSet`. The others must be applied in the order they were made, each exactly once, because a delta such as "remove this element" means nothing to a node that has not seen the add before it. Their deltas are `RequiresCausalDeliveryOfDeltas`: those of `ORSet`, `ORMap` and the types built on it, `LWWMap`, `PNCounterMap` and `ORMultiMap`. A value that has no delta, such as `Flag` or `LWWRegister`, is always sent whole.
+
+For the causal kind, the sender numbers its deltas of a key 1, 2, 3, and the receiver remembers the last number it applied from each node. A delta whose numbers are already applied is skipped. A delta that starts after the next expected number has a gap in front of it, so the receiver skips it and answers `DeltaNack`; the write aggregator then sends that node the full `Write` instead. A gap found on the tick has no one waiting for a reply: the node catches up by gossip. A change that has no delta, or a merged `ORSet` or `ORMap` delta of `max_delta_size` operations or more, is replaced by a placeholder that counts as a version but is never sent, so the receiver sees a gap there too and waits for the full value.
+
+- **The tick.** Every `max(gossip_interval / 5, 0.2)` seconds, so 0.4 seconds with the default gossip interval, the Replicator sends each node in a slice the deltas it has not been sent. The slice is `min(max(n // 5 + 1, 2), min(n, 10))` of the `n` other nodes, taken round-robin: from 2 to 10 nodes per tick, all of them when there are no more than that, and a different slice on the next tick. Every fifth tick, the Replicator also drops the deltas that have gone to every node.
+- **Gossip is the safety net.** Deltas are an optimization on top of gossip, not a replacement. Gossip still compares digests and sends the full value of any key on which two nodes differ, so a delta that was lost, skipped or cut off is repaired by the next round. Every full envelope carries the sender's delta version, so a node that receives the value by gossip or by a `Write` carries on from that version with the next delta.
+- **Large propagations are not split.** A `DeltaPropagation` over the frame size is dropped with an error log, and gossip delivers the value later.
+- **Mixed clusters.** A node with `delta_crdt_enabled=False` ignores deltas that arrive, answering `DeltaNack` to a write, and sends none of its own; the cluster still converges by full values.
+
+To turn deltas off, so that every write and every round of gossip carries the full value:
+
+```python
+from ohra import ClusterSettings
+from ohra.cluster.ddata import ReplicatorSettings
+
+settings = ClusterSettings(distributed_data=ReplicatorSettings(delta_crdt_enabled=False))
+```
+
+> **Coming from Apache Pekko**
+>
+> - `delta-crdt.enabled` and `delta-crdt.max-delta-size` are `delta_crdt_enabled` and `max_delta_size`. The control flow is Pekko's, function for function, including that a propagation is not split. [Appendix B](appendix-deviations.md) lists the differences in the messages.
+
 ### Limits
 
-All the data is in memory, on every node, and every change of a key sends the whole value: a write to the nodes its level asks for, and gossip to the rest. That suits many small keys, or a few of moderate size; Pekko's guidance of at most 100,000 top-level keys holds here too. A value whose encoding is at least `log_data_size_exceeding` bytes has its size logged at INFO, and at WARNING once it reaches 3/4 of the frame, as Pekko does. One whose JSON is larger than 16 MiB cannot be sent at all, compressed or not.
+All the data is in memory, on every node, and gossip sends the whole value of a key, and so does a write for a type without deltas; for a type with deltas, a write and the [propagation tick](#delta-propagation) send only the change. That suits many small keys, or a few of moderate size; Pekko's guidance of at most 100,000 top-level keys holds here too. A value whose encoding is at least `log_data_size_exceeding` bytes has its size logged at INFO, and at WARNING once it reaches 3/4 of the frame, as Pekko does. One whose JSON is larger than 16 MiB cannot be sent at all, compressed or not.
 
 CRDTs hold state, not commands. A value that has to be decided once, such as which node owns a cart, needs one owner, a [singleton](06-singleton.md) or [sharding](07-sharding.md), rather than a merge.
 
 ### Not here yet
-
-Distributed Data comes in parts, and these are still to come:
-
-- **Delta propagation.** Every write and gossip carries the full value, as Pekko's Replicator does with `delta-crdt.enabled = off`. With deltas on, Pekko sends only the change.
 
 Later parts are planned to move the receptionist ([chapter 2](02-actor-system.md)) onto an `ORMultiMap`, and the sharding coordinator's state ([chapter 7](07-sharding.md)) onto Distributed Data, as Pekko keeps them.
 

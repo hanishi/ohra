@@ -22,6 +22,7 @@ from .shard import (
     HandOff,
     ShardStopped,
 )
+from ..ddata.replicator import Replicator
 from ..core import (
     Cluster,
     ClusterDomainEvent,
@@ -818,7 +819,11 @@ class _Coordinator:
             self.get_shard_home(shard, asker)
 
 
-def coordinator_behavior(type_name: str, settings: ClusterShardingSettings) -> Behavior[Any]:
+def coordinator_behavior(
+    type_name: str,
+    settings: ClusterShardingSettings,
+    replicator: ActorRef[Replicator.Command],  # used from Task 3 on
+) -> Behavior[Any]:
     return Behaviors.setup(lambda ctx: _Coordinator(ctx, type_name, settings).behavior())
 
 

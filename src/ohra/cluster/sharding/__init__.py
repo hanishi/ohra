@@ -12,6 +12,7 @@ from ...ref import ActorRef
 from ...supervision import SupervisorStrategy
 from ...coordinated_shutdown import CoordinatedShutdown
 from ..core import Cluster
+from ..ddata.replicator import Replicator
 from ..singleton import ClusterSingleton, SingletonActor
 from .coordinator import (
     CoordinatorState,
@@ -42,6 +43,7 @@ from .shard import (
 )
 
 if TYPE_CHECKING:
+    from ..ddata.settings import ReplicatorSettings
     from ...cell import ActorCell
     from ...system import ActorSystem
 
@@ -81,6 +83,8 @@ class ClusterSharding:
     _regions: dict[str, ActorRef[Any]]
     _entities: dict[str, Entity[Any]]
     _parent: ActorCell[Any] | None
+    _replicator: ActorRef[Replicator.Command] | None
+    _replicator_settings: ReplicatorSettings | None
 
     def __new__(cls, system: ActorSystem[Any]) -> ClusterSharding:
         if system.cluster is None:
@@ -94,6 +98,8 @@ class ClusterSharding:
             self._regions = {}
             self._entities = {}
             self._parent = None
+            self._replicator = None
+            self._replicator_settings = None
             system.cluster_sharding = self
         return system.cluster_sharding
 
@@ -105,6 +111,19 @@ class ClusterSharding:
         settings = entity.effective_settings
         if self._parent is None:
             self._parent = self.system._system_root.spawn_child(Behaviors.empty, "sharding", None)  # pyright: ignore[reportPrivateUsage]
+        # ClusterSharding.scala 730-815: the guardian spawns one Replicator, for all entity types
+        wanted = settings.effective_replicator_settings(Cluster(self.system).settings)
+        if self._replicator is None:
+            self._replicator_settings = wanted
+            self._replicator = self._parent.spawn_child(
+                Replicator.behavior(wanted), "replicator", None
+            ).ref
+        elif wanted != self._replicator_settings:
+            self._parent.log.warning(
+                "Entity type [%s] has other distributed_data settings than the first init; "
+                "sharding's Replicator keeps the first's",
+                name,
+            )
         progress = _ExitingProgress()
         region = self._parent.spawn_child(region_behavior(entity, settings, progress), name, None)
         CoordinatedShutdown(self.system).add_task(
@@ -115,9 +134,9 @@ class ClusterSharding:
         # Pekko's BackoffOpts.onStop restarts a coordinator that throws at once, with its default
         # decider; the backoff is for one that stops, which this in-memory one never does but on
         # its stop message
-        supervised = Behaviors.supervise(coordinator_behavior(name, settings)).on_failure(
-            SupervisorStrategy.restart()
-        )
+        supervised = Behaviors.supervise(
+            coordinator_behavior(name, settings, self._replicator)
+        ).on_failure(SupervisorStrategy.restart())
         coordinator = SingletonActor(supervised, f"{name}Coordinator").with_stop_message(
             _Terminate()
         )

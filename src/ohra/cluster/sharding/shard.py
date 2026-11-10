@@ -15,7 +15,7 @@ import asyncio
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 
 from ...behavior import Behavior, Behaviors
@@ -23,8 +23,11 @@ from ...context import ActorContext
 from ...ref import ActorRef
 from ...remote.serialization import remotable
 from ...signals import PostStop, Signal, Terminated
+from ..ddata.replicator import Replicator
+from ..ddata.settings import ReplicatorSettings
 
 if TYPE_CHECKING:
+    from ..core import ClusterSettings
     from ..singleton import ClusterSingletonSettings
 
 
@@ -61,6 +64,22 @@ class ClusterShardingSettings:
     coordinator_singleton_settings: ClusterSingletonSettings | None = None
     """Settings of the coordinator's singleton manager (Pekko's coordinator-singleton); None means
     the defaults."""
+    waiting_for_state_timeout: float = 2.0
+    """How long the coordinator waits for its state to be read from the Replicator (Pekko's
+    waiting-for-state-timeout, reference.conf)."""
+    updating_state_timeout: float = 5.0
+    """How long a state update to the Replicator may take (updating-state-timeout)."""
+    coordinator_state_read_majority_plus: int | Literal["all"] = 5
+    """Additional nodes beyond a majority the state is read from; "all" reads from all nodes
+    (coordinator-state.read-majority-plus)."""
+    coordinator_state_write_majority_plus: int | Literal["all"] = 3
+    """As above for writes (coordinator-state.write-majority-plus)."""
+    majority_min_cap: int = 5
+    """Minimum number of nodes a majority-plus read or write reaches
+    (distributed-data.majority-min-cap)."""
+    distributed_data: ReplicatorSettings | None = None
+    """Sharding's own Replicator (ClusterSharding.scala 730-815); None takes the cluster's
+    distributed_data with prefer_oldest=True and max_delta_elements=5. Never durable."""
 
     def __post_init__(self) -> None:
         for name in (
@@ -77,6 +96,46 @@ class ClusterShardingSettings:
             raise ValueError("rebalance_relative_limit must be in (0, 1]")
         if self.passivate_after is not None and self.passivate_after <= 0:
             raise ValueError("passivate_after must be > 0 or None")
+        for name in ("waiting_for_state_timeout", "updating_state_timeout"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be > 0")
+        for name in (
+            "coordinator_state_read_majority_plus",
+            "coordinator_state_write_majority_plus",
+        ):
+            v = getattr(self, name)
+            if v != "all" and (not isinstance(v, int) or v < 0):
+                raise ValueError(f"{name} must be an int >= 0 or 'all'")
+        if self.majority_min_cap < 0:
+            raise ValueError("majority_min_cap must be >= 0")
+
+    def state_read_consistency(self) -> Replicator.ReadConsistency:
+        """ClusterSharding.scala 782-788 (``stateReadConsistency``)."""
+        n = self.coordinator_state_read_majority_plus
+        if n == "all":
+            return Replicator.ReadAll(self.waiting_for_state_timeout)
+        return Replicator.ReadMajorityPlus(
+            self.waiting_for_state_timeout, n, self.majority_min_cap
+        )
+
+    def state_write_consistency(self) -> Replicator.WriteConsistency:
+        """ClusterSharding.scala 790-796 (``stateWriteConsistency``)."""
+        n = self.coordinator_state_write_majority_plus
+        if n == "all":
+            return Replicator.WriteAll(self.updating_state_timeout)
+        return Replicator.WriteMajorityPlus(self.updating_state_timeout, n, self.majority_min_cap)
+
+    def effective_replicator_settings(
+        self, cluster_settings: ClusterSettings
+    ) -> ReplicatorSettings:
+        """ClusterSharding.scala 730-745: sharding's data is never durable."""
+        if self.distributed_data is None:
+            base = replace(
+                cluster_settings.distributed_data, prefer_oldest=True, max_delta_elements=5
+            )
+        else:
+            base = self.distributed_data
+        return replace(base, durable_keys=frozenset())
 
     @property
     def entity_hand_off_timeout(self) -> float:

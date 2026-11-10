@@ -781,17 +781,15 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 else:
                     reply_to.tell(Replicator.UpdateSuccess(key))
             else:
-                write_delta: Delta | None
-                if delta is NO_DELTA_PLACEHOLDER:
-                    write_delta = None
+                write_envelope = new_envelope
+                write_delta: Delta | None = None
+                if delta is NO_DELTA_PLACEHOLDER or delta is None:
+                    pass
                 elif isinstance(delta, RequiresCausalDeliveryOfDeltas):
                     v = delta_propagation_selector.current_version(key.id)
                     write_delta = Delta(replace(new_envelope, data=delta), v, v)
                 else:
-                    write_delta = None
-                # Pekko's (writeEnvelope, writeDelta) pair; the aggregator takes the full
-                # envelope until it sends deltas, so only write_delta is read here (a non-causal
-                # delta's writeEnvelope is newEnvelope.copy(data = d) in Pekko)
+                    write_envelope = replace(new_envelope, data=delta)
                 # When RequiresCausalDeliveryOfDeltas use deterministic order to so that sequence
                 # numbers of subsequent updates are in sync on the destination nodes.
                 # The order is also kept when prefer-oldest is enabled.
@@ -800,7 +798,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     or (write_delta is not None and write_delta.requires_causal_delivery_of_deltas)
                 )
                 aggregator = start_write_aggregator(
-                    key, new_envelope, write_consistency, reply_to, durable, shuffle
+                    key, write_envelope, write_consistency, reply_to, durable, shuffle, write_delta
                 )
                 if durable_store_ref is not None and durable:
                     durable_store_ref.tell(
@@ -830,9 +828,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             consistency: Replicator.WriteConsistency,
             reply_to: ActorRef[Any],
             durable: bool,
-            shuffle: bool | None = None,
+            shuffle: bool,
+            delta: Delta | None = None,
         ) -> ActorRef[Any]:
-            """The WriteAggregator that receiveUpdate and receiveDelete start, without deltas."""
+            """The WriteAggregator that receiveUpdate and receiveDelete start."""
             exclude_exiting = isinstance(
                 consistency, Replicator.WriteMajorityPlus | Replicator.WriteAll
             )
@@ -846,8 +845,9 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     frozenset(unreachable),
                     replica,
                     self_unique_address,
-                    shuffle=not settings.prefer_oldest if shuffle is None else shuffle,
+                    shuffle=shuffle,
                     durable=durable,
+                    delta=delta,
                 )
             )
             return cast("ActorRef[Any]", aggregator)  # the store's reply is not its Never
@@ -943,7 +943,12 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                             reply_to.tell(success)
                     else:
                         aggregator = start_write_aggregator(
-                            key, DELETED_ENVELOPE, consistency, reply_to, durable
+                            key,
+                            DELETED_ENVELOPE,
+                            consistency,
+                            reply_to,
+                            durable,
+                            not settings.prefer_oldest,
                         )
                         if durable_store_ref is not None and durable:
                             durable_store_ref.tell(

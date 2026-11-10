@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
-from ohra import Behaviors
+from ohra import Behavior, Behaviors
 from ohra.cluster.core import MemberRemoved, MemberUp
 from ohra.cluster.ddata import (
     DurableStore,
@@ -47,7 +47,7 @@ from ohra.cluster.gossip import Member
 from ohra.ref import ActorRef
 from ohra.remote import UniqueAddress
 from ohra.system import ActorSystem
-from ohra.testkit import ManualTime, TestProbe
+from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 
 from ...util import free_port
 from .test_replicator_durable import with_store
@@ -490,3 +490,73 @@ async def test_counter_updates_still_work_with_deltas_on():
         envelope = await read(node, COUNTER.id)
         assert envelope is not None
         assert envelope.delta_versions.version_at(node.self_address.unique_address) == 1
+
+
+# Update to other nodes: the delta first (receiveUpdate 1720-1730, WriteAggregator)
+
+WRITE_TO_PEER = Replicator.WriteTo(2, 3.0)
+
+
+def update_to_peer[T: ReplicatedData](
+    p: Peer, key: Any, initial: T, modify: Any
+) -> TestProbe[Replicator.UpdateResponse[Any]]:
+    probe: TestProbe[Replicator.UpdateResponse[Any]] = p.node.probe()
+    p.node.replicator.tell(Replicator.Update(key, initial, WRITE_TO_PEER, probe.ref, modify))
+    return probe
+
+
+async def test_a_causal_update_to_other_nodes_sends_a_delta_propagation():
+    async with with_peer() as p:
+        update_to_peer(p, KEY, ORSet[str](), lambda s: s.add(p.node.self_address, "a"))
+        msg = await p.inbox.expect_message_type(DeltaPropagation)
+        assert msg.reply is True and msg.from_node == p.node.self_address.unique_address
+        delta = msg.deltas[KEY.id]
+        v = delta.from_seq_nr
+        assert v >= 1 and delta.to_seq_nr == v
+        assert ORSet[str]().merge_delta(cast(Any, delta.envelope.data)).elements == {"a"}
+        msg.reply_to.tell(WriteAck())  # pyright: ignore[reportOptionalMemberAccess]
+
+
+async def test_a_non_causal_update_sends_its_delta_as_a_write():
+    async with with_peer() as p:
+        # another node's 3 is in the state, but not in the delta
+        await write(p.node, COUNTER.id, DataEnvelope(GCounter().increment(sa(other), 3)))
+        update_to_peer(p, COUNTER, GCounter(), lambda c: c.increment(p.node.self_address, 1))
+        msg = await p.inbox.expect_message_type(Write)
+        assert cast(GCounter, msg.envelope.data).value == 1
+        msg.reply_to.tell(WriteAck())
+
+
+async def test_an_update_without_a_delta_sends_the_full_state():
+    async with with_peer() as p:
+        await add_to_set(p.node, "a")
+        update_to_peer(p, KEY, ORSet[str](), lambda s: s)
+        msg = await p.inbox.expect_message_type(Write)
+        assert cast(ORSet[str], msg.envelope.data).elements == {"a"}
+        msg.reply_to.tell(WriteAck())
+
+
+async def test_a_durable_update_stores_the_full_envelope():
+    async with ActorTestKit() as kit:
+        stored: TestProbe[Any] = kit.create_test_probe()
+
+        def factory() -> Behavior[DurableStore.Command]:
+            def receive(msg: Any) -> Behavior[Any]:
+                if isinstance(msg, DurableStore.LoadAll):
+                    msg.reply_to.tell(DurableStore.LoadAllCompleted())
+                else:
+                    stored.ref.tell(msg)
+                return Behaviors.same
+
+            return cast(Behavior[DurableStore.Command], Behaviors.receive_message(receive))
+
+        settings = replace(SETTINGS, durable_store=factory, durable_keys=frozenset({KEY.id}))
+        async with with_peer(settings) as p:
+            update_to_peer(p, KEY, ORSet[str](), lambda s: s.add(p.node.self_address, "a"))
+            store = await stored.expect_message_type(DurableStore.Store)
+            full = store.data.data
+            assert isinstance(full, ORSet) and cast(ORSet[str], full).elements == {"a"}
+            assert full.delta is None
+            msg = await p.inbox.expect_message_type(DeltaPropagation)
+            assert msg.deltas[KEY.id].envelope.data is not full
+            assert not isinstance(full, type(msg.deltas[KEY.id].envelope.data))

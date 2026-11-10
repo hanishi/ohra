@@ -2,7 +2,6 @@
 ``Replicator.scala``: the children a Replicator starts for a Get or an Update with a consistency
 level other than local.
 
-Delta writes are left out, until sub-project 6.
 Typed actors have no ``sender()``. Each request goes out with a message adapter of its own as
 ``reply_to``, and the adapter names the node it was sent to, where Pekko reads the sender's
 address. Pekko's ``replica(address)`` is the ``replica`` parameter.
@@ -18,6 +17,9 @@ from typing import TYPE_CHECKING, Any, Never, cast
 from ...behavior import Behavior, Behaviors
 from .envelope import (
     DataEnvelope,
+    Delta,
+    DeltaNack,
+    DeltaPropagation,
     Read,
     ReadRepair,
     ReadRepairAck,
@@ -55,10 +57,11 @@ class _ReceiveTimeout:
 
 @dataclass(frozen=True)
 class _WriteReply:
-    """A ``WriteAck`` or ``WriteNack`` from ``node``, through the adapter sent to it."""
+    """A ``WriteAck``, ``WriteNack`` or ``DeltaNack`` from ``node``, through the adapter sent to
+    it."""
 
     node: UniqueAddress
-    msg: WriteAck | WriteNack
+    msg: WriteAck | WriteNack | DeltaNack
 
 
 @dataclass(frozen=True)
@@ -120,10 +123,13 @@ def write_aggregator(
     *,
     shuffle: bool,
     durable: bool = False,
+    delta: Delta | None = None,
 ) -> Behavior[Never]:
     """Pekko's WriteAggregator. It replies once to ``reply_to``, which is an Update's or a
     Delete's, and stops. With ``durable`` it also waits for the local store's reply, which the
-    Replicator has the store send to it. It takes no other messages from outside."""
+    Replicator has the store send to it. With ``delta`` the primary nodes get a
+    DeltaPropagation first and the full ``envelope`` as a Write after a DeltaNack or at the send to
+    secondary. It takes no other messages from outside."""
 
     @Behaviors.setup
     def setup(ctx: ActorContext[_WriteMsg]) -> Behavior[_WriteMsg]:
@@ -154,11 +160,19 @@ def write_aggregator(
             nodes, unreachable, done_when_remaining_size, shuffle
         )
 
-        def write_msg(node: UniqueAddress) -> Write:
-            def adapt(msg: WriteAck | WriteNack) -> _WriteMsg:
+        def adapter(node: UniqueAddress) -> ActorRef[WriteAck | WriteNack | DeltaNack]:
+            def adapt(msg: WriteAck | WriteNack | DeltaNack) -> _WriteMsg:
                 return _WriteReply(node, msg)
 
-            return Write(key.id, envelope, self_unique_address, ctx.message_adapter(adapt))
+            return ctx.message_adapter(adapt)
+
+        def write_msg(node: UniqueAddress) -> Write:
+            return Write(key.id, envelope, self_unique_address, adapter(node))
+
+        def first_msg(node: UniqueAddress) -> Write | DeltaPropagation:
+            if delta is None:
+                return write_msg(node)
+            return DeltaPropagation(self_unique_address, True, {key.id: delta}, adapter(node))
 
         def is_done() -> bool:
             return got_local_store_reply and (
@@ -196,7 +210,7 @@ def write_aggregator(
 
         # Pekko's preStart
         for node in primary_nodes:
-            send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
+            send_to_replica(ctx.log, replica(node), first_msg(node), [key.id])
         if is_done():
             return reply(False)
 
@@ -208,6 +222,11 @@ def write_aggregator(
                     remaining.discard(node)
                     if is_done():
                         return reply(False)
+                case _WriteReply(node, DeltaNack()):
+                    # Deltas must be applied in order and we can't keep track of ordering of
+                    # simultaneous updates so there is a chance that the delta could not be
+                    # applied. Try again with the full state
+                    send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
                 case _WriteReply(node, _):  # WriteNack
                     got_write_nack_from.add(node)
                     if is_done():
@@ -224,6 +243,14 @@ def write_aggregator(
                     if is_done():
                         return reply(False)
                 case _SendToSecondary():
+                    if delta is not None:
+                        # Deltas must be applied in order and we can't keep track of ordering of
+                        # simultaneous updates so there is a chance that the delta could not be
+                        # applied. Try again with the full state to the primary nodes that have
+                        # not acked.
+                        for node in primary_nodes:
+                            if node in remaining:
+                                send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
                     for node in secondary_nodes:
                         send_to_replica(ctx.log, replica(node), write_msg(node), [key.id])
                 case _ReceiveTimeout():

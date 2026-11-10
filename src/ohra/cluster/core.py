@@ -72,9 +72,6 @@ class ClusterSettings:
     reduce_gossip_different_view_probability: int = 400
     max_gossips_before_shutting_down_myself: int = 5
     max_ticks_before_shutting_down_myself: int = 4
-    receptionist_resend_interval: float = 1.0
-    """How often a node re-sends its receptionist row to the others (anti-entropy); not a Pekko
-    setting."""
     downing: SplitBrainResolverSettings | None = None
     """The split-brain resolver; None leaves downing manual, as Pekko without a downing
     provider."""
@@ -93,7 +90,7 @@ class ClusterSettings:
             "heartbeat_expected_response_after", "failure_detector_threshold",
             "failure_detector_min_std_deviation", "prune_gossip_tombstones_after",
             "monitored_by_nr_of_members", "failure_detector_max_sample_size", "min_nr_of_members",
-            "reduce_gossip_different_view_probability", "receptionist_resend_interval",
+            "reduce_gossip_different_view_probability",
         )  # fmt: skip
         non_negative = (
             "periodic_tasks_initial_delay", "acceptable_heartbeat_pause",

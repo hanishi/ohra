@@ -17,7 +17,7 @@ from ohra.cluster import ClusterSettings
 from ohra.cluster.core import Cluster, Leave
 from ohra.cluster.ddata import ORMultiMap, ORMultiMapKey, Replicator, ReplicatorSettings
 from ohra.cluster.receptionist import ClusterReceptionistSettings
-from ohra.cluster.receptionist.cluster_receptionist import NAME, cluster_receptionist
+from ohra.cluster.receptionist.cluster_receptionist import NAME
 from ohra.cluster.receptionist.registry import (
     DDataKey,
     Entry,
@@ -30,6 +30,7 @@ from ohra.receptionist import (
     Deregistered,
     Find,
     Listing,
+    Receptionist,
     Register,
     Registered,
     ServiceKey,
@@ -158,7 +159,7 @@ def settings_for(**receptionist: Any) -> dict[str, Any]:
 async def manual_node(
     prune_gossip_tombstones_after: float = 86400.0, **receptionist: Any
 ) -> AsyncGenerator[Node]:
-    """One joined node on ManualTime, with the cluster receptionist beside the old one."""
+    """One joined node on ManualTime, with the system's own cluster receptionist."""
     port = free_port()
     system = ActorSystem(
         Behaviors.ignore,
@@ -177,11 +178,21 @@ async def manual_node(
         manual = ManualTime(system)
         while not all_up(system, 1):
             await manual.time_passes(0.02)
-        ref = system._system_root.spawn_child(cluster_receptionist(system), NAME, None).ref  # pyright: ignore[reportPrivateUsage]
+        ref = Receptionist(system).ref
         node = Node(system, ref, manual)
         while "replicator" not in system._system_root.children[NAME].children:  # pyright: ignore[reportPrivateUsage]
             await manual.time_passes(0.01)
         yield node
+
+
+async def test_a_cluster_system_runs_the_cluster_receptionist_and_its_replicator():
+    async with manual_node() as node:
+        system = node.system
+        assert Receptionist(system).ref.path.endswith("/system/clusterReceptionist")
+        assert system.resolve(Receptionist(system).ref.path) is Receptionist(system).ref
+        assert node.replicator.path.endswith("/system/clusterReceptionist/replicator")
+        assert system.resolve(node.replicator.path) is node.replicator
+        assert "receptionist" not in system._system_root.children  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_register_find_and_subscribe_on_one_node():
@@ -276,7 +287,7 @@ async def test_find_before_joining_lists_local_refs():
         shutdown=FAST_SHUTDOWN,
     )
     async with system:
-        ref = system._system_root.spawn_child(cluster_receptionist(system), NAME, None).ref  # pyright: ignore[reportPrivateUsage]
+        ref = Receptionist(system).ref
         node = Node(system, ref, None)
         assert not all_up(system, 1)
         a = node.spawn(service, "a")
@@ -344,7 +355,7 @@ async def test_a_removed_self_member_stops_the_receptionist():
     )
     async with system:
         await eventually(lambda: all_up(system, 1), timeout=3)
-        ref = system._system_root.spawn_child(cluster_receptionist(system), NAME, None).ref  # pyright: ignore[reportPrivateUsage]
+        ref = Receptionist(system).ref
         node = Node(system, ref, None)
         watcher: TestProbe[Any] = node.probe()
         cluster = node.cluster
@@ -389,7 +400,9 @@ async def test_the_leader_does_not_prune_this_nodes_own_entries():
 
 
 async def test_a_non_leader_does_not_prune():
-    ports = [free_port(), free_port()]
+    # The lower port leads. Only the follower prunes eagerly: the leader would prune the entry
+    # too, and its removal would replicate to the follower.
+    ports = sorted([free_port(), free_port()])
     seeds = tuple(Address("r", "127.0.0.1", p) for p in ports[:1])
     async with AsyncExitStack() as stack:
         systems = [
@@ -401,17 +414,24 @@ async def test_a_non_leader_does_not_prune():
                     cluster=ClusterSettings(
                         seed_nodes=seeds,
                         **FAST,
-                        **settings_for(pruning_interval=0.05, prune_removed_older_than=0.0),
+                        **settings_for(
+                            **(
+                                {}
+                                if i == 0
+                                else dict(pruning_interval=0.05, prune_removed_older_than=0.0)
+                            )
+                        ),
                     ),
                     shutdown=FAST_SHUTDOWN,
                 )
             )
-            for p in ports
+            for i, p in enumerate(ports)
         ]
         await eventually(lambda: all(all_up(s, 2) for s in systems), timeout=5)
         leader = Cluster(systems[0]).state.leader
         (follower,) = [s for s in systems if Cluster(s).self_address != leader]
-        ref = follower._system_root.spawn_child(cluster_receptionist(follower), NAME, None).ref  # pyright: ignore[reportPrivateUsage]
+        assert follower is systems[1]
+        ref = Receptionist(follower).ref
         node = Node(follower, ref, None)
         await eventually(lambda: "replicator" in follower._system_root.children[NAME].children)  # pyright: ignore[reportPrivateUsage]
         entry = foreign_entry(node, 0)
@@ -444,7 +464,7 @@ async def test_cluster_shutting_down_alone_stops_the_receptionist(
         shutdown=FAST_SHUTDOWN,
     )
     async with system:
-        ref = system._system_root.spawn_child(cluster_receptionist(system), NAME, None).ref  # pyright: ignore[reportPrivateUsage]
+        ref = Receptionist(system).ref
         await Node(system, ref, None).find()
         assert not all_up(system, 1)
     # only the NodeRemoved(self) branch logs this

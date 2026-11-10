@@ -186,7 +186,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Only local actors can register or subscribe, as in Pekko; the receptionist watches them, message adapters included. A `Find` may come from another node: `Listing` and the replies are `@remotable`. Replication is one versioned row per node, pushed to the other members on every change and re-sent every `receptionist_resend_interval`, instead of Pekko's distributed data; see the deviations.
+Only local actors can register or subscribe, as in Pekko; the receptionist watches them, message adapters included. A `Find` may come from another node: `Listing` and the replies are `@remotable`. On a cluster node the registrations replicate through Distributed Data, as Pekko's `ClusterReceptionist`, so a `Find` follows a `Register` by a notify interval; see the deviations.
 
 ### Coordinated shutdown
 

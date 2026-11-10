@@ -1,4 +1,4 @@
-"""The Receptionist across cluster nodes: owner rows replicated between receptionists, pruned by
+"""The Receptionist across cluster nodes: registrations replicated by the Replicator, pruned by
 membership."""
 
 from __future__ import annotations
@@ -18,13 +18,12 @@ from ohra import (
     ask,
     remotable,
 )
-from ohra.cluster.core import Cluster, ClusterSettings, Down, Join, Leave
+from ohra.cluster.core import Cluster, ClusterSettings, Down, Leave
+from ohra.cluster.ddata import ReplicatorSettings
 from ohra.receptionist import (
-    _ActorTerminated,  # pyright: ignore[reportPrivateUsage]
     Find,
     Listing,
     Receptionist,
-    ReceptionistRow,
     Register,
     ServiceKey,
     Subscribe,
@@ -34,6 +33,11 @@ from ohra.remote import Address
 
 from ..util import eventually, free_port
 from .test_cluster import FAST, FAST_SHUTDOWN, all_up, unreachable_ports
+
+
+# the Replicator's defaults (2 s gossip, 0.5 s notify) shortened the way FAST shortens the cluster
+GOSSIP = 0.1
+NOTIFY = 0.05
 
 
 @remotable
@@ -80,7 +84,14 @@ def recorder(into: list[Any]) -> Behavior[Any]:
 def node(port: int, seeds: list[int], **settings: Any) -> ActorSystem[Any]:
     seed_nodes = tuple(Address("c", "127.0.0.1", p) for p in seeds)
     cfg = ClusterSettings(
-        seed_nodes=seed_nodes, **{**FAST, "receptionist_resend_interval": 0.05, **settings}
+        seed_nodes=seed_nodes,
+        **{
+            **FAST,
+            "distributed_data": ReplicatorSettings(
+                gossip_interval=GOSSIP, notify_subscribers_interval=NOTIFY
+            ),
+            **settings,
+        },
     )
     return ActorSystem(
         spawner,
@@ -168,64 +179,6 @@ async def test_registrations_on_two_nodes_both_reach_a_third():
         assert {r.path for r in (await find(c)).service_instances} == {svc_a.path, svc_b.path}
 
 
-async def test_a_terminated_service_with_no_bindings_publishes_no_row():
-    p1, p2 = free_port(), free_port()
-    async with AsyncExitStack() as stack:
-        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
-        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        versions: list[int] = []
-        remoting = b.remoting
-        assert remoting is not None
-        deliver = remoting._handle  # pyright: ignore[reportPrivateUsage]
-
-        def recording_rows(frame: Json) -> None:
-            message = frame.get("message") if isinstance(frame, dict) else None
-            if isinstance(message, dict) and message.get("$type") == "ReceptionistRow":
-                version = message.get("version")
-                assert isinstance(version, int)
-                versions.append(version)
-            deliver(frame)
-
-        remoting._handle = recording_rows  # pyright: ignore[reportPrivateUsage]
-        try:
-            first = await spawn(a, greeter, "first")
-            Receptionist(a).ref.tell(Register(GREETER, first))
-            await eventually_async(lambda: instances_seen_on(b, 1))
-            before = max(versions)
-            unbound = await spawn(a, greeter, "unbound")
-            Receptionist(a).ref.tell(_ActorTerminated(unbound))  # no keys: nothing changed
-            second = await spawn(a, greeter, "second")
-            Receptionist(a).ref.tell(Register(GREETER, second))
-            await eventually_async(lambda: instances_seen_on(b, 2))
-        finally:
-            remoting._handle = deliver  # pyright: ignore[reportPrivateUsage]
-        assert max(versions) == before + 1
-
-
-async def test_a_row_from_a_not_yet_member_is_hidden_until_it_joins():
-    p1, p2, p3 = free_port(), free_port(), free_port()
-    async with AsyncExitStack() as stack:
-        a, b = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2)]
-        # listening, but not joining anything yet
-        c = await stack.enter_async_context(node(p3, []))
-        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        # b's receptionist exists and is empty
-        assert (await find(b)).all_service_instances == frozenset()
-        seen: list[Listing[SayHello]] = []
-        Receptionist(b).ref.tell(Subscribe(GREETER, await spawn(b, recorder(seen), "seen")))
-        svc = await spawn(c, greeter, "svc")
-        row = ReceptionistRow(Cluster(c).self_unique_address, 5, ((GREETER.id, svc),))
-        # over the wire, from c
-        c.resolve(f"{Cluster(b).self_address.root}/system/receptionist").tell(row)
-        await asyncio.sleep(0.2)
-        assert (await find(b)).all_service_instances == frozenset()  # c is not a member: hidden
-        assert seen and all(not listing.all_service_instances for listing in seen)
-        Cluster(c).manager.tell(Join(Address("c", "127.0.0.1", p1)))
-        await eventually_async(lambda: instances_seen_on(b, 1), timeout=5)
-        (ref,) = (await find(b)).service_instances
-        assert ref.path == svc.path
-
-
 async def test_a_left_node_takes_its_services_with_it():
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:
@@ -270,27 +223,11 @@ async def test_a_crashed_node_keeps_services_in_all_instances_until_downed():
         assert events[-1].services_were_added_or_removed
 
 
-async def test_a_restarted_node_replaces_its_old_row():
-    p1, p2 = free_port(), free_port()
-    async with AsyncExitStack() as stack:
-        a = await stack.enter_async_context(node(p1, [p1], retry_unsuccessful_join_after=0.1))
-        b = await stack.enter_async_context(node(p2, [p1], retry_unsuccessful_join_after=0.1))
-        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        Receptionist(b).ref.tell(Register(GREETER, await spawn(b, greeter, "old")))
-        await eventually_async(lambda: instances_seen_on(a, 1))
-        await crash(b)
-        b2 = await stack.enter_async_context(node(p2, [p1], retry_unsuccessful_join_after=0.1))
-        Receptionist(b2).ref.tell(Register(GREETER, await spawn(b2, greeter, "new")))
-        await eventually(lambda: all_up(a, 2) and all_up(b2, 2), timeout=8)
-        await eventually_async(lambda: instances_seen_on(a, 1), timeout=5)
-        assert {r.path.rsplit("/", 1)[1] for r in (await find(a)).all_service_instances} == {"new"}
-
-
 # --- from the final review -----------------------------------------------------------------------
 
 
 def receptionist_path(system: ActorSystem[Any]) -> str:
-    return f"{Cluster(system).self_address.root}/system/receptionist"
+    return f"{Cluster(system).self_address.root}/system/clusterReceptionist"
 
 
 async def test_find_from_another_node_over_the_wire():
@@ -300,6 +237,9 @@ async def test_find_from_another_node_over_the_wire():
         await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
         svc = await spawn(a, greeter, "svc")
         Receptionist(a).ref.tell(Register(GREETER, svc))
+        # Find answers from the registry the Replicator has delivered (ClusterReceptionist.scala
+        # 399-402), so it follows the Register by a notify interval
+        await eventually_async(lambda: instances_seen_on(a, 1))
         listing: Listing[SayHello] = await ask(
             b.resolve(receptionist_path(a)), lambda r: Find(GREETER, r), timeout=2
         )
@@ -316,18 +256,6 @@ async def test_a_remote_subscriber_is_ignored_and_the_receptionist_survives():
         b.resolve(receptionist_path(a)).tell(Subscribe(GREETER, sub_on_b))
         await asyncio.sleep(0.1)
         assert (await find(a)).service_instances == frozenset()  # still answering
-
-
-async def test_a_late_joiner_gets_existing_rows_within_one_exchange():
-    p1, p2 = free_port(), free_port()
-    async with AsyncExitStack() as stack:
-        a = await stack.enter_async_context(node(p1, [p1], receptionist_resend_interval=10.0))
-        await eventually(lambda: all_up(a, 1), timeout=3)
-        Receptionist(a).ref.tell(Register(GREETER, await spawn(a, greeter, "svc")))
-        b = await stack.enter_async_context(node(p2, [p1], receptionist_resend_interval=10.0))
-        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
-        # the member-event push, not a resend
-        await eventually_async(lambda: instances_seen_on(b, 1), timeout=2)
 
 
 async def test_a_service_comes_back_when_its_node_is_reachable_again():

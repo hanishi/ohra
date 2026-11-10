@@ -1,7 +1,8 @@
 """Apache Pekko's Receptionist: actors register under a ServiceKey, others find or subscribe to the
-set of refs under it. One actor per system at ``/system/receptionist``, as LocalReceptionist.scala.
-On a cluster node it also replicates: each node owns one versioned row of bindings and pushes it to
-the other members, in place of ClusterReceptionist's distributed data."""
+set of refs under it. ``Receptionist(system)`` runs LocalReceptionist.scala at
+``/system/localReceptionist``, or on a cluster node the ClusterReceptionist at
+``/system/clusterReceptionist`` (``ohra.cluster.receptionist``), as
+ReceptionistImpl.scala picks."""
 
 from __future__ import annotations
 
@@ -10,19 +11,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .behavior import Behavior, Behaviors
-from .cluster.core import (
-    ClusterDomainEvent,
-    MemberEvent,
-    MemberRemoved,
-    ReachabilityEvent,
-    ReachableMember,
-    UnreachableMember,
-)
-from .cluster.core import Subscribe as ClusterSubscribe
 from .cell import watched_ref
 from .context import ActorContext
 from .ref import ActorRef
-from .remote import Address, RemoteRef, UniqueAddress
+from .remote import RemoteRef
 from .remote.serialization import remotable
 
 if TYPE_CHECKING:
@@ -100,17 +92,6 @@ class Subscribe[T]:
 type Command = Register[Any] | Deregister[Any] | Find[Any] | Subscribe[Any]
 
 
-@remotable
-@dataclass(frozen=True)
-class ReceptionistRow:
-    """One node's bindings (key id, ref), replacing the receiver's copy when ``version`` is
-    higher."""
-
-    owner: UniqueAddress
-    version: int
-    bindings: tuple[tuple[str, ActorRef[Any]], ...]
-
-
 @dataclass(frozen=True)
 class _ActorTerminated:
     """A watched actor stopped: it ends its registrations and every subscription made through it
@@ -119,11 +100,10 @@ class _ActorTerminated:
     ref: ActorRef[Any]
 
 
-@dataclass(frozen=True)
-class _ResendTick: ...
+type _Msg = Command | _ActorTerminated
 
 
-type _Msg = Command | _ActorTerminated | ReceptionistRow | ClusterDomainEvent | _ResendTick
+LOCAL_NAME = "localReceptionist"
 
 
 class Receptionist:
@@ -137,29 +117,33 @@ class Receptionist:
         if system.receptionist is None:
             self = object.__new__(cls)
             self.system = system
-            cell = system._system_root.spawn_child(_receptionist(system), "receptionist", None)  # pyright: ignore[reportPrivateUsage]
+            if system.cluster is None:
+                behavior, name = local_receptionist(system), LOCAL_NAME
+            else:  # not at module level: the cluster receptionist imports this module
+                from .cluster.receptionist.cluster_receptionist import NAME, cluster_receptionist
+
+                behavior, name = cluster_receptionist(system), NAME
+            cell = system._system_root.spawn_child(behavior, name, None)  # pyright: ignore[reportPrivateUsage]
             self.ref = cell.ref
             system.receptionist = self
         return system.receptionist
 
 
-def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
+def local_receptionist(system: ActorSystem[Any]) -> Behavior[Any]:
+    """LocalReceptionist.scala 47: the receptionist of a system that is not clustered."""
+
     @Behaviors.setup
     def setup(ctx: ActorContext[_Msg]) -> Behavior[_Msg]:
         services_per_actor: dict[ActorRef[Any], set[ServiceKey[Any]]] = {}
         registry: dict[ServiceKey[Any], set[ActorRef[Any]]] = {}
         subscribers: dict[ServiceKey[Any], set[ActorRef[Any]]] = {}
         subscriptions_per_actor: dict[ActorRef[Any], set[ServiceKey[Any]]] = {}
-        replication = _Replication(ctx, system) if system.cluster is not None else None
 
         def listing(
             key: ServiceKey[Any], services_were_added_or_removed: bool = True
         ) -> Listing[Any]:
             local = frozenset(registry.get(key, ()))
-            if replication is None:
-                return Listing(key, local, local, services_were_added_or_removed)
-            reachable, all_ = replication.remote_instances(key.id)
-            return Listing(key, local | reachable, local | all_, services_were_added_or_removed)
+            return Listing(key, local, local, services_were_added_or_removed)
 
         def notify(
             keys: Iterable[ServiceKey[Any]], services_were_added_or_removed: bool = True
@@ -175,8 +159,6 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
             if not keys:  # a service already gone: nothing to tell or publish
                 return
             notify(keys)
-            if replication is not None:
-                replication.publish_own_row(registry)
 
         def remove_binding(key: ServiceKey[Any], service: ActorRef[Any]) -> None:
             keys = services_per_actor.get(service)
@@ -254,11 +236,6 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
                         for key in service_keys:
                             remove_binding(key, service)
                     local_change(left)
-                case ReceptionistRow() | ClusterDomainEvent() | _ResendTick() if (
-                    replication is not None
-                ):
-                    for key_ids, added_or_removed in replication.on_message(msg, registry):
-                        notify((ServiceKey[Any](i) for i in key_ids), added_or_removed)
                 case _:
                     pass
             return Behaviors.same
@@ -266,116 +243,3 @@ def _receptionist(system: ActorSystem[Any]) -> Behavior[_Msg]:
         return on_message
 
     return setup
-
-
-class _Replication:
-    """The cluster part: rows by owner, pushed to the other members and pruned by membership
-    events."""
-
-    def __init__(self, ctx: ActorContext[_Msg], system: ActorSystem[Any]) -> None:
-        from .cluster.core import Cluster
-
-        self.ctx = ctx
-        self.system = system
-        self.cluster = Cluster(system)
-        self.self_address = self.cluster.self_unique_address
-        self.rows: dict[UniqueAddress, tuple[int, frozenset[tuple[str, ActorRef[Any]]]]] = {}
-        self.own_version = 0
-        self.own_row = ReceptionistRow(self.self_address, 0, ())
-        self.known: set[UniqueAddress] = set()
-        self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
-        self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, ReachabilityEvent))
-        ctx.timers.start_timer_with_fixed_delay(
-            "resend", _ResendTick(), self.cluster.settings.receptionist_resend_interval
-        )
-
-    # --- views -----------------------------------------------------------------------------------
-
-    def members(self) -> frozenset[UniqueAddress]:
-        return frozenset(m.unique_address for m in self.cluster.state.members)
-
-    def unreachable(self) -> frozenset[UniqueAddress]:
-        return frozenset(m.unique_address for m in self.cluster.state.unreachable)
-
-    def remote_instances(
-        self, key_id: str
-    ) -> tuple[frozenset[ActorRef[Any]], frozenset[ActorRef[Any]]]:
-        """(reachable, all) refs under the key from other members' rows."""
-        members, unreachable = self.members(), self.unreachable()
-        reachable: set[ActorRef[Any]] = set()
-        all_: set[ActorRef[Any]] = set()
-        for owner, (_, bindings) in self.rows.items():
-            if owner == self.self_address or owner not in members:
-                continue
-            for binding_key, ref in bindings:
-                if binding_key == key_id:
-                    all_.add(ref)
-                    if owner not in unreachable:
-                        reachable.add(ref)
-        return frozenset(reachable), frozenset(all_)
-
-    # --- sending ---------------------------------------------------------------------------------
-
-    def receptionist_at(self, address: Address) -> ActorRef[Any]:
-        return self.system.resolve(f"{address.root}/system/receptionist")
-
-    def publish_own_row(self, registry: dict[ServiceKey[Any], set[ActorRef[Any]]]) -> None:
-        self.own_version += 1
-        bindings = tuple((key.id, ref) for key, refs in registry.items() for ref in refs)
-        self.own_row = ReceptionistRow(self.self_address, self.own_version, bindings)
-        self.send_own_row_to(self.members() - self.unreachable())
-
-    def send_own_row_to(self, nodes: Iterable[UniqueAddress]) -> None:
-        for node in nodes:
-            if node != self.self_address:
-                self.receptionist_at(node.address).tell(self.own_row)
-
-    # --- receiving -------------------------------------------------------------------------------
-
-    def on_message(
-        self,
-        msg: ReceptionistRow | ClusterDomainEvent | _ResendTick,
-        registry: dict[ServiceKey[Any], set[ActorRef[Any]]],
-    ) -> list[tuple[set[str], bool]]:
-        """Returns the key ids whose listings changed, each with the services_were_added_or_removed
-        flag."""
-        match msg:
-            case ReceptionistRow(owner, version, bindings):
-                if owner == self.self_address:
-                    return []
-                stored = self.rows.get(owner)
-                if stored is not None and version <= stored[0]:
-                    return []
-                new = frozenset(bindings)
-                self.rows[owner] = (version, new)
-                if owner not in self.members():
-                    return []  # hidden until the node is a member
-                old: frozenset[tuple[str, ActorRef[Any]]] = (
-                    stored[1] if stored is not None else frozenset()
-                )
-                return [({k for k, _ in old ^ new}, True)]
-            case MemberRemoved(member=m):
-                self.known.discard(m.unique_address)
-                removed = self.rows.pop(m.unique_address, None)
-                return [({k for k, _ in removed[1]}, True)] if removed is not None else []
-            case MemberEvent(member=m):
-                node = m.unique_address
-                if node == self.self_address or node in self.known:
-                    return []
-                self.known.add(node)
-                self.send_own_row_to([node])
-                # a row that arrived before the member did becomes visible now
-                row = self.rows.get(node)
-                return (
-                    [({k for k, _ in row[1]}, True)]
-                    if row is not None and node in self.members()
-                    else []
-                )
-            case UnreachableMember(member=m) | ReachableMember(member=m):
-                row = self.rows.get(m.unique_address)
-                return [({k for k, _ in row[1]}, False)] if row is not None else []
-            case _ResendTick():
-                self.send_own_row_to(self.members() - self.unreachable())
-                return []
-            case _:
-                return []

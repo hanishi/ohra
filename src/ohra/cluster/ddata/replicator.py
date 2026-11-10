@@ -5,7 +5,8 @@ classic ``Replicator.scala`` function for function.
 The Replicator tracks the cluster's members, reads and writes at a level other than local
 through aggregator children, gossips digests to a random replica for anti-entropy, and prunes
 the data of removed nodes, as the "CRDT Garbage" section of Pekko's Replicator Scaladoc
-describes. Deltas and durable storage are not here.
+describes. Durable keys are loaded from the durable store before the Replicator serves.
+Deltas are not here.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 
@@ -43,7 +44,8 @@ from .envelope import (
 from .key import Key
 from .pruning_state import PruningInitialized, PruningPerformed
 from .replicated_data import RemovedNodePruning, ReplicatedData
-from .settings import ReplicatorSettings
+from .durable_store import DurableDataEnvelope, DurableStore
+from .settings import ReplicatorSettings, drop_wildcard, is_wildcard
 
 if TYPE_CHECKING:
     from logging import Logger
@@ -194,7 +196,8 @@ class Replicator:
 
     @dataclass(frozen=True)
     class StoreFailure[A: ReplicatedData]:
-        """Nothing produces it until durable storage comes."""
+        """The durable store could not store the entry, or, for a write to several nodes, the
+        store's failure and the other nodes' nacks left too few acks."""
 
         key: Key[A]
 
@@ -231,7 +234,10 @@ class Replicator:
         key: Key[A]
 
     type DeleteResponse[A: ReplicatedData] = (
-        Replicator.DeleteSuccess[A] | Replicator.DeleteFailure[A] | Replicator.DataDeleted[A]
+        Replicator.DeleteSuccess[A]
+        | Replicator.DeleteFailure[A]
+        | Replicator.DataDeleted[A]
+        | Replicator.StoreFailure[A]
     )
 
     @dataclass(frozen=True)
@@ -404,6 +410,11 @@ class _ClusterEvent:
     event: ClusterDomainEvent
 
 
+@dataclass(frozen=True)
+class _DurableStoreTerminated:
+    """The durable store stopped: Pekko's Terminated for it."""
+
+
 type _Msg = (
     Replicator.Command
     | Read
@@ -416,20 +427,15 @@ type _Msg = (
     | _RemovedNodePruningTick
     | _SubscriberTerminated
     | _ClusterEvent
+    | _DurableStoreTerminated
+    | DurableStore.LoadData
+    | DurableStore.LoadAllCompleted
 )
 
 
 def _age(m: Member) -> tuple[int, Address]:
     """Pekko's Member.ageOrdering, oldest first, as a sort key: Member.is_older_than."""
     return (m.up_number, m.address)
-
-
-def _is_wildcard(key_id: str) -> bool:
-    return key_id.endswith("*")
-
-
-def _drop_wildcard(key_id: str) -> str:
-    return key_id[:-1]
 
 
 def _add_binding[K](m: dict[K, set[ActorRef[Any]]], key: K, ref: ActorRef[Any]) -> None:
@@ -518,6 +524,12 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         status_count = 0
         status_tot_chunks = 0
 
+        # Pekko's durableStore, watched; its LoadAll is sent in preStart below
+        durable_store_ref: ActorRef[DurableStore.Command] | None = None
+        if settings.durable_keys:
+            durable_store_ref = ctx.spawn(settings.durable_store(), "durableStore")
+            ctx.watch_with(durable_store_ref, _DurableStoreTerminated())
+
         # Pekko's preStart. No ClusterShuttingDown in ohra: the node's own MemberRemoved stops
         # the Replicator. The subscription replays the current state, as InitialStateAsEvents.
         cluster_events = ctx.message_adapter(_ClusterEvent)
@@ -536,9 +548,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         ctx.timers.start_timer_with_fixed_delay("clock", _ClockTick(), settings.gossip_interval)
 
         expiry_keys = settings.expire_keys_after_inactivity
-        expiry_wildcards = {
-            _drop_wildcard(k): v for k, v in expiry_keys.items() if _is_wildcard(k)
-        }
+        expiry_wildcards = {drop_wildcard(k): v for k, v in expiry_keys.items() if is_wildcard(k)}
         expiry_enabled = bool(expiry_keys)
         # updated on the gossip tick, as Pekko's, which avoids reading the clock on every access
         current_used_timestamp: _Timestamp | None = now() if expiry_enabled else None
@@ -658,10 +668,38 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             ctx.log.debug("Received Update for key [%s].", key)
             set_data(key.id, envelope)
             update_used_timestamp(key.id, current_used_timestamp)
+            durable = settings.is_durable(key.id)
             if is_local_update(write_consistency):
-                reply_to.tell(Replicator.UpdateSuccess(key))
+                if durable_store_ref is not None and durable:
+                    durable_store_ref.tell(
+                        DurableStore.Store(
+                            key.id,
+                            DurableDataEnvelope(envelope),
+                            DurableStore.StoreReply(
+                                Replicator.UpdateSuccess(key),
+                                Replicator.StoreFailure(key),
+                                reply_to,
+                            ),
+                        )
+                    )
+                else:
+                    reply_to.tell(Replicator.UpdateSuccess(key))
             else:
-                start_write_aggregator(key, envelope, write_consistency, reply_to)
+                aggregator = start_write_aggregator(
+                    key, envelope, write_consistency, reply_to, durable
+                )
+                if durable_store_ref is not None and durable:
+                    durable_store_ref.tell(
+                        DurableStore.Store(
+                            key.id,
+                            DurableDataEnvelope(envelope),
+                            DurableStore.StoreReply(
+                                Replicator.UpdateSuccess(key),
+                                Replicator.StoreFailure(key),
+                                aggregator,
+                            ),
+                        )
+                    )
 
         def is_local_update(write_consistency: Replicator.WriteConsistency) -> bool:
             match write_consistency:
@@ -677,12 +715,13 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             envelope: DataEnvelope,
             consistency: Replicator.WriteConsistency,
             reply_to: ActorRef[Any],
-        ) -> None:
+            durable: bool,
+        ) -> ActorRef[Any]:
             """The WriteAggregator that receiveUpdate and receiveDelete start, without deltas."""
             exclude_exiting = isinstance(
                 consistency, Replicator.WriteMajorityPlus | Replicator.WriteAll
             )
-            ctx.spawn_anonymous(
+            aggregator = ctx.spawn_anonymous(
                 write_aggregator(
                     key,
                     envelope,
@@ -693,8 +732,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     replica,
                     self_unique_address,
                     shuffle=not settings.prefer_oldest,
+                    durable=durable,
                 )
             )
+            return cast("ActorRef[Any]", aggregator)  # the store's reply is not its Never
 
         def receive_read(key: str, reply_to: ActorRef[ReadResult]) -> None:
             send_to_replica(ctx.log, reply_to, ReadResult(get_data(key)), [key])
@@ -707,10 +748,21 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         def write_and_store(
             key: str, write_envelope: DataEnvelope, reply_to: ActorRef[WriteAck | WriteNack] | None
         ) -> None:
-            """Without durable storage, the store is left out: a reply, if any, goes at once."""
             new_envelope = write(key, write_envelope)
-            if reply_to is not None:
-                reply_to.tell(WriteAck() if new_envelope is not None else WriteNack())
+            if new_envelope is not None:
+                if durable_store_ref is not None and settings.is_durable(key):
+                    store_reply = (
+                        None
+                        if reply_to is None
+                        else DurableStore.StoreReply(WriteAck(), WriteNack(), reply_to)
+                    )
+                    durable_store_ref.tell(
+                        DurableStore.Store(key, DurableDataEnvelope(new_envelope), store_reply)
+                    )
+                elif reply_to is not None:
+                    reply_to.tell(WriteAck())
+            elif reply_to is not None:
+                reply_to.tell(WriteNack())
 
         def write(key: str, write_envelope: DataEnvelope) -> DataEnvelope | None:
             match get_data(key):
@@ -753,10 +805,33 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     set_data(key.id, DELETED_ENVELOPE)
                     update_used_timestamp(key.id, current_used_timestamp)
                     payload_size_aggregator.remove(key.id)
+                    durable = settings.is_durable(key.id)
+                    deleted = DurableDataEnvelope(DELETED_ENVELOPE)
+                    success = Replicator.DeleteSuccess(key)
+                    failure = Replicator.StoreFailure(key)
                     if is_local_update(consistency):
-                        reply_to.tell(Replicator.DeleteSuccess(key))
+                        if durable_store_ref is not None and durable:
+                            durable_store_ref.tell(
+                                DurableStore.Store(
+                                    key.id,
+                                    deleted,
+                                    DurableStore.StoreReply(success, failure, reply_to),
+                                )
+                            )
+                        else:
+                            reply_to.tell(success)
                     else:
-                        start_write_aggregator(key, DELETED_ENVELOPE, consistency, reply_to)
+                        aggregator = start_write_aggregator(
+                            key, DELETED_ENVELOPE, consistency, reply_to, durable
+                        )
+                        if durable_store_ref is not None and durable:
+                            durable_store_ref.tell(
+                                DurableStore.Store(
+                                    key.id,
+                                    deleted,
+                                    DurableStore.StoreReply(success, failure, aggregator),
+                                )
+                            )
 
         def set_data(key: str, envelope: DataEnvelope) -> DataEnvelope:
             if has_subscriber(key) and key not in changed:
@@ -827,7 +902,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         (
                             r.with_id(key_id)
                             for k, r in subscription_keys.items()
-                            if _is_wildcard(k) and key_id.startswith(_drop_wildcard(k))
+                            if is_wildcard(k) and key_id.startswith(drop_wildcard(k))
                         ),
                         None,
                     )
@@ -860,8 +935,8 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             # Changed goes to new subscribers even when the key has not changed, i.e. the current
             # value. Expired is not sent to new subscribers as the first event.
             for key, subs in new_subscribers.items():
-                if _is_wildcard(key):
-                    prefix = _drop_wildcard(key)
+                if is_wildcard(key):
+                    prefix = drop_wildcard(key)
                     for matching_key in [k for k in data_entries if k.startswith(prefix)]:
                         notify(matching_key, subs, send_expired_if_missing=False)
                     for s in subs:
@@ -1092,10 +1167,15 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         payload_size_aggregator.remove(key)
                         changed.add(key)  # notify subscribers, later
                         del data_entries[key]
+                    durable_expired_keys = frozenset(
+                        k for k in expired_keys if settings.is_durable(k)
+                    )
+                    if durable_store_ref is not None and durable_expired_keys:
+                        durable_store_ref.tell(DurableStore.Expire(durable_expired_keys))
 
         def receive_unsubscribe(key: Key[Any], subscriber: ActorRef[Any]) -> None:
-            if _is_wildcard(key.id):
-                _remove_binding(wildcard_subscribers, _drop_wildcard(key.id), subscriber)
+            if is_wildcard(key.id):
+                _remove_binding(wildcard_subscribers, drop_wildcard(key.id), subscriber)
             else:
                 _remove_binding(subscribers, key.id, subscriber)
             _remove_binding(new_subscribers, key.id, subscriber)
@@ -1263,6 +1343,9 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             # perform pruning when all seen Init
             all_ = all_nodes()
             pruning_performed = PruningPerformed(now() + settings.pruning_marker_time_to_live)
+            durable_pruning_performed = PruningPerformed(
+                now() + settings.durable_pruning_marker_time_to_live
+            )
             for key, (envelope, _, _) in list(data_entries.items()):
                 if not isinstance(envelope.data, RemovedNodePruning):
                     continue  # deleted, or pruning not needed
@@ -1271,7 +1354,11 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                         case PruningInitialized(owner, seen) if owner == self_unique_address and (
                             not all_ or all(n.address in seen for n in all_)
                         ):
-                            new_envelope = envelope.prune(removed, pruning_performed)
+                            durable = durable_store_ref is not None and settings.is_durable(key)
+                            new_envelope = envelope.prune(
+                                removed,
+                                durable_pruning_performed if durable else pruning_performed,
+                            )
                             ctx.log.debug(
                                 "Perform pruning of [%s] from [%s] to [%s]",
                                 key,
@@ -1279,6 +1366,14 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                                 self_unique_address,
                             )
                             set_data(key, new_envelope)
+                            if durable_store_ref is not None and (
+                                new_envelope.data is not envelope.data and durable
+                            ):
+                                durable_store_ref.tell(
+                                    DurableStore.Store(
+                                        key, DurableDataEnvelope(new_envelope), None
+                                    )
+                                )
                         case _:
                             pass
 
@@ -1303,7 +1398,6 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         def receive_get_replica_count(reply_to: ActorRef[Replicator.ReplicaCount]) -> None:
             reply_to.tell(Replicator.ReplicaCount(len(nodes) + 1))  # nodes excludes self
 
-        @Behaviors.receive
         def normal_receive(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
             match msg:
                 case Read(_, from_node) | Write(_, _, from_node) if (
@@ -1367,6 +1461,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     receive_unsubscribe(key, subscriber)
                 case _SubscriberTerminated(ref):
                     receive_terminated(ref)
+                case _DurableStoreTerminated():
+                    return receive_durable_store_terminated()
+                case DurableStore.LoadData() | DurableStore.LoadAllCompleted():
+                    pass  # only the load phase asks for them
                 case _ClusterEvent(MemberJoined(member=m)):
                     receive_member_joining(m)
                 case _ClusterEvent(MemberWeaklyUp(member=m)):
@@ -1387,12 +1485,83 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     pass  # only member and reachability events are subscribed
             return Behaviors.same
 
+        def receive_durable_store_terminated() -> Behavior[_Msg]:
+            ctx.log.error("Stopping distributed-data Replicator because durable store terminated")
+            return Behaviors.stopped()
+
         def on_signal(_ctx: ActorContext[_Msg], sig: Signal) -> Behavior[_Msg]:
             # Pekko's postStop, which its preRestart also runs
             if sig is PostStop or sig is PreRestart:
                 cluster.subscriptions.tell(Unsubscribe(cluster_events))
             return Behaviors.same
 
-        return normal_receive.receive_signal(on_signal)
+        normal = Behaviors.receive(normal_receive).receive_signal(on_signal)
+        if durable_store_ref is None:
+            return normal
+
+        # Pekko's load: commands wait in an internal buffer until the store has loaded
+        start_time = time.monotonic()
+        count = 0
+        stash: list[_Msg] = []
+
+        def load(ctx: ActorContext[_Msg], msg: _Msg) -> Behavior[_Msg]:
+            nonlocal count
+            match msg:
+                case DurableStore.LoadData(data):
+                    count += len(data)
+                    for key, d in data.items():
+                        new_envelope = write(key, d.data_envelope)
+                        if new_envelope is not None and new_envelope is not d.data_envelope:
+                            durable_store_ref.tell(
+                                DurableStore.Store(key, DurableDataEnvelope(new_envelope), None)
+                            )
+                case DurableStore.LoadAllCompleted():
+                    ctx.log.debug(
+                        "Loading %s entries from durable store took %s ms, stashed %s",
+                        count,
+                        int((time.monotonic() - start_time) * 1000),
+                        len(stash),
+                    )
+                    replay, stash[:] = stash[:], []
+                    for stashed in replay:
+                        result = normal_receive(ctx, stashed)
+                        if result is not Behaviors.same:
+                            return result  # a stop takes effect at once
+                    ctx.self.tell(Replicator.FlushChanges())
+                    return normal
+                case Replicator.GetReplicaCount(reply_to):
+                    # 0 until durable data has been loaded, used by test
+                    reply_to.tell(Replicator.ReplicaCount(0))
+                case (
+                    _RemovedNodePruningTick()
+                    | Replicator.FlushChanges()
+                    | _GossipTick()
+                    | _ClockTick()
+                ):
+                    # ignore scheduled ticks when loading durable data; Pekko stashes the clock
+                    # tick, ohra drops it (the next tick after the load covers the time)
+                    pass
+                case Read() | Write() | Status() | Gossip():
+                    # ignore gossip and replication when loading durable data
+                    ctx.log.debug(
+                        "ignoring message [%s] when loading durable data", type(msg).__name__
+                    )
+                case _DurableStoreTerminated():
+                    return receive_durable_store_terminated()
+                case _ClusterEvent():
+                    result = normal_receive(ctx, msg)
+                    if result is not Behaviors.same:
+                        return result  # the node's own MemberRemoved stops the Replicator
+                case _:
+                    stash.append(msg)
+            return Behaviors.same
+
+        # Pekko's preStart sends LoadAll once the store exists
+        durable_store_ref.tell(
+            DurableStore.LoadAll(
+                cast("ActorRef[DurableStore.LoadData | DurableStore.LoadAllCompleted]", ctx.self)
+            )
+        )
+        return Behaviors.receive(load).receive_signal(on_signal)
 
     return setup

@@ -35,6 +35,8 @@ from .cluster.ddata import (
     Clock,
     DeltaReplicatedData,
     DistributedData,
+    DurableDataEnvelope,
+    DurableStore,
     Flag,
     FlagKey,
     GCounter,
@@ -69,6 +71,7 @@ from .cluster.ddata import (
     UnspecificKey,
     VersionVector,
     default_clock,
+    sqlite_durable_store,
     reverse_clock,
 )
 from .cluster.gossip import Member
@@ -329,6 +332,8 @@ __all__ = [
     "RequiresCausalDeliveryOfDeltas",
     "RemovedNodePruning",
     "DistributedData",
+    "DurableDataEnvelope",
+    "DurableStore",
     "Replicator",
     "ReplicatorMessageAdapter",
     "ReplicatorSettings",
@@ -357,6 +362,7 @@ __all__ = [
     "FlagKey",
     "Clock",
     "default_clock",
+    "sqlite_durable_store",
     "reverse_clock",
     "LWWRegister",
     "LWWRegisterKey",

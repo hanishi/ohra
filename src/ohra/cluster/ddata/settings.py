@@ -1,14 +1,25 @@
 """Pekko's ReplicatorSettings with the defaults of ``pekko.cluster.distributed-data``, in seconds,
-minus roles and durable keys (which come with the features that use them)."""
+minus roles (which come with the feature that uses them)."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ...behavior import Behavior
+from .durable_store import DurableStore, sqlite_durable_store
+
 if TYPE_CHECKING:
     from ...system import ActorSystem
+
+
+def is_wildcard(key_id: str) -> bool:
+    return key_id.endswith("*")
+
+
+def drop_wildcard(key_id: str) -> str:
+    return key_id[:-1]
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,15 @@ class ReplicatorSettings:
     pruning_marker_time_to_live: float = 6 * 3600.0
     """How long a performed pruning marker is kept, so that a stale write cannot bring the
     removed node's data back."""
+    durable_keys: frozenset[str] = frozenset()
+    """Keys (or ``prefix*`` patterns, ``"*"`` for all) whose data is kept in the durable store
+    and loaded back when the Replicator starts."""
+    durable_pruning_marker_time_to_live: float = 10 * 86400.0
+    """How long a performed pruning marker of a durable key is kept, as
+    ``pruning_marker_time_to_live`` for the others."""
+    durable_store: Callable[[], Behavior[DurableStore.Command]] = sqlite_durable_store
+    """The durable store's behavior, spawned as the Replicator's child when there are durable
+    keys; Pekko's ``durable.store-actor-class``."""
 
     def __post_init__(self) -> None:
         for name in ("gossip_interval", "notify_subscribers_interval", "max_delta_elements"):
@@ -46,9 +66,19 @@ class ReplicatorSettings:
         for key, seconds in self.expire_keys_after_inactivity.items():
             if seconds < 0:
                 raise ValueError(f"expire_keys_after_inactivity[{key!r}] must be >= 0")
-        for name in ("max_pruning_dissemination", "pruning_marker_time_to_live"):
+        for name in (
+            "max_pruning_dissemination",
+            "pruning_marker_time_to_live",
+            "durable_pruning_marker_time_to_live",
+        ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
+
+    def is_durable(self, key: str) -> bool:
+        """Pekko's isDurable: an exact key, or a ``prefix*`` entry the key starts with."""
+        return key in self.durable_keys or any(
+            key.startswith(drop_wildcard(k)) for k in self.durable_keys if is_wildcard(k)
+        )
 
     @staticmethod
     def name_for(system: ActorSystem[Any], prefix: str | None) -> str:

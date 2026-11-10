@@ -4,7 +4,9 @@ involved; the registry changes come back through the Replicator, so ``sync`` let
 interval pass."""
 
 import asyncio
+import pytest
 import time
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, AsyncExitStack
 from dataclasses import dataclass, field
@@ -329,7 +331,7 @@ async def test_prune_tombstones_tick_drops_expired_tombstones():
         await node.listed(KEY, {a})  # the tombstone is pruned: this one stays
 
 
-async def test_cluster_shutting_down_stops_the_receptionist():
+async def test_a_removed_self_member_stops_the_receptionist():
     port = free_port()
     system = ActorSystem(
         Behaviors.ignore,
@@ -425,3 +427,71 @@ def _has(node: Node, entry: Entry) -> Callable[[], Any]:
         return entry in (await node.ddata(KEY)).entries_for(KEY)
 
     return cond
+
+
+async def test_cluster_shutting_down_alone_stops_the_receptionist(
+    caplog: pytest.LogCaptureFixture,
+):
+    # a node that never joined has no MemberRemoved(self) to come: only ClusterShuttingDown
+    caplog.set_level(logging.DEBUG)
+    system = ActorSystem(
+        Behaviors.ignore,
+        "r",
+        address=("127.0.0.1", free_port()),
+        cluster=ClusterSettings(
+            seed_nodes=(Address("r", "127.0.0.1", free_port()),), **FAST, **settings_for()
+        ),
+        shutdown=FAST_SHUTDOWN,
+    )
+    async with system:
+        ref = system._system_root.spawn_child(cluster_receptionist(system), NAME, None).ref  # pyright: ignore[reportPrivateUsage]
+        await Node(system, ref, None).find()
+        assert not all_up(system, 1)
+    # only the NodeRemoved(self) branch logs this
+    assert any("terminated/removed" in r.getMessage() for r in caplog.records)
+
+
+async def test_an_actor_that_is_service_and_subscriber_leaves_everything_when_it_stops():
+    async with manual_node() as node:
+        seen: TestProbe[Listing[str]] = node.probe()
+        x = node.spawn(forwarder(seen.ref), "x")
+        node.receptionist.tell(Subscribe(KEY, x))
+        node.receptionist.tell(Register(KEY, x))
+        node.receptionist.tell(Register(OTHER, x))
+        await node.listed(KEY, {x})
+        await node.listed(OTHER, {x})
+        x.tell(Stop())
+        await node.listed(KEY, set())
+        await node.listed(OTHER, set())
+        assert not (await node.ddata(KEY)).entries_for(KEY)
+        assert not (await node.ddata(OTHER)).entries_for(OTHER)
+        dead: TestProbe[DeadLetter] = node.probe()
+        node.system.event_stream.tell(EventStream.Subscribe(DeadLetter, dead.ref))
+        b = node.spawn(service, "b")
+        node.receptionist.tell(Register(KEY, b))
+        await node.listed(KEY, {b})
+        for _ in range(5):
+            await node.sync()
+        await dead.expect_no_message(0)  # the subscription went with the actor
+
+
+async def test_a_subscriber_that_deregisters_its_last_service_stays_watched():
+    async with manual_node() as node:
+        dead: TestProbe[DeadLetter] = node.probe()
+        node.system.event_stream.tell(EventStream.Subscribe(DeadLetter, dead.ref))
+        seen: TestProbe[Listing[str]] = node.probe()
+        x = node.spawn(forwarder(seen.ref), "x")
+        node.receptionist.tell(Subscribe(KEY, x))
+        node.receptionist.tell(Register(KEY, x))
+        await node.listed(KEY, {x})
+        node.receptionist.tell(Deregister(KEY, x))
+        await node.listed(KEY, set())
+        x.tell(Stop())
+        for _ in range(3):
+            await node.sync()
+        b = node.spawn(service, "b")
+        node.receptionist.tell(Register(KEY, b))
+        await node.listed(KEY, {b})
+        for _ in range(5):
+            await node.sync()
+        await dead.expect_no_message(0)  # still watched: its subscription was removed

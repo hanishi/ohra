@@ -172,8 +172,14 @@ async def test_receptionist_is_one_per_system_and_lives_under_system():
     async with ActorSystem(Behaviors.ignore, "r") as system:
         receptionist = Receptionist(system)
         assert Receptionist(system) is receptionist
-        assert receptionist.ref.path == "ohra://r/system/receptionist"
+        assert receptionist.ref.path == "ohra://r/system/localReceptionist"
         assert system.resolve(receptionist.ref.path) is receptionist.ref
+
+
+async def test_the_local_receptionist_runs_at_system_local_receptionist():
+    async with ActorSystem(Behaviors.ignore, "r") as system:
+        assert Receptionist(system).ref.path == "ohra://r/system/localReceptionist"
+        assert "receptionist" not in system._system_root.children  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_plain_system_still_stops_cleanly():
@@ -188,7 +194,7 @@ async def test_receptionist_exists_from_the_start():
     async with ActorSystem(Behaviors.ignore, "r") as system:
         # created with the system, as Pekko's library extension
         assert system.receptionist is not None
-        assert system.resolve("ohra://r/system/receptionist") is Receptionist(system).ref
+        assert system.resolve("ohra://r/system/localReceptionist") is Receptionist(system).ref
 
 
 async def test_a_subscription_through_a_message_adapter_ends_with_its_actor(

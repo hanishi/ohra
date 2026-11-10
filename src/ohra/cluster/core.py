@@ -38,6 +38,7 @@ from .gossip import (
     vclock_name,
 )
 from .ddata.settings import ReplicatorSettings
+from .receptionist.settings import ClusterReceptionistSettings
 from .vector_clock import VectorClock
 
 if TYPE_CHECKING:
@@ -71,9 +72,6 @@ class ClusterSettings:
     reduce_gossip_different_view_probability: int = 400
     max_gossips_before_shutting_down_myself: int = 5
     max_ticks_before_shutting_down_myself: int = 4
-    receptionist_resend_interval: float = 1.0
-    """How often a node re-sends its receptionist row to the others (anti-entropy); not a Pekko
-    setting."""
     downing: SplitBrainResolverSettings | None = None
     """The split-brain resolver; None leaves downing manual, as Pekko without a downing
     provider."""
@@ -82,6 +80,8 @@ class ClusterSettings:
     effective_down_removal_margin."""
     distributed_data: ReplicatorSettings = field(default_factory=ReplicatorSettings)
     """Pekko's pekko.cluster.distributed-data settings, for the Replicator."""
+    receptionist: ClusterReceptionistSettings = field(default_factory=ClusterReceptionistSettings)
+    """Pekko's pekko.cluster.typed.receptionist settings."""
 
     def __post_init__(self) -> None:
         positive = (
@@ -90,7 +90,7 @@ class ClusterSettings:
             "heartbeat_expected_response_after", "failure_detector_threshold",
             "failure_detector_min_std_deviation", "prune_gossip_tombstones_after",
             "monitored_by_nr_of_members", "failure_detector_max_sample_size", "min_nr_of_members",
-            "reduce_gossip_different_view_probability", "receptionist_resend_interval",
+            "reduce_gossip_different_view_probability",
         )  # fmt: skip
         non_negative = (
             "periodic_tasks_initial_delay", "acceptable_heartbeat_pause",
@@ -146,6 +146,12 @@ type ClusterCommand = Join | JoinSeedNodes | Leave | Down
 
 class ClusterDomainEvent:
     """Base of everything a subscriber can receive."""
+
+
+@dataclass(frozen=True)
+class ClusterShuttingDown(ClusterDomainEvent):
+    """The cluster is shutting down (ClusterEvent.scala:366); published before the final
+    removals."""
 
 
 @dataclass(frozen=True)
@@ -907,7 +913,9 @@ class _CoreDaemon:
 
     def _on_signal(self, _ctx: ActorContext[_Msg], signal: Signal) -> Behavior[_Msg]:
         if signal is PostStop:
-            # ClusterDomainEventPublisher.postStop: everyone is Removed now
+            # ClusterDomainEventPublisher.postStop (ClusterEvent.scala:664-668):
+            # ClusterShuttingDown, then everyone is Removed
+            self.publish(ClusterShuttingDown())
             self.publish_changes(self.empty_state)
             if not self.cluster.self_exiting.done():
                 # a stopped daemon never blocks the cluster-exiting phase

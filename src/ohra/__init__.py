@@ -6,6 +6,7 @@ from .cluster.core import (
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
+    ClusterShuttingDown,
     CurrentClusterState,
     Down,
     GetCurrentState,
@@ -96,6 +97,7 @@ from .cluster.sbr import (
     SplitBrainResolverSettings,
     StaticQuorum,
 )
+from .cluster.receptionist import ClusterReceptionistSettings
 from .cluster.singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .context import ActorContext
 from .discovery import ConfigServiceDiscovery, Lookup, Resolved, ResolvedTarget, ServiceDiscovery
@@ -199,7 +201,9 @@ __all__ = [
     "ClusterDomainEvent",
     "ClusterDowningReason",
     "ClusterLeavingReason",
+    "ClusterReceptionistSettings",
     "ClusterSettings",
+    "ClusterShuttingDown",
     "ClusterSharding",
     "ClusterShardingSettings",
     "ClusterSingleton",

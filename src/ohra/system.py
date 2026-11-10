@@ -114,7 +114,7 @@ class ActorSystem[T](ActorRef[T]):
             self.cluster = _Cluster._start(self, cluster)  # pyright: ignore[reportPrivateUsage]
         from .receptionist import Receptionist as _Receptionist
 
-        # after the cluster, so a cluster node's receptionist replicates from the start
+        # after the cluster, which decides between the local and the cluster receptionist
         _Receptionist(self)
         from .management import Management as _Management
         from .management import ManagementSettings as _PMSettings

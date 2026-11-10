@@ -6,6 +6,7 @@ from .core import (
     Cluster,
     ClusterDomainEvent,
     ClusterSettings,
+    ClusterShuttingDown,
     CurrentClusterState,
     Down,
     GetCurrentState,
@@ -33,13 +34,16 @@ from .core import (
 )
 from .ddata import DistributedData, Replicator, ReplicatorMessageAdapter, ReplicatorSettings
 from .gossip import Member, MemberStatus
+from .receptionist import ClusterReceptionistSettings
 from .sbr import DownAll, KeepMajority, KeepOldest, SplitBrainResolverSettings, StaticQuorum
 from .singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 
 __all__ = [
     "Cluster",
     "ClusterDomainEvent",
+    "ClusterReceptionistSettings",
     "ClusterSettings",
+    "ClusterShuttingDown",
     "ClusterSingleton",
     "ClusterSingletonSettings",
     "CurrentClusterState",

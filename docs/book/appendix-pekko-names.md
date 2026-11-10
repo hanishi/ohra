@@ -36,6 +36,10 @@
 | `MemberStatus.Joining / WeaklyUp / Up / Leaving / Exiting / Down / Removed` | `member.status` is the string `"joining"`, `"weakly_up"`, ... |
 | `Receptionist(system).ref ! Register(key, ref)`, `Deregister`, `Find(key, replyTo)` | `Receptionist(system).ref.tell(Register(key, ref))`, same names; `Registered` / `Deregistered` replies when `reply_to` is given |
 | `ServiceKey[T]("id")` | `ServiceKey[T]("id")` |
+| `ClusterReceptionist`, `LocalReceptionist` | `/system/clusterReceptionist` on a cluster node and `/system/localReceptionist` on any other system; `Receptionist(system).ref` reaches the one that runs |
+| `ClusterReceptionistSettings`, `pekko.cluster.typed.receptionist.*` | `ClusterReceptionistSettings(write_consistency, pruning_interval, prune_removed_older_than, distributed_key_count, replicator_settings)`, passed as `ClusterSettings(receptionist=...)` |
+| `ClusterEvent.ClusterShuttingDown` | `ClusterShuttingDown`, in `ohra` and `ohra.cluster` |
+| `ClusterReceptionist.Entry(ref, systemUid)` | `Entry(ref, system_uid, created_timestamp)` in `ohra.cluster.receptionist.registry` |
 | `Receptionist.Subscribe(key, subscriber)` | `ohra.receptionist.Subscribe(key, subscriber)`; the top-level `Subscribe` is the cluster's |
 | `Listing.serviceInstances(key)` / `allServiceInstances(key)` / `servicesWereAddedOrRemoved` | `listing.service_instances` / `all_service_instances` / `services_were_added_or_removed`, fields of `Listing[T]` |
 | `ClusterSingleton(system).init(SingletonActor(behavior, "name"))`, `withStopMessage`, `withSettings` | same, `with_stop_message`, `with_settings`; returns the proxy ref |

@@ -567,7 +567,7 @@ CRDTs hold state, not commands. A value that has to be decided once, such as whi
 
 ### Not here yet
 
-Later parts are planned to move the receptionist ([chapter 2](02-actor-system.md)) onto an `ORMultiMap`, and the sharding coordinator's state ([chapter 7](07-sharding.md)) onto Distributed Data, as Pekko keeps them.
+Later parts are planned to move the sharding coordinator's state ([chapter 7](07-sharding.md)) onto Distributed Data, as Pekko keeps it. The receptionist ([chapter 2](02-actor-system.md#receptionist)) already runs on it, with a Replicator of its own.
 
 ---
 

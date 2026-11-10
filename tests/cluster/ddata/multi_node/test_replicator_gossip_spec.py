@@ -10,8 +10,8 @@ Mapping:
 
 - Pekko's ``distributed-data`` config is kept, but for the gossip interval: ``max-delta-elements =
   400`` and ``log-data-size-exceeding = 2000``. Its gossip interval of one second is 0.1 s here,
-  with a notify interval of 0.05 s. ``delta-crdt.enabled = off`` has nothing to turn off: deltas
-  are not ported, so this spec's "only gossip" is how the Replicator always runs.
+  with a notify interval of 0.05 s. ``delta-crdt.enabled = off`` is ``delta_crdt_enabled=False``:
+  this spec's "only gossip" (a DeltaPropagation of 515 entries would be over the frame limit).
 - Pekko lowers Artery's ``maximum-frame-size`` to 50000 bytes, so that the 515 entries (the 15
   large ones alone are over 60000 bytes) have to be split over many Gossip messages. ohra's frame
   limit is the module constant ``MAX_FRAME``, which no setting lowers, so the test patches it to
@@ -60,6 +60,7 @@ config.common_config(
             notify_subscribers_interval=0.05,
             max_delta_elements=400,
             log_data_size_exceeding=2000,
+            delta_crdt_enabled=False,
         ),
     ),
     shutdown=FAST_SHUTDOWN,

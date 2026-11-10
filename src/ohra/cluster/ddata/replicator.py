@@ -6,7 +6,8 @@ The Replicator tracks the cluster's members, reads and writes at a level other t
 through aggregator children, gossips digests to a random replica for anti-entropy, and prunes
 the data of removed nodes, as the "CRDT Garbage" section of Pekko's Replicator Scaladoc
 describes. Durable keys are loaded from the durable store before the Replicator serves.
-Deltas are not here.
+Deltas are propagated on a tick and applied in sequence, as the "Delta-CRDT" section of the
+Scaladoc describes.
 The commands and responses stay on one node, so they are not ``@remotable``.
 """
 
@@ -27,9 +28,14 @@ from ...cell import watched_ref
 from ...remote.remoting import MAX_FRAME
 from ...remote.serialization import Serialization, canonical_json
 from ...signals import PostStop, PreRestart, Signal
+from .delta_propagation_selector import DeltaPropagationSelector
 from .envelope import (
     DELETED_ENVELOPE,
+    NO_DELTA_PLACEHOLDER,
     DataEnvelope,
+    Delta,
+    DeltaNack,
+    DeltaPropagation,
     Gossip,
     Read,
     ReadRepair,
@@ -43,7 +49,14 @@ from .envelope import (
 )
 from .key import Key
 from .pruning_state import PruningInitialized, PruningPerformed
-from .replicated_data import RemovedNodePruning, ReplicatedData
+from .replicated_data import (
+    DeltaReplicatedData,
+    RemovedNodePruning,
+    ReplicatedData,
+    ReplicatedDelta,
+    RequiresCausalDeliveryOfDeltas,
+)
+from .version_vector import VersionVector
 from .durable_store import DurableDataEnvelope, DurableStore
 from .settings import ReplicatorSettings, drop_wildcard, is_wildcard
 
@@ -304,6 +317,13 @@ class Replicator:
 
         reply_to: ActorRef[Replicator.GetKeyIdsResult]
 
+    @dataclass(frozen=True)
+    class TestFullStateGossip:
+        """Internal, for tests: Pekko's ``Replicator.Internal.TestFullStateGossip``. The delta
+        specs turn full-state gossip off with it."""
+
+        enabled: bool
+
     type Command = (
         Replicator.Get[Any]
         | Replicator.Update[Any]
@@ -389,6 +409,11 @@ class _GossipTick:
 
 
 @dataclass(frozen=True)
+class _DeltaPropagationTick:
+    pass
+
+
+@dataclass(frozen=True)
 class _ClockTick:
     pass
 
@@ -425,6 +450,9 @@ type _Msg = (
     | Status
     | Gossip
     | _GossipTick
+    | _DeltaPropagationTick
+    | DeltaPropagation
+    | Replicator.TestFullStateGossip
     | _ClockTick
     | _RemovedNodePruningTick
     | _SubscriberTerminated
@@ -548,6 +576,16 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 "pruning", _RemovedNodePruningTick(), settings.pruning_interval
             )
         ctx.timers.start_timer_with_fixed_delay("clock", _ClockTick(), settings.gossip_interval)
+        delta_crdt_enabled = settings.delta_crdt_enabled
+        if delta_crdt_enabled:
+            # Derive the deltaPropagationInterval from the gossipInterval.
+            # Normally the delta is propagated to all nodes within the gossip tick, so that
+            # full state gossip is not needed.
+            delta_propagation_interval = max(settings.gossip_interval / 5, 0.2)
+            ctx.timers.start_timer_with_fixed_delay(
+                "deltaPropagation", _DeltaPropagationTick(), delta_propagation_interval
+            )
+        full_state_gossip_enabled = True
 
         expiry_keys = settings.expire_keys_after_inactivity
         expiry_wildcards = {drop_wildcard(k): v for k, v in expiry_keys.items() if is_wildcard(k)}
@@ -592,6 +630,31 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         def replica(node: UniqueAddress) -> ActorRef[Any]:
             """The Replicator on ``node``: this one's path at that node's address."""
             return ctx.system.resolve(node.root + self_path)
+
+        def create_delta_propagation(
+            deltas: dict[str, tuple[ReplicatedData, int, int]],
+        ) -> DeltaPropagation:
+            # Important to include the pruning state in the deltas. For example if the delta is
+            # based on an entry that has been pruned but that has not yet been performed on the
+            # target node.
+            result: dict[str, Delta] = {}
+            for key, (d, from_seq_nr, to_seq_nr) in deltas.items():
+                if d is not NO_DELTA_PLACEHOLDER:
+                    envelope = get_data(key)
+                    result[key] = Delta(
+                        DataEnvelope(d) if envelope is None else replace(envelope, data=d),
+                        from_seq_nr,
+                        to_seq_nr,
+                    )
+            return DeltaPropagation(self_unique_address, False, result, None)
+
+        delta_propagation_selector = DeltaPropagationSelector(
+            gossip_interval_divisor=5,
+            # Replicator.allNodes is sorted
+            all_nodes=lambda: sorted(all_nodes() - unreachable),
+            max_delta_size=settings.max_delta_size,
+            create_delta_propagation=create_delta_propagation,
+        )
 
         def receive_get(
             key: Key[Any],
@@ -651,14 +714,37 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             reply_to: ActorRef[Replicator.UpdateResponse[Any]],
         ) -> None:
             local_value = get_data(key.id)
+
+            def as_delta_data(d: Any) -> DeltaReplicatedData[Any] | None:
+                if delta_crdt_enabled and isinstance(d, DeltaReplicatedData):
+                    return cast("DeltaReplicatedData[Any]", d)
+                return None
+
+            def delta_or_placeholder(d: DeltaReplicatedData[Any]) -> ReplicatedData:
+                return NO_DELTA_PLACEHOLDER if d.delta is None else d.delta
+
+            # the delta of this update, None when the data is not a DeltaReplicatedData
+            delta: ReplicatedData | None = None
             try:
                 match local_value:
                     case DataEnvelope() as envelope if envelope.is_deleted:
                         pass
                     case DataEnvelope(existing) as envelope:
-                        envelope = envelope.merge(DataEnvelope(modify(existing)), now())
+                        modified = modify(existing)
+                        if (delta_data := as_delta_data(modified)) is not None:
+                            envelope = envelope.merge(
+                                DataEnvelope(delta_data.reset_delta()), now()
+                            )
+                            delta = delta_or_placeholder(delta_data)
+                        else:
+                            envelope = envelope.merge(DataEnvelope(modified), now())
                     case None:
-                        envelope = DataEnvelope(modify(initial))
+                        modified = modify(initial)
+                        if (delta_data := as_delta_data(modified)) is not None:
+                            envelope = DataEnvelope(delta_data.reset_delta())
+                            delta = delta_or_placeholder(delta_data)
+                        else:
+                            envelope = DataEnvelope(modified)
             except Exception as e:  # Pekko's Try: NonFatal
                 ctx.log.debug("Received Update for key [%s], failed: %s", key, e)
                 reply_to.tell(Replicator.ModifyFailure(key, f"Update failed: {e}", e))
@@ -668,7 +754,15 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 reply_to.tell(Replicator.UpdateDataDeleted(key))
                 return
             ctx.log.debug("Received Update for key [%s].", key)
-            set_data(key.id, envelope)
+
+            # handle the delta
+            if delta is not None:
+                delta_propagation_selector.update(key.id, delta)
+
+            # note that it's important to do delta_propagation_selector.update before set_data,
+            # so that the latest delta version is used
+            new_envelope = set_data(key.id, envelope)
+
             update_used_timestamp(key.id, current_used_timestamp)
             durable = settings.is_durable(key.id)
             if is_local_update(write_consistency):
@@ -676,7 +770,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     durable_store_ref.tell(
                         DurableStore.Store(
                             key.id,
-                            DurableDataEnvelope(envelope),
+                            DurableDataEnvelope(new_envelope),
                             DurableStore.StoreReply(
                                 Replicator.UpdateSuccess(key),
                                 Replicator.StoreFailure(key),
@@ -687,14 +781,32 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 else:
                     reply_to.tell(Replicator.UpdateSuccess(key))
             else:
+                write_delta: Delta | None
+                if delta is NO_DELTA_PLACEHOLDER:
+                    write_delta = None
+                elif isinstance(delta, RequiresCausalDeliveryOfDeltas):
+                    v = delta_propagation_selector.current_version(key.id)
+                    write_delta = Delta(replace(new_envelope, data=delta), v, v)
+                else:
+                    write_delta = None
+                # Pekko's (writeEnvelope, writeDelta) pair; the aggregator takes the full
+                # envelope until it sends deltas, so only write_delta is read here (a non-causal
+                # delta's writeEnvelope is newEnvelope.copy(data = d) in Pekko)
+                # When RequiresCausalDeliveryOfDeltas use deterministic order to so that sequence
+                # numbers of subsequent updates are in sync on the destination nodes.
+                # The order is also kept when prefer-oldest is enabled.
+                shuffle = not (
+                    settings.prefer_oldest
+                    or (write_delta is not None and write_delta.requires_causal_delivery_of_deltas)
+                )
                 aggregator = start_write_aggregator(
-                    key, envelope, write_consistency, reply_to, durable
+                    key, new_envelope, write_consistency, reply_to, durable, shuffle
                 )
                 if durable_store_ref is not None and durable:
                     durable_store_ref.tell(
                         DurableStore.Store(
                             key.id,
-                            DurableDataEnvelope(envelope),
+                            DurableDataEnvelope(new_envelope),
                             DurableStore.StoreReply(
                                 Replicator.UpdateSuccess(key),
                                 Replicator.StoreFailure(key),
@@ -718,6 +830,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             consistency: Replicator.WriteConsistency,
             reply_to: ActorRef[Any],
             durable: bool,
+            shuffle: bool | None = None,
         ) -> ActorRef[Any]:
             """The WriteAggregator that receiveUpdate and receiveDelete start, without deltas."""
             exclude_exiting = isinstance(
@@ -733,7 +846,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     frozenset(unreachable),
                     replica,
                     self_unique_address,
-                    shuffle=not settings.prefer_oldest,
+                    shuffle=not settings.prefer_oldest if shuffle is None else shuffle,
                     durable=durable,
                 )
             )
@@ -774,6 +887,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     return DELETED_ENVELOPE  # already deleted
                 case DataEnvelope() as envelope:
                     try:
+                        # DataEnvelope will merge_delta when needed
                         merged = envelope.merge(write_envelope, now()).add_seen(self_address)
                     except TypeError as e:  # Pekko's IllegalArgumentException
                         ctx.log.warning("Couldn't merge [%s], due to: %s", key, e)
@@ -781,6 +895,11 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     return set_data(key, merged)
                 case None:
                     # no existing data for the key
+                    if isinstance(write_envelope.data, ReplicatedDelta):
+                        z = write_envelope.data.zero()
+                        write_envelope = replace(
+                            write_envelope, data=z.merge_delta(write_envelope.data)
+                        )
                     return set_data(key, write_envelope.add_seen(self_address))
 
         def receive_read_repair(
@@ -836,18 +955,33 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                             )
 
         def set_data(key: str, envelope: DataEnvelope) -> DataEnvelope:
+            new_envelope = envelope
+            if delta_crdt_enabled:
+                delta_versions = envelope.delta_versions
+                curr_version = delta_propagation_selector.current_version(key)
+                if curr_version != 0 and curr_version != delta_versions.version_at(
+                    self_unique_address
+                ):
+                    new_envelope = replace(
+                        envelope,
+                        delta_versions=delta_versions.merge(
+                            VersionVector.create({self_unique_address: curr_version})
+                        ),
+                    )
             if has_subscriber(key) and key not in changed:
                 old_digest = get_digest(key)
-                dig, payload_size = digest(envelope)
+                dig, payload_size = digest(new_envelope)
                 payload_size_aggregator.update_payload_size(key, payload_size)
                 if dig != old_digest:
                     changed.add(key)  # notify subscribers, later
-            elif envelope.is_deleted:
+            elif new_envelope.is_deleted:
                 dig = _DELETED_DIGEST
             else:
                 dig = _LAZY_DIGEST
-            data_entries[key] = (envelope, dig, get_used_timestamp(key))
-            return envelope
+            data_entries[key] = (new_envelope, dig, get_used_timestamp(key))
+            if new_envelope.is_deleted:
+                delta_propagation_selector.delete(key)
+            return new_envelope
 
         def get_digest(key: str) -> _Digest:
             match data_entries.get(key):
@@ -953,8 +1087,10 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
 
         def receive_gossip_tick() -> None:
             cleanup_expired()
-            # Pekko's fullStateGossipEnabled is always on: there are no deltas
-            if (address := select_random_node(sorted(all_nodes()))) is not None:
+            if (
+                full_state_gossip_enabled
+                and (address := select_random_node(sorted(all_nodes()))) is not None
+            ):
                 gossip_to(address)
 
         def gossip_to(address: UniqueAddress) -> None:
@@ -1166,6 +1302,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 if expired_keys:
                     ctx.log.debug("Removing expired keys [%s]", ", ".join(expired_keys))
                     for key in expired_keys:
+                        delta_propagation_selector.delete(key)
                         payload_size_aggregator.remove(key)
                         changed.add(key)  # notify subscribers, later
                         del data_entries[key]
@@ -1262,7 +1399,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             unreachable.discard(m.unique_address)
             if settings.prefer_oldest and m in members_by_age:
                 members_by_age.remove(m)
-            # Pekko's deltaPropagationSelector.cleanupRemovedNode comes with deltas
+            delta_propagation_selector.cleanup_removed_node(m.unique_address)
             return Behaviors.same
 
         def receive_other_member_event(m: Member) -> None:
@@ -1397,6 +1534,115 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 if new_envelope is not envelope:
                     set_data(key, new_envelope)
 
+        def get_delta_seq_nr(key: str, from_node: UniqueAddress) -> int:
+            entry = data_entries.get(key)
+            return 0 if entry is None else entry[0].delta_versions.version_at(from_node)
+
+        def is_node_removed(node: UniqueAddress, keys: Iterable[str]) -> bool:
+            return node in removed_nodes or any(
+                (entry := data_entries.get(key)) is not None and node in entry[0].pruning
+                for key in keys
+            )
+
+        def receive_delta_propagation_tick() -> None:
+            for (
+                node,
+                delta_propagation,
+            ) in delta_propagation_selector.collect_propagations().items():
+                # TODO split it to several DeltaPropagation if too many entries
+                if delta_propagation.deltas:
+                    send_to_replica(
+                        ctx.log, replica(node), delta_propagation, delta_propagation.deltas
+                    )
+            if delta_propagation_selector.propagation_count % 5 == 0:
+                delta_propagation_selector.cleanup_delta_entries()
+
+        def receive_delta_propagation(
+            from_node: UniqueAddress,
+            reply: bool,
+            deltas: dict[str, Delta],
+            reply_to: ActorRef[WriteAck | WriteNack | DeltaNack] | None,
+        ) -> None:
+            if delta_crdt_enabled:
+                try:
+                    ctx.log.debug(
+                        "Received DeltaPropagation from [%s], containing [%s].",
+                        from_node.address,
+                        ", ".join(
+                            f"{key} {d.from_seq_nr}-{d.to_seq_nr}" for key, d in deltas.items()
+                        ),
+                    )
+                    # a wire DeltaPropagation answers through its reply_to (the spec's D5)
+                    ack_to = cast("ActorRef[WriteAck | WriteNack]", reply_to) if reply else None
+                    if is_node_removed(from_node, deltas.keys()):
+                        # Late message from a removed node.
+                        # Drop it to avoid merging deltas that have been pruned on one side.
+                        ctx.log.debug(
+                            "Skipping DeltaPropagation from [%s] because that node has been "
+                            "removed",
+                            from_node.address,
+                        )
+                    else:
+                        for key, delta in deltas.items():
+                            envelope = delta.envelope
+                            if isinstance(envelope.data, RequiresCausalDeliveryOfDeltas):
+                                current_seq_nr = get_delta_seq_nr(key, from_node)
+                                if current_seq_nr >= delta.to_seq_nr:
+                                    ctx.log.debug(
+                                        "Skipping DeltaPropagation from [%s] for [%s] because "
+                                        "toSeqNr [%s] already handled [%s]",
+                                        from_node.address,
+                                        key,
+                                        delta.to_seq_nr,
+                                        current_seq_nr,
+                                    )
+                                    if ack_to is not None:
+                                        ack_to.tell(WriteAck())
+                                elif delta.from_seq_nr > current_seq_nr + 1:
+                                    ctx.log.debug(
+                                        "Skipping DeltaPropagation from [%s] for [%s] because "
+                                        "missing deltas between [%s-%s]",
+                                        from_node.address,
+                                        key,
+                                        current_seq_nr + 1,
+                                        delta.from_seq_nr - 1,
+                                    )
+                                    if reply_to is not None and reply:
+                                        reply_to.tell(DeltaNack())
+                                else:
+                                    ctx.log.debug(
+                                        "Applying DeltaPropagation from [%s] for [%s] with "
+                                        "sequence numbers [%s-%s], current was [%s]",
+                                        from_node.address,
+                                        key,
+                                        delta.from_seq_nr,
+                                        delta.to_seq_nr,
+                                        current_seq_nr,
+                                    )
+                                    new_envelope = replace(
+                                        envelope,
+                                        delta_versions=VersionVector.create(
+                                            {from_node: delta.to_seq_nr}
+                                        ),
+                                    )
+                                    write_and_store(key, new_envelope, ack_to)
+                            else:
+                                # causal delivery of deltas not needed, just apply it
+                                write_and_store(key, envelope, ack_to)
+                except Exception as e:  # Pekko's NonFatal
+                    # catching in case we need to support rolling upgrades that are
+                    # mixing nodes with incompatible delta-CRDT types
+                    ctx.log.warning(
+                        "Couldn't process DeltaPropagation from [%s] due to %s", from_node, e
+                    )
+            elif reply and reply_to is not None:
+                # !delta_crdt_enabled
+                reply_to.tell(DeltaNack())
+
+        def receive_test_full_state_gossip(enabled: bool) -> None:
+            nonlocal full_state_gossip_enabled
+            full_state_gossip_enabled = enabled
+
         def receive_get_replica_count(reply_to: ActorRef[Replicator.ReplicaCount]) -> None:
             reply_to.tell(Replicator.ReplicaCount(len(nodes) + 1))  # nodes excludes self
 
@@ -1453,6 +1699,12 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     receive_flush_changes()
                 case _GossipTick():
                     receive_gossip_tick()
+                case _DeltaPropagationTick():
+                    receive_delta_propagation_tick()
+                case DeltaPropagation(from_node, reply, deltas, reply_to):
+                    receive_delta_propagation(from_node, reply, deltas, reply_to)
+                case Replicator.TestFullStateGossip(enabled):
+                    receive_test_full_state_gossip(enabled)
                 case _ClockTick():
                     receive_clock_tick()
                 case _RemovedNodePruningTick():
@@ -1543,6 +1795,8 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     # ignore scheduled ticks when loading durable data; Pekko stashes the clock
                     # tick, ohra drops it (the next tick after the load covers the time)
                     pass
+                case Replicator.TestFullStateGossip(enabled):
+                    receive_test_full_state_gossip(enabled)
                 case Read() | Write() | Status() | Gossip():
                     # ignore gossip and replication when loading durable data
                     ctx.log.debug(

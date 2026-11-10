@@ -178,6 +178,7 @@ def sqlite_durable_store(
             )
         else:
             folder = Path(path)
+        ctx.log.info("Using durable data in SQLite directory [%s]", folder.absolute())
         pending: dict[str, DurableDataEnvelope] = {}
 
         async def write_behind() -> None:

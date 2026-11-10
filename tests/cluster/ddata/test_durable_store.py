@@ -1,8 +1,11 @@
 """The store side of Pekko's ``DurableStore.scala`` (``LmdbDurableStore``). The envelope cases
 follow ``ReplicatorMessageSerializer.durableDataEnvelopeToProto``."""
 
+import logging
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from ohra import ActorRef
 from ohra.cluster.ddata import DurableDataEnvelope, DurableStore, sqlite_durable_store
@@ -180,3 +183,11 @@ async def test_a_negative_write_behind_interval_is_off(tmp_path: Path):
         )
         await probe.expect_message("ok")
         assert await loaded(kit, tmp_path) == {"a": counter(1)}
+
+
+async def test_the_store_logs_its_directory(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    with caplog.at_level(logging.INFO):
+        async with ActorTestKit() as kit:
+            _, probe = load_all(kit, tmp_path)
+            await probe.expect_message(DurableStore.LoadAllCompleted())
+    assert f"Using durable data in SQLite directory [{tmp_path.absolute()}]" in caplog.text

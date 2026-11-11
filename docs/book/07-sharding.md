@@ -182,6 +182,51 @@ def start(system: ActorSystem[None]) -> None:
     ClusterSharding(system).init(entity)
 ```
 
+### Passivation strategies
+
+Passivation stops an entity that is not needed, to free its memory. Pekko decides which entity with a strategy, and `ClusterShardingSettings.passivation_strategy_settings` describes one. The strategies, from Pekko's documentation:
+
+- **Idle**: an entity passivates after it has received no message for the idle timeout. It is checked on an interval, half the timeout unless set.
+- **Least recently used**, **most recently used** and **least frequently used**: a limit on the active entities of the region, divided evenly among its shards. When a shard is over its share, the entity the policy picks, the one touched longest ago, the one touched last, or the one touched least often, passivates. Idle passivation can run beside any of them.
+- **Segmented least recently used**: least recently used with several levels. An entity enters the lowest and moves up a level each time it is touched again, so entities touched only once go first.
+- **The composite strategy**: a main policy behind an admission window. A new entity first enters a small window with its own policy, and the window's evictee competes for a place in the main area against the main area's own candidate, decided by a frequency sketch filter that counts how often each id is touched. A hill-climbing optimizer adjusts the window's size from the hit rate it sees.
+
+Each setting has a Pekko key under `pekko.cluster.sharding.passivation`, and a builder on `PassivationStrategySettings`. Durations are in seconds.
+
+| Pekko key | ohra | Default |
+|---|---|---|
+| `idle-entity.timeout` | `with_idle_entity_passivation(timeout)`, or an `IdleSettings` | none (120.0 in `default_idle_strategy`) |
+| `idle-entity.interval` | `IdleSettings.interval` | `None`: half the timeout |
+| `active-entity-limit` | `with_active_entity_limit(limit)` | none (100_000 in `default_strategy`) |
+| `replacement.policy` | `with_least_recently_used_replacement()`, `with_most_recently_used_replacement()`, `with_least_frequently_used_replacement()` | none |
+| `replacement.least-recently-used.segmented.levels`, `proportions` | `LeastRecentlyUsedSettings.with_segmented(levels)` or `with_segmented(proportions)` | none |
+| `replacement.least-frequently-used.dynamic-aging` | `LeastFrequentlyUsedSettings.with_dynamic_aging()` | `False` |
+| `admission.window.proportion`, `minimum-proportion`, `maximum-proportion` | `WindowSettings.initial_proportion`, `minimum_proportion`, `maximum_proportion` | 0.01, 0.01, 1.0 |
+| `admission.window.policy` | `WindowSettings.with_policy(...)` | none |
+| `admission.window.optimizer` | `WindowSettings.with_optimizer(HillClimbingSettings)` | none |
+| `admission.window.hill-climbing.adjust-multiplier`, `initial-step`, `restart-threshold`, `step-decay` | `HillClimbingSettings` fields of the same names | 10.0, 0.0625, 0.05, 0.98 |
+| `admission.filter` | `AdmissionSettings.with_filter(FrequencySketchSettings)` | none |
+| `admission.frequency-sketch.depth`, `counter-bits`, `width-multiplier`, `reset-multiplier` | `FrequencySketchSettings` fields of the same names | 4, 4, 4, 10.0 |
+
+Pekko's `passivation.strategy` names one of three. They are constants here: `PassivationStrategySettings.default_idle_strategy` is idle passivation after 120 s, `default_strategy` is the composite with a limit of 100_000, a least recently used window with the hill-climbing optimizer, the frequency sketch filter and a two-level segmented main area of proportions 0.2 and 0.8, and `disabled` passivates nothing. `ClusterShardingSettings()` uses `default_idle_strategy`. `with_no_passivation_strategy()` is `disabled`.
+
+For now the shards still passivate by `passivate_after`, and `passivation_strategy_settings` is not read yet. The settings and the strategies they resolve to exist, and the next change makes the shard run them.
+
+```python
+from ohra.cluster.sharding import ClusterShardingSettings, PassivationStrategySettings
+
+lru = PassivationStrategySettings.defaults.with_active_entity_limit(10_000)
+settings = ClusterShardingSettings().with_passivation_strategy(
+    lru.with_least_recently_used_replacement().with_idle_entity_passivation(600.0)
+)
+assert settings.passivation_strategy_settings.active_entity_limit == 10_000
+print(settings.passivation_strategy_settings.idle_entity_settings)
+```
+
+```
+PassivationStrategySettings.IdleSettings(timeout=600.0, interval=None)
+```
+
 ---
 
 [← Cluster singleton](06-singleton.md) · [Contents](README.md) · [Management and Kubernetes →](08-management-and-kubernetes.md)

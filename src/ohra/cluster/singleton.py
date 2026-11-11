@@ -1,6 +1,8 @@
 """Apache Pekko's Cluster Singleton: one instance of an actor on the oldest member, handed over
 when that member leaves, reached through a proxy on every node. ClusterSingletonManager.scala and
-ClusterSingletonProxy.scala, ported state for state, without lease, roles or data centers."""
+ClusterSingletonProxy.scala, ported state for state, without lease, roles or data centers. While
+the cluster prepares for full shutdown, the manager hands nothing over and starts no instance, as
+Pekko's preparingForFullShutdown."""
 
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ from .core import (
     MemberDowned,
     MemberEvent,
     MemberExited,
+    MemberPreparingForShutdown,
+    MemberReadyForShutdown,
     MemberRemoved,
     MemberUp,
     SelfUp,
@@ -354,6 +358,7 @@ class _Manager:
         self.tracker: OldestChangedTracker | None = None
         self.oldest_changed_received = True
         self.waiting_for_change = False
+        self.preparing_for_full_shutdown = False  # ClusterSingletonManager.scala 538
         self.self_exited = False
         self.removed: dict[UniqueAddress, float] = {}
         self.member_exiting_progress: asyncio.Future[None] = self.loop.create_future()
@@ -444,8 +449,16 @@ class _Manager:
         )
 
     def self_member_exited(self) -> None:
+        """ClusterSingletonManager.scala 1138-1150: preparing for full shutdown, no hand-over
+        will come, so the exit completes right away."""
         self.self_exited = True
-        self.log.info("Exited [%s]", self.cluster.self_address)
+        self.log.info(
+            "Exited [%s].%s",
+            self.cluster.self_address,
+            " From preparing from shutdown" if self.preparing_for_full_shutdown else "",
+        )
+        if self.preparing_for_full_shutdown:
+            self.exiting_done()
 
     def stop(self) -> Behavior[_ManagerMsg]:
         return Behaviors.stopped()
@@ -496,11 +509,17 @@ class _Manager:
         return Behaviors.same
 
     def handle_member_event(self, event: ClusterDomainEvent) -> Behavior[_ManagerMsg] | None:
+        """ClusterSingletonManager.scala 654-670."""
         match event:
             case MemberRemoved(member=m) | MemberDowned(member=m) if (
                 m.unique_address == self.self_unique_address
             ):
                 return self.stop()
+            case MemberReadyForShutdown() | MemberPreparingForShutdown():
+                if not self.preparing_for_full_shutdown:
+                    self.log.info("Preparing for shut down, disabling expensive actions")
+                    self.preparing_for_full_shutdown = True
+                return Behaviors.same
             case _:
                 return Behaviors.same
 
@@ -541,7 +560,8 @@ class _Manager:
                     if oldest == self.self_unique_address:
                         if all(p in self.removed for p in previous_oldest):
                             return self.goto_oldest()
-                        self.peer(previous_oldest[0].address).tell(HandOverToMe(self.ctx.self))
+                        if not self.preparing_for_full_shutdown:  # Scala 680-684
+                            self.peer(previous_oldest[0].address).tell(HandOverToMe(self.ctx.self))
                         return self.goto_becoming_oldest(previous_oldest)
                     self.log.info(
                         "Younger observed OldestChanged: [%s -> %s]", previous_oldest[:1], oldest
@@ -559,7 +579,11 @@ class _Manager:
                     self.add_removed(m.unique_address)
                     return self.younger([p for p in previous_oldest if p != m.unique_address])
                 case HandOverToMe(from_):
-                    if self.cluster.self_member.status not in ("leaving", "exiting"):
+                    # Scala 716-724
+                    if (
+                        self.cluster.self_member.status not in ("leaving", "exiting")
+                        and not self.preparing_for_full_shutdown
+                    ):
                         from_.tell(HandOverDone(self.ctx.self))
                     return Behaviors.same
                 case _:
@@ -620,9 +644,11 @@ class _Manager:
                     sender = self.member_address_of(from_)
                     if sender is None:
                         return Behaviors.same
+                    # Scala 785-799
                     if previous_oldest:
                         if previous_oldest[0] == sender:
-                            from_.tell(HandOverToMe(self.ctx.self))
+                            if not self.preparing_for_full_shutdown:
+                                from_.tell(HandOverToMe(self.ctx.self))
                         else:
                             self.log.info(
                                 "Ignoring TakeOver request in BecomingOldest from [%s]. Expected "
@@ -631,17 +657,23 @@ class _Manager:
                                 previous_oldest[0],
                             )
                         return Behaviors.same
-                    from_.tell(HandOverToMe(self.ctx.self))
+                    if not self.preparing_for_full_shutdown:
+                        from_.tell(HandOverToMe(self.ctx.self))
                     return self.becoming_oldest([sender, *previous_oldest])
                 case _HandOverRetry(count):
                     if count <= self.max_hand_over_retries:
-                        if previous_oldest:
-                            self.peer(previous_oldest[0].address).tell(HandOverToMe(self.ctx.self))
-                        self.ctx.timers.start_single_timer(
-                            _HAND_OVER_RETRY,
-                            _HandOverRetry(count + 1),
-                            self.settings.hand_over_retry_interval,
-                        )
+                        # Scala 803-810: preparing, it leaves only on the previous oldest's
+                        # removal
+                        if not self.preparing_for_full_shutdown:
+                            if previous_oldest:
+                                self.peer(previous_oldest[0].address).tell(
+                                    HandOverToMe(self.ctx.self)
+                                )
+                            self.ctx.timers.start_single_timer(
+                                _HAND_OVER_RETRY,
+                                _HandOverRetry(count + 1),
+                                self.settings.hand_over_retry_interval,
+                            )
                         return Behaviors.same
                     if all(p in self.removed for p in previous_oldest):
                         return self.goto_oldest()
@@ -657,7 +689,16 @@ class _Manager:
         return self.behavior(handler)
 
     def goto_oldest(self) -> Behavior[_ManagerMsg]:
-        instance = self.start_instance()
+        """Scala 898-915, then onTransition to Oldest (1231-1232)."""
+        instance: ActorRef[Any] | None = None
+        if self.preparing_for_full_shutdown:
+            self.log.info(
+                "Singleton manager NOT starting singleton actor [%s/singleton] as cluster is "
+                "preparing to shutdown",
+                self.ctx.self.path,
+            )
+        else:
+            instance = self.start_instance()
         self.get_next_oldest_changed()
         return self.oldest(instance)
 
@@ -694,16 +735,18 @@ class _Manager:
     def handle_oldest_changed(
         self, instance: ActorRef[Any] | None, new_oldest: UniqueAddress | None
     ) -> Behavior[_ManagerMsg]:
+        """Scala 916-940."""
         self.oldest_changed_received = True
         if new_oldest == self.self_unique_address:
             return Behaviors.same
         if new_oldest is not None and not self.self_exited and new_oldest in self.removed:
             return self.goto_handing_over(instance, None)
-        if new_oldest is not None:
-            self.peer(new_oldest.address).tell(TakeOverFromMe(self.ctx.self))
-        self.ctx.timers.start_single_timer(
-            _TAKE_OVER_RETRY, _TakeOverRetry(1), self.settings.hand_over_retry_interval
-        )
+        if not self.preparing_for_full_shutdown:
+            if new_oldest is not None:
+                self.peer(new_oldest.address).tell(TakeOverFromMe(self.ctx.self))
+            self.ctx.timers.start_single_timer(
+                _TAKE_OVER_RETRY, _TakeOverRetry(1), self.settings.hand_over_retry_interval
+            )
         return self.was_oldest(instance, new_oldest)
 
     def was_oldest(
@@ -723,13 +766,14 @@ class _Manager:
                             self.goto_stopping(instance) if instance is not None else self.stop()
                         )
                     if count <= self.max_take_over_retries:
-                        if new_oldest is not None:
-                            self.peer(new_oldest.address).tell(TakeOverFromMe(self.ctx.self))
-                        self.ctx.timers.start_single_timer(
-                            _TAKE_OVER_RETRY,
-                            _TakeOverRetry(count + 1),
-                            self.settings.hand_over_retry_interval,
-                        )
+                        if not self.preparing_for_full_shutdown:  # Scala 1000-1010
+                            if new_oldest is not None:
+                                self.peer(new_oldest.address).tell(TakeOverFromMe(self.ctx.self))
+                            self.ctx.timers.start_single_timer(
+                                _TAKE_OVER_RETRY,
+                                _TakeOverRetry(count + 1),
+                                self.settings.hand_over_retry_interval,
+                            )
                         return Behaviors.same
                     raise ClusterSingletonManagerIsStuck(
                         f"Expected hand-over to [{new_oldest}] never occurred"
@@ -789,12 +833,26 @@ class _Manager:
                 case HandOverToMe(from_) if (
                     hand_over_to is not None and from_.path == hand_over_to.path
                 ):
-                    from_.tell(HandOverInProgress())
+                    if not self.preparing_for_full_shutdown:  # Scala 1066-1071
+                        from_.tell(HandOverInProgress())
                     return Behaviors.same
                 case _SelfExiting(done):
                     self.self_member_exited()
                     _complete(done)
                     return Behaviors.same
+                # Scala 1080-1086
+                case MemberReadyForShutdown(member=m) if (
+                    m.unique_address == self.self_unique_address
+                ):
+                    self.log.info("Ready for shutdown when handing over. Giving up on handover.")
+                    return self.stop()
+                case MemberPreparingForShutdown(member=m) if (
+                    m.unique_address == self.self_unique_address
+                ):
+                    self.log.info(
+                        "Preparing for shutdown when handing over. Giving up on handover."
+                    )
+                    return self.stop()
                 case IdentifySingleton(reply_to, identify_id):
                     reply_to.tell(SingletonIdentity(identify_id, instance))
                     return Behaviors.same
@@ -826,6 +884,22 @@ class _Manager:
         def handler(msg: _ManagerMsg) -> Behavior[_ManagerMsg] | None:
             match msg:
                 case _InstanceTerminated(ref) if ref == instance:
+                    return self.stop()
+                # Scala 1119-1125
+                case MemberReadyForShutdown(member=m) if (
+                    m.unique_address == self.self_unique_address
+                ):
+                    self.log.info(
+                        "Ready for shutdown when stopping. Not waiting for user actor to shutdown"
+                    )
+                    return self.stop()
+                case MemberPreparingForShutdown(member=m) if (
+                    m.unique_address == self.self_unique_address
+                ):
+                    self.log.info(
+                        "Preparing for shutdown when stopping. Not waiting for user actor to "
+                        "shutdown"
+                    )
                     return self.stop()
                 case IdentifySingleton(reply_to, identify_id):
                     reply_to.tell(SingletonIdentity(identify_id, instance))

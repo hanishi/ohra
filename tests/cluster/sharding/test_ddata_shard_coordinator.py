@@ -292,9 +292,9 @@ async def test_a_modify_failure_restarts_the_coordinator():
         await expect_get(replicator)  # the restarted coordinator reads its state again
 
 
-async def test_a_restarted_coordinator_reads_its_state_again():
-    """A restart starts from scratch, as a new DDataShardCoordinator: the allocation it answers
-    after the restart is the one it read back from the Replicator."""
+async def test_a_restarted_coordinator_starts_from_the_replicated_state():
+    """A restart starts from scratch, as a new DDataShardCoordinator: when the Replicator holds
+    nothing, the restarted coordinator does not know the shard the failed one had allocated."""
     async with manual_node() as node:
         replicator, region, home = node.probe(), node.probe(), node.probe()
         coordinator = await active(node, replicator, supervised=True)
@@ -304,19 +304,19 @@ async def test_a_restarted_coordinator_reads_its_state_again():
         update.reply_to.tell(Replicator.UpdateSuccess(update.key))
         coordinator.tell(GetShardHome("a", home.ref))
         update = await expect_update(replicator)
-        stored = update.modify(stored)
+        update.modify(stored)
         update.reply_to.tell(Replicator.UpdateSuccess(update.key))
         assert await home.receive_message(3) == ShardHome("a", region.ref)
         coordinator.tell(GetShardHome("b", home.ref))
         update = await expect_update(replicator)
         update.reply_to.tell(Replicator.ModifyFailure(update.key, "boom", ValueError("boom")))
         get = await expect_get(replicator)
-        get.reply_to.tell(Replicator.GetSuccess(get.key, stored))
+        get.reply_to.tell(Replicator.NotFound(get.key))
         await settle(node)
         coordinator.tell(GetShardHome("a", home.ref))
         assert node.manual is not None
         await node.manual.time_passes(0.5)  # stateInitialized
-        assert await home.receive_message(3) == ShardHome("a", region.ref)
+        await home.expect_no_message(0.1)  # no region is registered, and "a" is unknown
 
 
 async def test_terminate_during_an_update_stops_after_it():

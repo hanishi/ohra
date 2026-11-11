@@ -74,7 +74,7 @@
 | `PassivationStrategySettings.AdmissionSettings` (`withFilter`, `withWindow`), `FrequencySketchSettings`, `HillClimbingSettings`, `WindowSettings` (`withInitialProportion`, `withMinimumProportion`, `withMaximumProportion`, `withOptimizer`, `withPolicy`) | the same nested names on `PassivationStrategySettings.AdmissionSettings`, with snake_case builders |
 | `ClusterShardingSettings.withPassivationStrategy(settings)`, `withNoPassivationStrategy` | `ClusterShardingSettings.with_passivation_strategy(settings)`, `with_no_passivation_strategy()` |
 | `pekko.cluster.sharding.passivation.strategy = default-idle-strategy / default-strategy / none` | `PassivationStrategySettings.default_idle_strategy / default_strategy / disabled` |
-| `Shard` (internal), `Shard.EntityState` and its states, `Shard.Entities` | `_Shard` in `shard.py` (internal); the states and `Entities` in `entities.py` |
+| `Shard` (internal), `Shard.EntityState` and its states, `Shard.Entities` | `shard_behavior` in `shard.py` (internal); the states and `Entities` in `entities.py` |
 | `util.MessageBufferMap` | `ohra.util.message_buffer.MessageBufferMap` |
 | `ShardRegion.HandOffStopper`, `ShardInitialized`, `ShardsUpdated` | internal, in `shard.py`: `hand_off_stopper`, `ShardInitialized`, `ShardsUpdated` |
 | `ShardRegion.SetActiveEntityLimit` | `SetActiveEntityLimit` |

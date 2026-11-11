@@ -28,6 +28,8 @@ from .failure_detector import (
 )
 from .reachability import Reachability
 from .gossip import (
+    ALLOWED_TO_PREPARE_TO_SHUTDOWN,
+    PREPARE_FOR_SHUTDOWN_STATES,
     REMOVE_UNREACHABLE_WITH_MEMBER_STATUS,
     UP_NUMBER_UNSET,
     Gossip,
@@ -141,7 +143,14 @@ class Down:
     address: Address
 
 
-type ClusterCommand = Join | JoinSeedNodes | Leave | Down
+@dataclass(frozen=True)
+class PrepareForFullClusterShutdown:
+    """Pekko typed's ``PrepareForFullClusterShutdown`` command (typed Cluster.scala 201-209) and
+    the daemon's ``ClusterUserAction.PrepareForShutdown`` (ClusterDaemon.scala 78): one message
+    for both."""
+
+
+type ClusterCommand = Join | JoinSeedNodes | Leave | Down | PrepareForFullClusterShutdown
 
 
 class ClusterDomainEvent:
@@ -564,6 +573,12 @@ class Cluster:
             self._terminated = True
             self._core.send_sys(_stop_message())
 
+    def prepare_for_full_cluster_shutdown(self) -> None:
+        """Move every Up member to PreparingForShutdown and on to ReadyForShutdown, so the whole
+        cluster can stop without a leaving handoff (Pekko's Cluster.prepareForFullClusterShutdown,
+        Cluster.scala 338-343). Dropped if this node has not joined yet."""
+        self.manager.tell(PrepareForFullClusterShutdown())
+
 
 # --- events from state changes (ClusterEvent.diff*) ----------------------------------------------
 
@@ -757,6 +772,7 @@ class _CoreDaemon:
         self.membership_state = self.empty_state
         self.published_state = self.empty_state
         self.is_currently_leader = False
+        self.preparing_for_shutdown = False
         self.seed_nodes = self.settings.seed_nodes
         # remaining seeds, deadline: FirstSeedNodeProcess
         self.first_seed: tuple[set[Address], float] | None = None
@@ -904,6 +920,8 @@ class _CoreDaemon:
                 self.downing(address)
             case Leave(address):
                 self.leaving(address)
+            case PrepareForFullClusterShutdown():
+                self.start_prepare_for_shutdown()
             case Subscribe() | Unsubscribe() | GetCurrentState():
                 self.subscription(msg)
             case Join(address):
@@ -1112,6 +1130,9 @@ class _CoreDaemon:
         return self.trying_to_join(address, deadline)
 
     def joining(self, node: UniqueAddress, reply_to: ActorRef[Welcome] | None) -> None:
+        if self.preparing_for_shutdown:  # ClusterDaemon.scala 861, 954-956
+            self.log.info("Ignoring join request from [%s] as preparing for shutdown", node)
+            return
         self_status = self.latest_gossip.member(self.self_unique_address).status
         if node.name != self.self_address.name:
             self.log.warning(
@@ -1185,11 +1206,46 @@ class _CoreDaemon:
 
     def leaving(self, address: Address) -> None:
         existing = next((m for m in self.latest_gossip.members if m.address == address), None)
-        if existing is not None and existing.status in ("joining", "weakly_up", "up"):
+        if existing is not None and existing.status in (
+            "joining",
+            "weakly_up",
+            "up",
+            "preparing_for_shutdown",
+            "ready_for_shutdown",
+        ):  # 1006-1008
             self.update_latest_gossip(self.latest_gossip.update([existing.with_status("leaving")]))
             self.log.info("Marked address [%s] as [leaving]", address)
             self.publish_membership_state()
             self.gossip()
+
+    def start_prepare_for_shutdown(self) -> None:
+        """ClusterDaemon.startPrepareForShutdown (977-996): once only, every Up member becomes
+        PreparingForShutdown, even when there is none (the flag still stops joins)."""
+        if self.preparing_for_shutdown:
+            return
+        self.preparing_for_shutdown = True
+        changed = [
+            m.with_status("preparing_for_shutdown")
+            for m in self.latest_gossip.members
+            if m.status in ALLOWED_TO_PREPARE_TO_SHUTDOWN
+        ]
+        self.update_latest_gossip(self.latest_gossip.update(changed))
+        for m in changed:
+            self.log.info("Preparing for shutdown [%s] as [%s]", m.address, m.status)
+        self.publish_membership_state()
+        self.gossip()
+
+    def check_for_prepare_for_shutdown(self) -> None:
+        """ClusterDaemon.checkForPrepareForShutdown (1411-1418): an Up node that sees a member
+        preparing prepares too."""
+        gossip = self.latest_gossip
+        if gossip.member(
+            self.self_unique_address
+        ).status in ALLOWED_TO_PREPARE_TO_SHUTDOWN and any(
+            m.status in PREPARE_FOR_SHUTDOWN_STATES for m in gossip.members
+        ):
+            self.log.debug("Detected full cluster shutdown")
+            self.ctx.self.tell(PrepareForFullClusterShutdown())
 
     def start_exiting(self) -> None:
         """Self is Exiting: the cluster-exiting phase may proceed, and the coordinated shutdown
@@ -1414,6 +1470,7 @@ class _CoreDaemon:
                 weakly_up_after = self.settings.allow_weakly_up_members
                 if (
                     weakly_up_after is not None
+                    and not self.preparing_for_shutdown
                     and self.settings.leader_actions_interval * self.leader_action_counter
                     >= weakly_up_after
                 ):
@@ -1436,6 +1493,7 @@ class _CoreDaemon:
             self.log.info("is no longer leader")
             self.is_currently_leader = False
         self.cleanup_exiting_confirmed()
+        self.check_for_prepare_for_shutdown()  # 1406: on every node, every tick
         self.shutdown_self_when_down()
 
     def shutdown_self_when_down(self) -> None:
@@ -1470,7 +1528,11 @@ class _CoreDaemon:
         changed: list[Member] = []
         up_number = 0
         for m in gossip.members:
-            if m.status in ("joining", "weakly_up") and enough_members:
+            if (
+                m.status in ("joining", "weakly_up")
+                and enough_members
+                and not self.preparing_for_shutdown
+            ):
                 if up_number == 0:
                     youngest = self.membership_state.youngest_member
                     up_number = 1 + (
@@ -1481,6 +1543,8 @@ class _CoreDaemon:
                 changed.append(m.copy_up(up_number))
             elif m.status == "leaving":
                 changed.append(m.with_status("exiting"))
+            elif m.status == "preparing_for_shutdown":
+                changed.append(m.with_status("ready_for_shutdown"))
         if removed_unreachable or removed_exiting_confirmed or changed:
             removed = {m.unique_address for m in removed_unreachable} | removed_exiting_confirmed
             new_gossip = gossip.update(changed).remove_all(removed, time.time())

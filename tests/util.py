@@ -44,3 +44,18 @@ def errors_logged(logger: str = "ohra.actor") -> Generator[list[logging.LogRecor
         yield handler.buffer
     finally:
         logging.getLogger(logger).removeHandler(handler)
+
+
+class TestClock:
+    """Pekko's ``TestClock.scala``: a controlled clock for recency windows, in seconds."""
+
+    __test__ = False
+
+    def __init__(self) -> None:
+        self.now: float = 0.0
+
+    def tick(self) -> None:
+        self.now += 1.0
+
+    def __call__(self) -> float:
+        return self.now

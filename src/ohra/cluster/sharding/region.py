@@ -20,13 +20,17 @@ from .shard import (
     Entity,
     GetShardRegionState,
     HandOff,
+    SetActiveEntityLimit,
     ShardingEnvelope,
     ShardInitialized,
+    ShardsUpdated,
     ShardStopped,
     _aggregate_shard_states,  # pyright: ignore[reportPrivateUsage]
+    _log_passivation_strategy,  # pyright: ignore[reportPrivateUsage]
     shard_behavior,
     shard_id_of,
 )
+from .passivation_settings import NoPassivationStrategy
 from ..core import (
     Cluster,
     MemberDowned,
@@ -121,8 +125,10 @@ class _Region:
         self.logged_full_buffer_warning = False
         self.next_registration_delay = max(0.1, settings.retry_interval / 8)
         self.graceful_shutdown_in_progress = False
+        self.passivation_strategy = settings.passivation_strategy
         self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
         ctx.timers.start_timer_with_fixed_delay("retry", _Retry(), settings.retry_interval)
+        _log_passivation_strategy(self.log, self.type_name, self.passivation_strategy)
 
     # --- coordinator location --------------------------------------------------------------------
 
@@ -186,7 +192,14 @@ class _Region:
         self.ctx.watch_with(ref, _ShardTerminated(shard))
         self.shards[shard] = ref
         self.starting_shards.add(shard)
+        if self.passivation_strategy != NoPassivationStrategy():
+            self.deliver_to_all_shards(ShardsUpdated(len(self.shards)))
         return None
+
+    def deliver_to_all_shards(self, msg: SetActiveEntityLimit | ShardsUpdated) -> None:
+        """ShardRegion.scala 1278."""
+        for ref in self.shards.values():
+            ref.tell(msg)
 
     def initialize_shard(self, shard: str) -> None:
         """ShardRegion.scala 1210-1214. Pekko delivers to the sender; here it is the shard
@@ -378,8 +391,14 @@ class _Region:
                     else:
                         reply_to.tell(ShardStopped(shard))
                 case _ShardTerminated(shard):
+                    # ShardRegion.scala 1007-1031
                     self.shards.pop(shard, None)
                     self.starting_shards.discard(shard)
+                    if (
+                        self.passivation_strategy != NoPassivationStrategy()
+                        and not self.graceful_shutdown_in_progress
+                    ):
+                        self.deliver_to_all_shards(ShardsUpdated(len(self.shards)))
                     if (
                         self.region_by_shard.get(shard) is not None
                         and self.region_by_shard[shard].path == self.ctx.self.path
@@ -401,6 +420,8 @@ class _Region:
                     self.send_graceful_shutdown_to_coordinator()
                 case ShardInitialized(shard):
                     self.initialize_shard(shard)
+                case SetActiveEntityLimit():
+                    self.deliver_to_all_shards(msg)
                 case _:
                     pass
             return Behaviors.stopped() if self.try_complete_graceful_shutdown() else Behaviors.same

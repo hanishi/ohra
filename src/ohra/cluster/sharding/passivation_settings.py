@@ -494,3 +494,75 @@ def passivation_strategy(settings: PassivationStrategySettings) -> PassivationSt
             limit, settings.replacement_policy_settings, settings.admission_settings, idle
         )
     return _policy_strategy(settings.replacement_policy_settings, limit, idle)
+
+
+def describe_passivation_strategy(strategy: PassivationStrategy) -> str:
+    """Classic 782-860 (``PassivationStrategy.describe``), for the region's start log. A
+    duration prints as seconds, ``120 s``, where Pekko's ``pretty`` picks a unit (``2.000
+    min``)."""
+    d = describe_passivation_strategy
+
+    def limit_text(limit: int) -> str:
+        return f" when over [{limit}] entities" if limit > 0 else ""
+
+    def idle_text(idle: IdlePassivationStrategy | None) -> str:
+        return "" if idle is None else " and " + d(idle)
+
+    match strategy:
+        case NoPassivationStrategy():
+            return "disabled"
+        case IdlePassivationStrategy(timeout, interval):
+            return f"idle entities after [{timeout:g} s], checked every [{interval:g} s]"
+        case LeastRecentlyUsedPassivationStrategy(limit, segmented, idle):
+            segments = ""
+            if segmented:
+                proportions = ", ".join(f"{p:.2f}" for p in segmented)
+                segments = (
+                    f" (segmented with [{len(segmented)}] levels with proportions of "
+                    f"[{proportions}])"
+                )
+            return "least recently used entities" + limit_text(limit) + segments + idle_text(idle)
+        case MostRecentlyUsedPassivationStrategy(limit, idle):
+            return "most recently used entities" + limit_text(limit) + idle_text(idle)
+        case LeastFrequentlyUsedPassivationStrategy(limit, dynamic_aging, idle):
+            aging = " (with dynamic aging)" if dynamic_aging else ""
+            return "least frequently used entities" + limit_text(limit) + aging + idle_text(idle)
+        case CompositePassivationStrategy(
+            limit, main, window, initial, minimum, maximum, optimizer, admission_filter, idle
+        ):
+            c = CompositePassivationStrategy
+            if isinstance(window, NoPassivationStrategy):
+                describe_window = "no admission window"
+            else:
+                match optimizer:
+                    case c.NoAdmissionOptimizer():
+                        tuning = f" with proportion [{initial}]"
+                    case c.HillClimbingAdmissionOptimizer(
+                        adjust_multiplier, initial_step, restart_threshold, step_decay
+                    ):
+                        tuning = (
+                            f" with proportions [initial = {initial}, min = {minimum}, "
+                            f"max = {maximum}] adapting with hill-climbing optimizer ["
+                            f"adjust multiplier = {adjust_multiplier}, "
+                            f"initial step = {initial_step}, "
+                            f"restart threshold = {restart_threshold}, "
+                            f"step decay = {step_decay}]"
+                        )
+                describe_window = f"admission window ({d(window)})" + tuning
+            match admission_filter:
+                case c.AlwaysAdmissionFilter():
+                    describe_filter = "always admit"
+                case c.FrequencySketchAdmissionFilter(
+                    width_multiplier, reset_multiplier, depth, counter_bits
+                ):
+                    describe_filter = (
+                        "admit using frequency sketch ["
+                        f"width multiplier = {width_multiplier}, "
+                        f"reset multiplier = {reset_multiplier}, "
+                        f"depth = {depth}, "
+                        f"counter bits = {counter_bits}]"
+                    )
+            return (
+                f"composite strategy with limit of [{limit}] active entities, "
+                f"{describe_window}, {describe_filter}, main ({d(main)})" + idle_text(idle)
+            )

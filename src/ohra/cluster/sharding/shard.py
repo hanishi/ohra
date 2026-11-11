@@ -47,8 +47,10 @@ from .entities import (
 )
 from .passivation import EntityPassivationStrategy, PassivateEntities
 from .passivation_settings import (
+    NoPassivationStrategy,
     PassivationStrategy,
     PassivationStrategySettings,
+    describe_passivation_strategy,
     passivation_strategy,
 )
 
@@ -1010,20 +1012,44 @@ def _aggregate_shard_states(
     return setup
 
 
-type _RegionCmd[T] = ShardingEnvelope[T] | GetShardRegionState | ShardInitialized
+type _RegionCmd[T] = (
+    ShardingEnvelope[T] | GetShardRegionState | ShardInitialized | SetActiveEntityLimit
+)
+
+
+def _log_passivation_strategy(
+    log: logging.Logger, type_name: str, strategy: PassivationStrategy
+) -> None:
+    """ShardRegion.scala 698-705, without the remember-entities branch (sub-project 10)."""
+    log.info(
+        "%s: Automatic entity passivation: %s", type_name, describe_passivation_strategy(strategy)
+    )
 
 
 class Sharding:
     @staticmethod
-    def init[T](entity: Entity[T]) -> Behavior[ShardingEnvelope[T] | GetShardRegionState]:
+    def init[T](
+        entity: Entity[T],
+    ) -> Behavior[ShardingEnvelope[T] | GetShardRegionState | SetActiveEntityLimit]:
         """The shard region behavior for one entity type, inside one process. Spawn it; message it
-        through entity refs. Each shard id gets a child Shard actor on first use."""
+        through entity refs. Each shard id gets a child Shard actor on first use. As Pekko's
+        region, it passes ``SetActiveEntityLimit`` to every shard, and tells every shard the
+        shard count when it changes; it has no graceful shutdown."""
         settings = entity.effective_settings
+        strategy = settings.passivation_strategy
 
         @Behaviors.setup
         def setup(ctx: ActorContext[_RegionCmd[T]]) -> Behavior[_RegionCmd[T]]:
             shards: dict[str, ActorRef[_ShardCmd[T]]] = {}
             ids_by_ref: dict[ActorRef[Any], str] = {}
+            _log_passivation_strategy(ctx.log, entity.type_key.name, strategy)
+
+            def shards_updated() -> None:
+                """ShardRegion.scala 1013-1016 and 1358-1361."""
+                if strategy != NoPassivationStrategy():
+                    update = ShardsUpdated(len(shards))
+                    for shard in shards.values():
+                        shard.tell(update)
 
             def shard_for(entity_id: str) -> ActorRef[_ShardCmd[T]]:
                 shard_id = shard_id_of(entity_id, settings.number_of_shards)
@@ -1033,6 +1059,7 @@ class Sharding:
                     ctx.watch(shard)
                     shards[shard_id] = shard
                     ids_by_ref[shard] = shard_id
+                    shards_updated()
                 return shard
 
             @Behaviors.receive
@@ -1047,6 +1074,10 @@ class Sharding:
                         shard_for(entity_id).tell(msg)
                     case ShardInitialized():
                         pass  # the shard stashes while it waits for its lease
+                    case SetActiveEntityLimit():
+                        # ShardRegion.scala 767 and 1278 (deliverToAllShards)
+                        for shard in shards.values():
+                            shard.tell(msg)
                     case GetShardRegionState(reply_to):
                         if not shards:
                             reply_to.tell(CurrentShardRegionState(frozenset()))
@@ -1067,6 +1098,7 @@ class Sharding:
                     shard_id = ids_by_ref.pop(sig.ref, None)
                     if shard_id is not None:
                         shards.pop(shard_id, None)
+                        shards_updated()
                     return Behaviors.same
                 return Behaviors.unhandled
 

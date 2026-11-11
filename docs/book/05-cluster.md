@@ -189,12 +189,13 @@ It prints:
 [(2551, 'ready_for_shutdown'), (2552, 'ready_for_shutdown'), (2553, 'ready_for_shutdown')]
 ```
 
-- **`prepare_for_full_cluster_shutdown()`** tells the local core daemon, and a call made before the node has joined is dropped. `Cluster(system).manager.tell(PrepareForFullClusterShutdown())` does the same. Call it on one node.
+- **`prepare_for_full_cluster_shutdown()`** tells the local core daemon. `Cluster(system).manager.tell(PrepareForFullClusterShutdown())` does the same. Call it on one node that is Up: a call made before the node has been welcomed into the cluster is dropped, and a Joining or WeaklyUp caller marks the others but stays Up itself, as in Pekko.
 - **The node you call** moves every Up member to `preparing_for_shutdown` in its own gossip, which then spreads. Any other Up node that sees a preparing member prepares itself. Then the leader, on convergence, moves each of them to `ready_for_shutdown`. Subscribers get `MemberPreparingForShutdown` and `MemberReadyForShutdown`.
 - **A node that ran the prepare** ignores new joins, and logs it, and while it is the leader it moves no Joining or WeaklyUp member to Up. That is the node you called, and any node that prepared itself on coming Up later; the others, marked preparing by gossip, behave as before. So a node that joins through another member can still come Up if the leader did not run the prepare, and it then sees the preparing members, prepares itself and ends `ready_for_shutdown` too. Members that are Leaving or Exiting leave by the normal path.
 - **It does not stop the nodes.** Wait until every member that was Up sees itself `ready_for_shutdown`, then stop them and start the new version. A graceful leave from a ready node can be lost: ReadyForShutdown outranks Leaving when two views of a member merge, as in Pekko, so a leave that is concurrent with any other change to the membership, such as a move by the leader or another node's leave, is overwritten, and that node's shutdown waits out the `cluster-exiting` timeout (10 s) with a warning. The example therefore stops the nodes one at a time and waits until the others no longer list the one that left.
 - Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
 - **The singleton** stops handing over while any member is preparing or ready, see [chapter 6](06-singleton.md).
+- **Cluster sharding** does not take part yet: its coordinator moves no more, as a singleton, but its regions still hand shards off on the way down, so stopping a sharded cluster this way can wait out `cluster-sharding-shutdown-region` on the nodes that stop last.
 
 ### Split-brain resolver
 

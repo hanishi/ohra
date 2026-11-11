@@ -576,7 +576,9 @@ class Cluster:
     def prepare_for_full_cluster_shutdown(self) -> None:
         """Move every Up member to PreparingForShutdown and on to ReadyForShutdown, so the whole
         cluster can stop without a leaving handoff (Pekko's Cluster.prepareForFullClusterShutdown,
-        Cluster.scala 338-343). Dropped if this node has not joined yet."""
+        Cluster.scala 338-343). Call it on an Up member: it is dropped before this node has been
+        welcomed into the cluster, and a Joining or WeaklyUp caller marks the others but stays Up
+        itself, as in Pekko."""
         self.manager.tell(PrepareForFullClusterShutdown())
 
 

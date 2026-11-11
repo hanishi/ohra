@@ -61,6 +61,11 @@
 | `ClusterSharding(system).init(Entity(key, create))`, `entityRefFor(key, id)` | same, `entity_ref_for(key, id)`; the region ref is returned, as Pekko Typed |
 | `HashCodeMessageExtractor(numberOfShards)` | `ClusterShardingSettings(number_of_shards=...)`; the shard id is `crc32(entity_id) % number_of_shards` |
 | `ClusterShardingSettings` tuning parameters (`retry-interval`, `rebalance-interval`, `handoff-timeout`, `shard-start-timeout`, `buffer-size`, `rebalance-absolute-limit`, `rebalance-relative-limit`, `coordinator-singleton`) | `ClusterShardingSettings` fields in snake_case, seconds; `coordinator_singleton_settings` is a `ClusterSingletonSettings` |
+| `DDataShardCoordinator` | the coordinator `ClusterSharding(system).init` runs, with its state in an `LWWRegister` on sharding's Replicator |
+| `pekko.cluster.sharding.coordinator-state.read-majority-plus`, `write-majority-plus` | `ClusterShardingSettings.coordinator_state_read_majority_plus`, `coordinator_state_write_majority_plus`: an `int` or `"all"` |
+| `pekko.cluster.sharding.waiting-for-state-timeout`, `updating-state-timeout` | `ClusterShardingSettings.waiting_for_state_timeout`, `updating_state_timeout`, in seconds |
+| `pekko.cluster.sharding.distributed-data` | `ClusterShardingSettings.distributed_data`, a `ReplicatorSettings`; `None` takes the cluster's with `prefer_oldest=True` and `max_delta_elements=5` |
+| `pekko.cluster.sharding.distributed-data.majority-min-cap` | `ClusterShardingSettings.majority_min_cap` |
 | `DistributedData(system).replicator`, `selfUniqueAddress` | `DistributedData(system).replicator`, `self_unique_address`; raises `RuntimeError` on a system without `cluster=` |
 | `DistributedData.withReplicatorMessageAdapter[Command, A](factory)` | `DistributedData.with_replicator_message_adapter(factory, unexpected_ask_timeout=20.0)` |
 | `ReplicatorMessageAdapter.askUpdate / askGet / askDelete / askReplicaCount / subscribe / unsubscribe` | `ReplicatorMessageAdapter[M, A].ask_update / ask_get / ask_delete / ask_replica_count / subscribe / unsubscribe` |

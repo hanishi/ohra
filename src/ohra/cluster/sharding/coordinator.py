@@ -568,8 +568,7 @@ class _Coordinator:
 
         def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
             if sig is PostStop or sig is PreRestart:
-                # what their DeathWatch of the coordinator would tell them; a restarted one has
-                # lost its state, so they register again
+                # what their DeathWatch of the coordinator would tell them: they register again
                 for path in self.alive_regions:
                     if path in self.refs:
                         self.refs[path].tell(CoordinatorStopped(self.ctx.self))

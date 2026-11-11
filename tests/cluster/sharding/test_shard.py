@@ -75,12 +75,19 @@ Counter = EntityTypeKey[Cmd]("Counter")
 
 
 def counter(
-    events: ActorRef[str], gate: asyncio.Event | None = None, halts: bool = True
+    events: ActorRef[str],
+    gate: asyncio.Event | None = None,
+    halts: bool = True,
+    reports_start: bool = False,
 ) -> Callable[[EntityContext[Cmd]], Behavior[Cmd]]:
     """Reports ``halt <id>`` on its stop message, which stops it if ``halts``, and
-    ``stopping <id>`` on PostStop, which then waits for ``gate``."""
+    ``stopping <id>`` on PostStop, which then waits for ``gate``. With ``reports_start`` it
+    reports ``started <id>`` each time it starts."""
 
     def create(entity: EntityContext[Cmd]) -> Behavior[Cmd]:
+        if reports_start:
+            events.tell(f"started {entity.entity_id}")
+
         def active(total: int) -> Behavior[Cmd]:
             def on_message(ctx: ActorContext[Cmd], msg: Cmd) -> Behavior[Cmd]:
                 match msg:
@@ -148,10 +155,11 @@ async def test_the_shard_buffer_caps_buffered_messages_across_entities():
         region: TestProbe[Any] = testkit.create_test_probe()
         dropped = testkit.create_dropped_message_probe()
         replies: TestProbe[int] = testkit.create_test_probe()
-        entity = Entity(Counter, counter(events.ref, gate)).with_buffer_size(2)
+        entity = Entity(Counter, counter(events.ref, gate, reports_start=True)).with_buffer_size(2)
         shard = testkit.spawn(shard_behavior(entity, "1", region.ref))
         for entity_id in ("a", "b"):
             shard.tell(ShardingEnvelope(entity_id, Stop()))
+            await events.expect_message(f"started {entity_id}")
             await events.expect_message(f"stopping {entity_id}")
         shard.tell(ShardingEnvelope("a", Add(1)))
         shard.tell(ShardingEnvelope("b", Add(1)))
@@ -160,6 +168,11 @@ async def test_the_shard_buffer_caps_buffered_messages_across_entities():
             Dropped(ShardingEnvelope("b", Add(2)), "Buffer for [b] is full", shard)
         )
         gate.set()
+        # each restart replays and clears its buffer first, so the Gets are not dropped
+        assert {await events.receive_message(), await events.receive_message()} == {
+            "started a",
+            "started b",
+        }
         for entity_id in ("a", "b"):
             shard.tell(ShardingEnvelope(entity_id, Get(replies.ref)))
             await replies.expect_message(1)

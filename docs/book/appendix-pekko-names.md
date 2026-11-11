@@ -135,6 +135,13 @@
 | `system.ignoreRef` | `system.ignore_ref` |
 | (none) | `batching(max_n, max_wait, handle)` |
 | (none) | `ohra.ext.shm.SharedArray`, a picklable handle to an array in shared memory |
+| `coordination.lease.scaladsl.Lease` (`acquire()`, `acquire(leaseLostCallback)`, `release()`, `checkLease()`) | `Lease`, with one `async acquire(lease_lost_callback=None)`, `async release()` and `check_lease()` |
+| `LeaseProvider(system).getLease(leaseName, configPath, ownerName)` | `LeaseProvider(system).get_lease(lease_name, implementation, owner_name)` |
+| `lease-class` and a config block | `LeaseProvider(system).register(implementation, factory, timeout_settings=, lease_config=)` |
+| `LeaseSettings`, `TimeoutSettings` (`heartbeat-timeout`, `heartbeat-interval`, `lease-operation-timeout`), `TimeoutSettings(config)` | same, snake_case: `heartbeat_timeout`, `heartbeat_interval`, `operation_timeout`; `TimeoutSettings.create(...)` |
+| `LeaseUsageSettings` | same |
+| `LeaseException`, `LeaseTimeoutException` | `LeaseError`, `LeaseTimeoutError` |
+| `TestLease`, `TestLeaseExt`, `TestLeaseActor`, `TestLeaseActorClient`, `TestLeaseActorClientExt` | same, from `ohra.testkit` |
 
 ---
 

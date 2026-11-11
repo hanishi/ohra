@@ -200,7 +200,7 @@ class FrequencySketch:
         for row in range(self._depth):
             updated |= self._increment_counter(row, _i32(hash1 + row * hash2))
         if updated:
-            self._updated_size += 1
+            self._updated_size = _i32(self._updated_size + 1)
             if self._updated_size == self._reset_size:
                 self._updated_size = _reset(
                     self._matrix, self._row_sizes, self._odd_mask, self._reset_mask
@@ -226,7 +226,7 @@ class FrequencySketch:
         words = self._matrix[row]
         if words[column] & mask != mask:
             words[column] = (words[column] + (1 << slot)) & _M64
-            self._row_sizes[row] += 1
+            self._row_sizes[row] = _i32(self._row_sizes[row] + 1)
             return True
         return False
 
@@ -291,7 +291,7 @@ class FastFrequencySketch:
         for row, seed in enumerate(_SEEDS):
             updated |= self._increment_counter(row, _fast_index(hash, seed, self._index_mask))
         if updated:
-            self._updated_size += 1
+            self._updated_size = _i32(self._updated_size + 1)
             if self._updated_size == self._reset_size:
                 self._updated_size = _reset(
                     self._matrix, self._row_sizes, 0x1111111111111111, 0x7777777777777777
@@ -311,6 +311,6 @@ class FastFrequencySketch:
         words = self._matrix[row]
         if words[column] & mask != mask:
             words[column] = (words[column] + (1 << slot)) & _M64
-            self._row_sizes[row] += 1
+            self._row_sizes[row] = _i32(self._row_sizes[row] + 1)
             return True
         return False

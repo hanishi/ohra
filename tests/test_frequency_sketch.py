@@ -30,6 +30,7 @@ Added: ``test_string_hashes_are_javas_and_scalas`` pins ``String.hashCode`` and
 
 import math
 import random
+from typing import Any
 
 import pytest
 
@@ -363,3 +364,13 @@ def test_colliding_sketches_count_as_pekkos() -> None:
     assert [fast.frequency(i) for i in ids] == [1, 2, 2, 2, 1, 1, 1, 2, 2, 2, 1, 1, 1]
     assert two_bits.size == 39
     assert [two_bits.frequency(i) for i in ids] == [3] * 13
+
+
+@pytest.mark.parametrize("create", [FrequencySketch.create, FastFrequencySketch.create])
+def test_the_size_wraps_at_32_bits_as_a_java_int(create: Any) -> None:
+    """ohra's own: Pekko's sizes are Java Ints, so the 2**31st update wraps negative. Reaching
+    it by updates would take billions of them, so the test starts the count there."""
+    sketch = create(1000)
+    sketch._updated_size = 2**31 - 1
+    sketch.increment("a")
+    assert sketch.size == -(2**31)

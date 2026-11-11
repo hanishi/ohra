@@ -253,10 +253,11 @@ class ShardingEnvelope[T]:
 @dataclass(frozen=True)
 class CurrentShardRegionState:
     """The live entity ids, and the shard ids this region hosts (a moved shard may hold no entity
-    yet)."""
+    yet). ``failed`` holds the shards that did not answer in time, as Pekko's does."""
 
     entity_ids: frozenset[str]
     shard_ids: frozenset[str] = frozenset()
+    failed: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1131,9 +1132,10 @@ def region_state_query(
     """``replyToRegionStateQuery`` (ShardRegion.scala 1056-1064): the union of what the shards
     that answered hold."""
 
-    def done(responses: dict[str, CurrentShardState], _failed: frozenset[str]) -> None:
+    def done(responses: dict[str, CurrentShardState], failed: frozenset[str]) -> None:
         ids = frozenset(i for r in responses.values() for i in r.entity_ids)
-        reply_to.tell(CurrentShardRegionState(ids, frozenset(r.shard for r in responses.values())))
+        shard_ids = frozenset(r.shard for r in responses.values())
+        reply_to.tell(CurrentShardRegionState(ids, shard_ids, failed))
 
     return query_shards(type_name, shards, GetShardState, timeout, done)
 

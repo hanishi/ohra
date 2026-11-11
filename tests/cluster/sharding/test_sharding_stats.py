@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 from ohra import (
+    CurrentShardRegionState,
+    GetShardRegionState,
     ClusterShardingSettings,
     ClusterShardingStats,
     Entity,
@@ -103,6 +105,12 @@ async def test_a_shard_waiting_for_its_lease_is_reported_failed(
         warnings = [r for r in caplog.records if "[1] failed after" in r.getMessage()]
         assert len(warnings) == 1
         assert warnings[0].levelno == logging.WARNING
+        state: TestProbe[CurrentShardRegionState] = testkit.create_test_probe()
+        region.tell(GetShardRegionState(state.ref))
+        await manual.time_passes(settings.shard_region_query_timeout)
+        await state.expect_message(
+            CurrentShardRegionState(frozenset({a}), frozenset({X}), frozenset({Y}))
+        )
         lease_b.initial_promise.set_result(True)
 
 

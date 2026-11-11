@@ -618,6 +618,8 @@ Leaving the `async with` terminates the system and waits for it, at most `system
 
 `testkit.system` is the actor system, `testkit.scheduler` its scheduler, and `testkit.timeout` the default for asks, 5 seconds.
 
+For code that takes a [lease](05-cluster.md#leases), `TestLease.register(testkit.system)` makes the implementation `"test-lease"` available to `LeaseProvider`. Once the code under test has asked for a lease, `TestLeaseExt(testkit.system).get_test_lease(name)` returns it. The test completes `initial_promise`, an `asyncio.Future`, to answer the first `acquire`, sets the later answers with `set_next_acquire_result` and `set_next_check_lease_result`, and calls the callback that `current_callback()` returns to simulate a lost lease, after it has seen `AcquireReq` on `probe`: `acquire` sets the callback only once its coroutine runs. It expects `TestLease.AcquireReq` and `TestLease.ReleaseReq` on the lease's `probe`. `TestLeaseActor` is the variant that holds each request until the test actions it with an `ActionRequest`.
+
 ### Probes
 
 A probe is an actor under `/system`, named `testProbe-N`, or `<name>-N` after the name you pass, with N counting up across the run, as in Pekko. Every message it receives goes into an asyncio queue, and every `expect_*` and `receive_*` method awaits that queue with a deadline. A probe with a message type other than the annotation's, such as `TestProbe[int](testkit)`, works too. `testkit.create_dead_letter_probe()`, `create_unhandled_message_probe()` and `create_dropped_message_probe()` return probes subscribed to the [event stream](01-actors.md#dead-letters-and-logging).

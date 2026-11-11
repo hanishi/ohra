@@ -180,6 +180,64 @@ settings = ClusterSettings(
 
 All four detect indirectly connected nodes, which are marked unreachable over some links but still talk over others, and down those first, as Pekko. `down_all_when_unstable` (`None` is Pekko's `on`: three quarters of `stable_after`, at least four seconds; `0` is off) downs everything on every node when reachability keeps flapping for `stable_after + down_all_when_unstable`. `down_removal_margin` is how long the surviving side waits after a removal before starting that node's singletons and shards, so the downed side has time to stop them; it defaults to `stable_after`.
 
+### Leases
+
+A lease lets one owner at a time hold a named resource. The owner holds it in a store outside the cluster, such as a Kubernetes custom resource or a database row, so a node on the wrong side of a partition cannot go on acting as if it still owned the resource. Apache Pekko's singleton, sharding and split-brain resolver can each take a lease for this. In ohra nothing acquires a lease yet; this section covers the API they will use.
+
+ohra ships no store-backed implementation. You subclass `Lease`, which has three methods:
+
+- `await acquire(lease_lost_callback=None)` returns `True` when the owner holds the lease and `False` when it surely does not, for example because another owner holds it. It raises `LeaseError` when the outcome is unknown, and `LeaseTimeoutError` when the store did not answer in time. The callback is called if the lease is lost later, and never before `acquire` has completed.
+- `await release()` frees the lease for another owner.
+- `check_lease()` is not async. `True` means the owner certainly holds the lease; `False` means it might not.
+
+Register the subclass with `LeaseProvider(system).register(implementation, factory, timeout_settings=..., lease_config=...)`. The `implementation` is a name you choose, `factory` takes the `LeaseSettings` and returns the lease, and `lease_config` is a mapping for your own settings. `get_lease(lease_name, implementation, owner_name)` then returns the lease, and the same three arguments return the same instance. A different owner, or a different implementation, gets another one.
+
+```python
+import asyncio
+from collections.abc import Callable
+
+from ohra import ActorSystem, Behaviors, Lease, LeaseProvider
+
+owners: dict[str, str] = {}  # the lease store, shared by every owner
+
+
+class InProcessLease(Lease):
+    async def acquire(
+        self, lease_lost_callback: Callable[[BaseException | None], None] | None = None
+    ) -> bool:
+        holder = owners.setdefault(self.settings.lease_name, self.settings.owner_name)
+        return holder == self.settings.owner_name
+
+    async def release(self) -> bool:
+        if owners.get(self.settings.lease_name) == self.settings.owner_name:
+            del owners[self.settings.lease_name]
+        return True
+
+    def check_lease(self) -> bool:
+        return owners.get(self.settings.lease_name) == self.settings.owner_name
+
+
+async def main() -> None:
+    async with ActorSystem[None](Behaviors.ignore, "app") as system:
+        provider = LeaseProvider(system)
+        provider.register("in-process", InProcessLease)
+        first = provider.get_lease("jobs", "in-process", "node-1")
+        second = provider.get_lease("jobs", "in-process", "node-2")
+        print(await first.acquire())  # True
+        print(await second.acquire())  # False
+        await first.release()
+        print(await second.acquire())  # True
+
+
+asyncio.run(main())
+```
+
+A real implementation does the same against its store, and answers `False` or raises `LeaseError` instead of waiting for ever.
+
+`TimeoutSettings` holds three durations in seconds, with Pekko's defaults. `heartbeat_timeout` (120) is how long the store keeps a lease its owner has stopped refreshing. `heartbeat_interval` (12) is how often the owner refreshes it. `operation_timeout` (5) is how long one call to the store may take. `TimeoutSettings.create(...)` checks that `heartbeat_interval` is less than half of `heartbeat_timeout`, and with `heartbeat_interval=None` it takes `max(heartbeat_timeout / 10, 5)`. The constructor does not check.
+
+`LeaseSettings` is what the factory receives: `lease_name`, `owner_name`, `timeout_settings` and `lease_config`. `LeaseUsageSettings(lease_implementation, lease_retry_interval=5.0)` is what a feature that takes a lease holds: which implementation to ask `LeaseProvider` for, and how long to wait before it retries a failed acquire.
+
 ---
 
 [← Remoting](04-remoting.md) · [Contents](README.md) · [Cluster singleton →](06-singleton.md)

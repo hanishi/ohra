@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from .coordinated_shutdown import CoordinatedShutdownSettings
     from .management import Management, ManagementSettings
     from .cluster.ddata import DistributedData
+    from .coordination.lease import LeaseProvider
     from .cluster.sharding import ClusterSharding
     from .cluster.singleton import ClusterSingleton
     from .receptionist import Receptionist
@@ -102,6 +103,8 @@ class ActorSystem[T](ActorRef[T]):
         """The cluster sharding extension, reached as ``ClusterSharding(system)``."""
         self.distributed_data: DistributedData | None = None
         """The Distributed Data extension, reached as ``DistributedData(system)``."""
+        self.lease_provider: LeaseProvider | None = None
+        """The lease provider, reached as ``LeaseProvider(system)``."""
         from .coordinated_shutdown import CoordinatedShutdown as _CoordinatedShutdown
         from .coordinated_shutdown import CoordinatedShutdownSettings as _CSSettings
 

@@ -173,11 +173,14 @@ async def full_shutdown() -> None:
         while any(Cluster(n).self_member.status != "ready_for_shutdown" for n in nodes):
             await asyncio.sleep(0.1)
         print([(Cluster(n).self_address.port, Cluster(n).self_member.status) for n in nodes])
-        for i, n in enumerate((third, second)):  # one at a time, see the notes below
-            n.terminate()
-            await n.when_terminated()
-            while any(len(Cluster(m).state.members) != 2 - i for m in nodes[: 2 - i]):
-                await asyncio.sleep(0.1)
+        third.terminate()  # one at a time, see the notes below
+        await third.when_terminated()
+        while any(len(Cluster(n).state.members) != 2 for n in (first, second)):
+            await asyncio.sleep(0.1)
+        second.terminate()
+        await second.when_terminated()
+        while len(Cluster(first).state.members) != 1:
+            await asyncio.sleep(0.1)
 ```
 
 It prints:
@@ -188,9 +191,8 @@ It prints:
 
 - **`prepare_for_full_cluster_shutdown()`** tells the local core daemon, and a call made before the node has joined is dropped. `Cluster(system).manager.tell(PrepareForFullClusterShutdown())` does the same. Call it on one node.
 - **The node you call** moves every Up member to `preparing_for_shutdown` in its own gossip, which then spreads. Any other Up node that sees a preparing member prepares itself. Then the leader, on convergence, moves each of them to `ready_for_shutdown`. Subscribers get `MemberPreparingForShutdown` and `MemberReadyForShutdown`.
-- **Members that are not Up yet** stay Joining or WeaklyUp: the leader moves none of them to Up while it is preparing. Members that are Leaving or Exiting leave by the normal path.
-- **Only the node you called ignores new joins**, and logs it. A node that joins through another member can still come Up, if the leader did not run the prepare. It then sees the preparing members, prepares itself and ends `ready_for_shutdown` too.
-- **It does not stop the nodes.** Wait until every member that was Up sees itself `ready_for_shutdown`, then stop them and start the new version. Stopping the processes is the usual way. A graceful leave from a ready node can be lost: ReadyForShutdown outranks Leaving when two views of a member merge, as in Pekko, so a leave that is concurrent with any move by the leader is overwritten, and that node's shutdown waits out the `cluster-exiting` timeout (10 s) with a warning. The example therefore stops the nodes one at a time and waits until the others no longer list the one that left.
+- **A node that ran the prepare** ignores new joins, and logs it, and while it is the leader it moves no Joining or WeaklyUp member to Up. That is the node you called, and any node that prepared itself on coming Up later; the others, marked preparing by gossip, behave as before. So a node that joins through another member can still come Up if the leader did not run the prepare, and it then sees the preparing members, prepares itself and ends `ready_for_shutdown` too. Members that are Leaving or Exiting leave by the normal path.
+- **It does not stop the nodes.** Wait until every member that was Up sees itself `ready_for_shutdown`, then stop them and start the new version. A graceful leave from a ready node can be lost: ReadyForShutdown outranks Leaving when two views of a member merge, as in Pekko, so a leave that is concurrent with any other change to the membership, such as a move by the leader or another node's leave, is overwritten, and that node's shutdown waits out the `cluster-exiting` timeout (10 s) with a warning. The example therefore stops the nodes one at a time and waits until the others no longer list the one that left.
 - Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
 - **The singleton** stops handing over while any member is preparing or ready, see [chapter 6](06-singleton.md).
 

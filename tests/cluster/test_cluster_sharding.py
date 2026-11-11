@@ -156,6 +156,15 @@ async def test_the_coordinator_runs_without_a_singleton_proxy():
             a.resolve(f"{a.path.removesuffix('/user')}/system/singletonProxyCounterCoordinator")
 
 
+async def test_an_entity_type_named_replicator_is_refused():
+    """Sharding's Replicator is the child /system/sharding/replicator, beside the regions: init
+    says so, rather than failing on the duplicate child name."""
+    p1 = free_port()
+    async with node(p1, [p1]) as a:
+        with pytest.raises(ValueError, match="reserved for sharding's Replicator"):
+            start(a, EntityTypeKey[Count]("replicator"))
+
+
 async def test_entity_ref_for_before_registration_buffers_and_delivers():
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:

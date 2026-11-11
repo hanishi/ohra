@@ -105,6 +105,11 @@ class ClusterSharding:
 
     def init[M](self, entity: Entity[M]) -> ActorRef[ShardingEnvelope[M]]:
         name = entity.type_key.name
+        if name == "replicator":
+            raise ValueError(
+                "the entity type name 'replicator' is reserved for sharding's Replicator, "
+                "/system/sharding/replicator"
+            )
         existing = self._regions.get(name)
         if existing is not None:
             return existing

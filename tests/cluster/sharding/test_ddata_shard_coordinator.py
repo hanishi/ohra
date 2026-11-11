@@ -452,8 +452,8 @@ async def stored_state(system: ActorSystem[Any], type_name: str) -> CoordinatorS
 
 
 async def test_an_unreachable_node_stalls_new_allocations_until_it_is_removed():
-    """Pekko's write-majority-plus 3 with a min cap of 5 needs every node of three: a known shard
-    is still answered, a new one waits until the unreachable node is removed."""
+    """Pekko's write-majority-plus 3 needs every node of three (a majority of two plus three): a
+    known shard is still answered, a new one waits until the unreachable node is removed."""
     p1, p2, p3 = free_port(), free_port(), free_port()
     async with AsyncExitStack() as stack:
         nodes = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2, p3)]

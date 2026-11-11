@@ -164,7 +164,7 @@ class _Region:
             # the local singleton instance is not up yet: the next retry asks again
             except LookupError:
                 continue
-            coordinator.tell(Register(self.ctx.self, tuple(self.shards)))
+            coordinator.tell(Register(self.ctx.self))
 
     # --- delivery --------------------------------------------------------------------------------
 

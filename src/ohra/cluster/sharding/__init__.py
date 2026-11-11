@@ -1,7 +1,7 @@
 """Apache Pekko's ClusterSharding across nodes: a ShardCoordinator singleton allocating shards to
 regions with the LeastShardAllocationStrategy, a ShardRegion on every node, hand-off for
-rebalancing and for a leaving node. The coordinator rebuilds its state from the regions'
-registrations instead of distributed data."""
+rebalancing and for a leaving node. The coordinator keeps its state in Distributed Data, on
+sharding's own Replicator, as Pekko's DDataShardCoordinator."""
 
 from __future__ import annotations
 
@@ -132,8 +132,8 @@ class ClusterSharding:
             progress.task(Cluster(self.system), region.ref),
         )
         # Pekko's BackoffOpts.onStop restarts a coordinator that throws at once, with its default
-        # decider; the backoff is for one that stops, which this in-memory one never does but on
-        # its stop message
+        # decider; the backoff is for one that stops, which this one does only after its stop
+        # message
         supervised = Behaviors.supervise(
             coordinator_behavior(name, settings, self._replicator)
         ).on_failure(SupervisorStrategy.restart())

@@ -594,3 +594,98 @@ class Sharding:
         if not entity_id:
             raise ValueError("entity id must not be empty")
         return EntityRef(region, entity_id)
+
+
+STOP_TIMEOUT_WARNING_AFTER = 5.0
+"""Pekko's ``HandOffStopper.StopTimeoutWarningAfter`` (ShardRegion.scala 593)."""
+
+
+@dataclass(frozen=True)
+class _StopTimeoutWarning:
+    pass
+
+
+@dataclass(frozen=True)
+class _StopTimeout:
+    pass
+
+
+def hand_off_stopper(
+    type_name: str,
+    shard: str,
+    reply_to: ActorRef[ShardStopped],
+    entities: frozenset[ActorRef[Any]],
+    stop_message: object | None,
+    handoff_timeout: float,
+    stop: Callable[[ActorRef[Any], bool], None],
+) -> Behavior[Any]:
+    """Pekko's ``HandOffStopper`` (ShardRegion.scala 521-597): sends the stop message to the
+    entities and, when all of them have terminated, replies ``ShardStopped``. After
+    ``STOP_TIMEOUT_WARNING_AFTER`` it warns; at ``handoff_timeout`` it stops what is left.
+
+    ohra can stop only a child, and the entities are the shard's children, so ``stop(ref,
+    after_pending)`` is the shard's ``ctx.stop``. Pekko's ``a ! PoisonPill`` (no stop message) is
+    ``stop(ref, True)``, and ``context.stop(ref)`` at the timeout is ``stop(ref, False)``."""
+    name = "PoisonPill" if stop_message is None else type(stop_message).__name__
+
+    @Behaviors.setup
+    def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+        ctx.timers.start_single_timer(
+            _StopTimeoutWarning, _StopTimeoutWarning(), STOP_TIMEOUT_WARNING_AFTER
+        )
+        ctx.timers.start_single_timer(_StopTimeout, _StopTimeout(), handoff_timeout)
+        for a in entities:
+            ctx.watch(a)
+            if stop_message is None:
+                stop(a, True)
+            else:
+                a.tell(stop_message)
+        return running(entities)
+
+    def running(remaining: frozenset[ActorRef[Any]]) -> Behavior[Any]:
+        def on_message(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+            match msg:
+                case _StopTimeoutWarning():
+                    from ...coordinated_shutdown import CoordinatedShutdown
+
+                    ctx.log.warning(
+                        "%s: [%d] of the entities in shard [%s] not stopped after [%s]. "
+                        "Maybe the handOffStopMessage [%s] is not handled? %s",
+                        type_name,
+                        len(remaining),
+                        shard,
+                        f"{STOP_TIMEOUT_WARNING_AFTER:g} s",
+                        name,
+                        ""
+                        if CoordinatedShutdown(ctx.system).shutdown_reason is not None
+                        else f"Waiting additional [{handoff_timeout:g} s] before stopping the "
+                        "remaining entities.",
+                    )
+                case _StopTimeout():
+                    ctx.log.warning(
+                        "%s: HandOffStopMessage [%s] is not handled by some of the entities in "
+                        "shard [%s] after [%s], stopping the remaining [%d] entities.",
+                        type_name,
+                        name,
+                        shard,
+                        f"{handoff_timeout:g} s",
+                        len(remaining),
+                    )
+                    for ref in remaining:
+                        stop(ref, False)
+                case _:
+                    return Behaviors.unhandled
+            return Behaviors.same
+
+        def on_signal(_ctx: ActorContext[Any], signal: Signal) -> Behavior[Any]:
+            if isinstance(signal, Terminated):
+                left = remaining - {signal.ref}
+                if not left:
+                    reply_to.tell(ShardStopped(shard))
+                    return Behaviors.stopped()
+                return running(left)
+            return Behaviors.unhandled
+
+        return Behaviors.receive(on_message).receive_signal(on_signal)
+
+    return setup

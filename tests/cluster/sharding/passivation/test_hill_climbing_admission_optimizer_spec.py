@@ -12,8 +12,14 @@ cases:
 restart threshold 0.05, step decay 0.98), and the adjustments are compared with ``==``, as
 Scala's ``shouldBe``.
 
+Then tests of ohra's own, that the optimizer computes as Scala's doubles do: with no accesses and
+an adjust size of 0 the active rate is NaN (Scala's ``0.0 / 0``), and an adjust size of NaN
+never adjusts (Scala's ``accesses >= adjustSize`` is false).
+
 Differences from the Scala: none.
 """
+
+import math
 
 from ohra.cluster.sharding.passivation import HillClimbingAdmissionOptimizer
 
@@ -90,3 +96,22 @@ def test_change_direction_when_active_rate_drops() -> None:
                 assert adjustment < 0.0
             else:
                 assert adjustment > 0.0
+
+
+def test_no_accesses_at_an_adjust_size_of_0_give_an_active_rate_of_nan() -> None:
+    optimizer = create(initial_limit=0)
+    # NaN active rate: delta >= 0 is false, so the step flips, and no restart
+    assert optimizer.calculate_adjustment() == 0.01
+    optimizer.record_passive()
+    # the previous rate is NaN, so delta is NaN again and the decayed step flips back
+    assert optimizer.calculate_adjustment() == -(0.01 * 0.98)
+    optimizer.record_passive()
+    # active rate 0.0 after 0.0: delta 0.0 keeps the direction
+    assert optimizer.calculate_adjustment() == -(0.01 * 0.98) * 0.98
+
+
+def test_an_adjust_size_of_nan_never_adjusts() -> None:
+    optimizer = create(adjust_multiplier=math.nan, initial_step=0.1)
+    for _ in range(10):
+        optimizer.record_passive()
+        assert optimizer.calculate_adjustment() == 0.0

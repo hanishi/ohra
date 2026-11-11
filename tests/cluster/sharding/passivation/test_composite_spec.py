@@ -32,9 +32,16 @@ Porting rules, as in ``test_entity_passivation_spec``:
 The admission decisions compare the frequency sketch's counts, so these expectations hold only
 with the sketch's exact hashes (``ohra.util.frequency_sketch``, bit-exact with the JVM).
 
+Then a test of ohra's own: the frequency sketch filter of a depth other than 4 (Scala's general
+``FrequencySketchAdmissionFilter``, where depth 4 and 4-bit counters take the fast one). Its
+expectations come from Pekko 1.4.0 run on the JVM, whose composite strategy and sketch match the
+ported source apart from overflow guards on the sketch's width.
+
 Differences from the Scala: in AdmissionFilterNoWindowSpec's last loop Scala leaves the ``Stop``
 of entities 6-10 unchecked (no later message reaches their probes); its final ``expectState``
-shows them passivated, and the port asserts each one passivates itself.
+shows them passivated, and the port asserts each one passivates itself. The comment above that
+``expectState`` says "shard 1: 16-20" in Scala, stale against the 1-5 it asserts; the port
+corrects it.
 """
 
 from ohra.cluster.sharding.passivation_settings import PassivationStrategySettings
@@ -72,6 +79,11 @@ ADAPTIVE_WINDOW_CONFIG = (
             .with_optimizer(A.HillClimbingSettings(2.0, 0.4, 0.8, 0.5))
         ).with_filter(A.FrequencySketchSettings.defaults.with_reset_multiplier(100.0))
     )
+    .with_least_recently_used_replacement()
+)
+DEPTH_3_FILTER_CONFIG = (
+    P.defaults.with_active_entity_limit(5)
+    .with_admission(A.defaults.with_filter(A.FrequencySketchSettings.defaults.with_depth(3)))
     .with_least_recently_used_replacement()
 )
 IDLE_CONFIG = P.default_strategy.with_active_entity_limit(3).with_idle_entity_passivation(1.0)
@@ -181,7 +193,7 @@ def test_admission_filter_no_window_passivate_the_least_recently_or_frequently_u
     for id in range(1, 11):
         assert region.tell(1, id) == ({id + 15} if id <= 5 else {id})
 
-    # shard 1: 16-20, shard 2: 21
+    # shard 1: 1-5, shard 2: 21
     assert region.state() == {1: set(range(1, 6)), 2: {21}}
 
 
@@ -336,3 +348,25 @@ def test_composite_limit_adjustment_adjust_per_shard_limits_when_the_limit_is_ad
         assert region.tell(1, id) == ({id - 3} if id > 15 else set())  # new window size
 
     assert region.state() == {1: set(range(1, 13)) | set(range(18, 21)), 2: {41}}
+
+
+def test_a_frequency_sketch_filter_of_depth_3_admits_the_more_frequent_entities() -> None:
+    region = Region(DEPTH_3_FILTER_CONFIG, TestClock())
+
+    # candidates of the same frequency are not admitted to main
+    for id in range(1, 11):
+        assert region.tell(1, id) == ({id} if id > 5 else set())
+
+    # on their second access 6-10 are more frequent, so admitted, replacing 1-5
+    for id in range(6, 11):
+        for i in range(1, 4):
+            assert region.tell(1, id) == ({id - 5} if i == 1 else set())
+
+    # 1-5 are less frequent than 6-10, so not admitted
+    for id in range(1, 6):
+        assert region.tell(1, id) == {id}
+
+    # a second shard halves the per-shard limit to 2, passivating the least recently used
+    assert region.tell(2, 11) == {6, 7, 8}
+
+    assert region.state() == {1: {9, 10}, 2: {11}}

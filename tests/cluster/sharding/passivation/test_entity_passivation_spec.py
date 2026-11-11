@@ -4,7 +4,8 @@ pekko/cluster/sharding/passivation/EntityPassivationSpec.scala). The case:
 - DisabledEntityPassivationSpec: not passivate when passivation is disabled (152)
 
 Then tests of ohra's own: the scheduler's clock driving idle passivation, ``entity_terminated``
-for an id a strategy does not track, and a per-shard limit of 0.
+for an id a strategy does not track, a per-shard limit of 0, and Pekko's composite with an MRU or
+LFU main area at that limit, which stops tracking entities.
 
 Porting rules, shared by the passivation spec ports:
 
@@ -30,7 +31,10 @@ no interval is scheduled, where Pekko waits a second for no ``Stop``.
 
 import pytest
 
-from ohra.cluster.sharding.passivation import EntityPassivationStrategy
+from ohra.cluster.sharding.passivation import (
+    CompositeEntityPassivationStrategy,
+    EntityPassivationStrategy,
+)
 from ohra.cluster.sharding.passivation_settings import (
     NoPassivationStrategy,
     PassivationStrategySettings,
@@ -40,6 +44,7 @@ from ohra.testkit import ActorTestKit, ManualTime
 
 from ....util import TestClock
 from .harness import Region
+from .test_composite_spec import ADMISSION_FILTER_NO_WINDOW_CONFIG as _NO_WINDOW
 
 P = PassivationStrategySettings
 
@@ -80,15 +85,6 @@ _LFU = _LIMIT_1.with_least_frequently_used_replacement()
 # The composites keep their limits, and idle passivation passivates "1", in the untracked test:
 # at a limit of 1 the filter rejects "2" instead. The per-shard limit of 0 sets the limit to 1.
 _COMPOSITE = P.default_strategy
-_NO_WINDOW = (  # CompositeSpec's admissionFilterNoWindowConfig
-    P.defaults.with_active_entity_limit(10)
-    .with_admission(
-        P.AdmissionSettings.defaults.with_filter(
-            P.AdmissionSettings.FrequencySketchSettings.defaults
-        )
-    )
-    .with_least_recently_used_replacement()
-)
 
 
 def _idle(s: PassivationStrategySettings) -> PassivationStrategySettings:
@@ -175,3 +171,30 @@ def test_a_per_shard_limit_of_zero(
     for entity_id in first:
         strategy.entity_terminated(entity_id)  # the shard, on the entity's Terminated
     assert strategy.entity_touched("2") == second
+
+
+@pytest.mark.parametrize(
+    "main",
+    [P.MostRecentlyUsedSettings.defaults, P.LeastFrequentlyUsedSettings.defaults],
+    ids=["mru", "lfu"],
+)
+def test_a_composite_with_an_mru_or_lfu_main_area_at_a_per_shard_limit_of_0_tracks_nothing(
+    main: P.PolicySettings,
+) -> None:
+    """Pekko's behavior, kept as it is (checked on the JVM against Pekko 1.4.0). The window
+    (limit 0) drops the touched entity and the main area (limit 0) keeps it, as MRU skips the
+    touched entity (Scala 566) and LFU removes its excess before the update (616-624). Hill
+    climbing then adjusts on every access (an adjust size of 0) and shrinks the window, and
+    ``adaptWindow``'s ``main.updateLimit(mainLimit)`` drops the entity from the main area with
+    its result discarded (Scala 754-755). The entity stays active, untracked: each touch
+    passivates nothing and both areas end empty."""
+    settings = ClusterShardingSettings().with_passivation_strategy(
+        P.default_strategy.with_active_entity_limit(1).with_replacement_policy(main)
+    )
+    strategy = EntityPassivationStrategy.create(settings, TestClock())
+    assert isinstance(strategy, CompositeEntityPassivationStrategy)
+    assert strategy.shards_updated(2) == []
+    for entity_id in ["1", "2", "3", "4"]:
+        assert strategy.entity_touched(entity_id) == []
+    assert strategy._window.size == 0  # pyright: ignore[reportPrivateUsage]
+    assert strategy._main.size == 0  # pyright: ignore[reportPrivateUsage]

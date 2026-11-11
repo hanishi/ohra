@@ -8,6 +8,7 @@ without idle passivation gives its list no clock.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -754,20 +755,22 @@ class HillClimbingAdmissionOptimizer(AdmissionOptimizer):
         self._adjust_size = self._adjust_multiplier * new_limit
 
     def calculate_adjustment(self) -> float:
-        if self._accesses < self._adjust_size:
+        """Scala 856-869. With no accesses the active rate is NaN, as Scala's ``0.0 / 0``."""
+        if self._accesses >= self._adjust_size:
+            active_rate = self._active_accesses / self._accesses if self._accesses else math.nan
+            delta = active_rate - self._previous_active_rate
+            adjustment = self._next_step if delta >= 0 else -self._next_step
+            direction = 1 if adjustment >= 0 else -1
+            restart = abs(delta) >= self._restart_threshold
+            self._next_step = (
+                self._initial_step * direction if restart else adjustment * self._step_decay
+            )
+            self._previous_active_rate = active_rate
+            self._accesses = 0
+            self._active_accesses = 0
+            return adjustment
+        else:
             return 0.0
-        active_rate = self._active_accesses / self._accesses
-        delta = active_rate - self._previous_active_rate
-        adjustment = self._next_step if delta >= 0 else -self._next_step
-        direction = 1 if adjustment >= 0 else -1
-        restart = abs(delta) >= self._restart_threshold
-        self._next_step = (
-            self._initial_step * direction if restart else adjustment * self._step_decay
-        )
-        self._previous_active_rate = active_rate
-        self._accesses = 0
-        self._active_accesses = 0
-        return adjustment
 
 
 class AdmissionFilter(ABC):

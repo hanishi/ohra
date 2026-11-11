@@ -18,8 +18,11 @@ Porting rules, as in ``test_entity_passivation_spec``:
   ``LeastFrequentlyUsedSettings.defaults.with_dynamic_aging()``; ``idleConfig`` is limit 3, LFU
   and ``.with_idle_entity_passivation(1.0)``.
 - The specs drive ``harness.Region``. Each ``expectReceived(id, Stop)`` asserts the id is in what
-  that step passivated (an id's several accesses are one step); where Scala expects no ``Stop``
-  in a step, the test asserts nothing about it. Each ``expectState`` asserts ``region.state()``.
+  that step passivated (an id's several accesses are one step), and each step asserts exactly
+  what it passivated, empty where Scala expects no ``Stop``: Scala's per-entity probes fail on a
+  stray ``Stop``. The exception is the dynamic aging case's last three loops, where Scala expects
+  no ``Stop`` yet entities are passivated (its ``expectState`` shows them gone): there the test,
+  as Scala, asserts only the state. Each ``expectState`` asserts ``region.state()``.
 - A ``Thread.sleep(timeout / 2)`` is ``region.passes(0.5)``. Each idle expectation asserts the
   entity is passivated by the first ``passes`` after which more than the 1.0 s timeout has gone
   since its last touch, and not by an earlier one.
@@ -75,15 +78,15 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
     for id in range(1, 21):
         accesses = (id - 1) % 4 + 1  # vary frequency between 1 and 4 accesses
         passivated = _accesses(region, 1, id, accesses)
-        if id in expect_passivated:
-            assert expect_passivated[id] in passivated
+        expected = {expect_passivated[id]} if id in expect_passivated else set()
+        assert passivated == expected
 
     # shard 1: frequency 3 = (3, 7, 11, 15, 19), frequency 4 = (4, 8, 12, 16, 20)
     assert region.state() == {1: {3, 7, 11, 15, 19, 4, 8, 12, 16, 20}}
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert {3, 7, 11, 15, 19} <= region.tell(2, 21)
+    assert region.tell(2, 21) == {3, 7, 11, 15, 19}
 
     # shard 1: frequency 4 = (4, 8, 12, 16, 20)
     # shard 2: frequency 1 = (21)
@@ -94,7 +97,7 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
     for id in range(1, 21):
         accesses = (id - 1) % 4 + 1  # vary frequency between 1 and 4 accesses
         passivated_id = id + 3 if accesses == 1 else id - 1
-        assert passivated_id in _accesses(region, 1, id, accesses)
+        assert _accesses(region, 1, id, accesses) == {passivated_id}
 
     # shard 1: frequency 4 = (4, 8, 12, 16, 20)
     # shard 2: frequency 1 = (21)
@@ -102,7 +105,7 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
 
     # shards now have a limit of 5 entities
     for id in range(21, 25):
-        region.tell(2, id)
+        assert region.tell(2, id) == set()
 
     # shard 1: frequency 4 = (4, 8, 12, 16, 20)
     # shard 2: frequency 1 = (22, 23, 24), frequency 2 = (21)
@@ -110,7 +113,7 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
 
     # activating a third shard will divide the per-shard limit in three, passivating entities
     # over the new limits
-    assert {4, 8, 22} <= region.tell(3, 31)
+    assert region.tell(3, 31) == {4, 8, 22}
 
     # shard 1: frequency 4 = (12, 16, 20)
     # shard 2: frequency 1 = (23, 24), frequency 2 = (21)
@@ -122,8 +125,8 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
     for id in range(21, 31):
         accesses = (id - 1) % 4 + 1  # vary frequency between 1 and 4 accesses
         passivated = _accesses(region, 2, id, accesses)
-        if id in expect_passivated:
-            assert expect_passivated[id] in passivated
+        expected = {expect_passivated[id]} if id in expect_passivated else set()
+        assert passivated == expected
 
     # shard 1: frequency 4 = (12, 16, 20)
     # shard 2: frequency 2 = (30), frequency 4 = (24, 28)
@@ -135,8 +138,8 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
     for id in range(31, 41):
         accesses = 4 - (id - 1) % 4  # vary frequency between 1 and 4 accesses
         passivated = _accesses(region, 3, id, accesses)
-        if id in expect_passivated:
-            assert expect_passivated[id] in passivated
+        expected = {expect_passivated[id]} if id in expect_passivated else set()
+        assert passivated == expected
 
     # shard 1: frequency 4 = (12, 16, 20)
     # shard 2: frequency 2 = (30), frequency 4 = (24, 28)
@@ -157,10 +160,7 @@ def test_lfu_passivate_the_least_frequently_used_entities_when_the_shard_limit_i
         passivated: set[int] = set()
         for _ in range(i):
             passivated |= region.tell(1, 10 + i) | region.tell(2, 20 + i) | region.tell(3, 30 + i)
-        if i == 2:
-            assert {21, 40} <= passivated
-        elif i == 3:
-            assert {11, 30, 31} <= passivated
+        assert passivated == ({21, 40} if i == 2 else {11, 30, 31} if i == 3 else set())
 
     # shard 1: frequency 3 = (13), frequency 4 = (20), frequency 6 = (12)
     # shard 2: frequency 2 = (22), frequency 3 = (23), frequency 4 = (28)
@@ -174,18 +174,16 @@ def test_lfu_with_dynamic_aging_passivate_the_least_frequently_used_entities() -
     # only one active shard at first
     # ids 1 and 2 are quite popular initially
     for id in range(1, 3):
-        _accesses(region, 1, id, 5)
+        assert _accesses(region, 1, id, 5) == set()
     # ids 3, 4, and 5 are very popular initially
     for id in range(3, 6):
-        _accesses(region, 1, id, 10)
+        assert _accesses(region, 1, id, 10) == set()
 
     # shard 1: age = 0, @5 (5 + 0) = (1, 2), @10 (10 + 0) = (3, 4, 5)
     assert region.state() == {1: {1, 2, 3, 4, 5}}
 
     for id in range(6, 21):
-        passivated = region.tell(1, id)
-        if id > 10:
-            assert id - 5 in passivated
+        assert region.tell(1, id) == ({id - 5} if id > 10 else set())
 
     # shard 1: age = 2, @3 (1 + 2) = (16, 17, 18, 19, 20), @5 (5 + 0) = (1, 2),
     # @10 (10 + 0) = (3, 4, 5)
@@ -193,7 +191,7 @@ def test_lfu_with_dynamic_aging_passivate_the_least_frequently_used_entities() -
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert set(range(16, 21)) <= region.tell(2, 21)
+    assert region.tell(2, 21) == set(range(16, 21))
 
     # shard 1: age = 3, @5 (5 + 0) = (1, 2), @10 (10 + 0) = (3, 4, 5)
     # shard 2: age = 0, @1 (1 + 0) = (21)
@@ -224,20 +222,20 @@ def test_lfu_with_dynamic_aging_passivate_the_least_frequently_used_entities() -
 def test_lfu_with_idle_passivate_entities_when_they_havent_seen_messages_for_the_timeout() -> None:
     region = Region(IDLE_CONFIG, TestClock())
 
-    region.tell(1, 1)  # t = 0.0, lastSendNanoTime1
-    region.tell(1, 2)
+    assert region.tell(1, 1) == set()  # t = 0.0, lastSendNanoTime1
+    assert region.tell(1, 2) == set()
 
     # keep entity 3 active to prevent idle passivation
-    region.tell(1, 3)
-    assert region.passes(0.5).isdisjoint({1, 2})
-    region.tell(1, 3)
-    assert region.passes(0.5).isdisjoint({1, 2})  # t = 1.0: 1.0 s since the touch, not more
-    region.tell(1, 3)
-    assert {1, 2} <= region.passes(0.5)  # t = 1.5
-    region.tell(1, 3)  # lastSendNanoTime2
-    assert 3 not in region.passes(0.5)
-    assert 3 not in region.passes(0.5)
-    assert 3 in region.passes(0.5)  # t = 3.0
+    assert region.tell(1, 3) == set()
+    assert region.passes(0.5) == set()
+    assert region.tell(1, 3) == set()
+    assert region.passes(0.5) == set()  # t = 1.0: 1.0 s since the touch, not more
+    assert region.tell(1, 3) == set()
+    assert region.passes(0.5) == {1, 2}  # t = 1.5
+    assert region.tell(1, 3) == set()  # lastSendNanoTime2
+    assert region.passes(0.5) == set()
+    assert region.passes(0.5) == set()
+    assert region.passes(0.5) == {3}  # t = 3.0
 
 
 def test_lfu_limit_adjustment_adjust_per_shard_limits_when_the_per_region_limit_is_adjusted() -> (
@@ -247,35 +245,32 @@ def test_lfu_limit_adjustment_adjust_per_shard_limits_when_the_per_region_limit_
 
     # only one active shard at first, initial per-shard limit of 10
     for id in range(1, 21):
-        passivated = region.tell(1, id)
-        if id > 10:
-            assert id - 10 in passivated
+        assert region.tell(1, id) == ({id - 10} if id > 10 else set())
 
     assert region.state() == {1: set(range(11, 21))}
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert set(range(11, 16)) <= region.tell(2, 21)
+    assert region.tell(2, 21) == set(range(11, 16))
 
     assert region.state() == {1: set(range(16, 21)), 2: {21}}
 
     # reduce the per-region limit from 10 to 6, per-shard limit becomes 3
-    assert {16, 17} <= region.set_active_entity_limit(6)  # passivate entities over new limit
+    assert region.set_active_entity_limit(6) == {16, 17}  # passivate entities over new limit
 
     assert region.state() == {1: set(range(18, 21)), 2: {21}}
 
     for id in range(1, 11):
         passivated_id = id + 17 if id < 4 else id - 3
-        assert passivated_id in region.tell(1, id)
+        assert region.tell(1, id) == {passivated_id}
 
     assert region.state() == {1: set(range(8, 11)), 2: {21}}
 
     # increase the per-region limit from 6 to 12, per-shard limit becomes 6
-    region.set_active_entity_limit(12)
+    assert region.set_active_entity_limit(12) == set()
 
     for id in range(11, 21):
-        passivated = region.tell(1, id)
-        if id > 13:  # start passivating at new higher limit of 6
-            assert id - 6 in passivated
+        # start passivating at new higher limit of 6
+        assert region.tell(1, id) == ({id - 6} if id > 13 else set())
 
     assert region.state() == {1: set(range(15, 21)), 2: {21}}

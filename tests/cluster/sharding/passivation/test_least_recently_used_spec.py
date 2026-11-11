@@ -20,8 +20,9 @@ Porting rules, as in ``test_entity_passivation_spec``:
   ``segmentedInitialLimitConfig`` the same with limit 20; ``idleConfig`` is limit 3, LRU and
   ``.with_idle_entity_passivation(1.0)``.
 - The specs drive ``harness.Region``. Each ``expectReceived(id, Stop)`` asserts the id is in what
-  that step passivated; where Scala expects no ``Stop`` in a step, the test asserts nothing about
-  it. Each ``expectState`` asserts ``region.state()``.
+  that step passivated, and each step asserts exactly what it passivated, empty where Scala
+  expects no ``Stop``: Scala's per-entity probes fail on a stray ``Stop``. Each ``expectState``
+  asserts ``region.state()``.
 - A ``Thread.sleep(timeout / 2)`` is ``region.passes(0.5)``. Each idle expectation asserts the
   entity is passivated by the first ``passes`` after which more than the 1.0 s timeout has gone
   since its last touch, and not by an earlier one.
@@ -56,48 +57,44 @@ def test_lru_passivate_the_least_recently_used_entities_when_the_per_shard_limit
     # only one active shard at first, least recently used entities passivated once the limit is
     # reached
     for id in range(1, 21):
-        passivated = region.tell(1, id)
-        if id > 10:
-            assert id - 10 in passivated
+        assert region.tell(1, id) == ({id - 10} if id > 10 else set())
 
     assert region.state() == {1: set(range(11, 21))}
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert set(range(11, 16)) <= region.tell(2, 21)
+    assert region.tell(2, 21) == set(range(11, 16))
 
     assert region.state() == {1: set(range(16, 21)), 2: {21}}
 
     # shards now have a limit of 5 entities
     for id in range(1, 21):
         passivated_id = id + 15 if id <= 5 else id - 5
-        assert passivated_id in region.tell(1, id)
+        assert region.tell(1, id) == {passivated_id}
 
     assert region.state() == {1: set(range(16, 21)), 2: {21}}
 
     # shards now have a limit of 5 entities
     for id in range(21, 25):
-        region.tell(2, id)
+        assert region.tell(2, id) == set()
 
     assert region.state() == {1: set(range(16, 21)), 2: set(range(21, 25))}
 
     # activating a third shard will divide the per-shard limit in three, passivating entities
     # over the new limits
-    assert {16, 17, 21} <= region.tell(3, 31)
+    assert region.tell(3, 31) == {16, 17, 21}
 
     assert region.state() == {1: {18, 19, 20}, 2: {22, 23, 24}, 3: {31}}
 
     # shards now have a limit of 3 entities
     for id in range(25, 31):
-        assert id - 3 in region.tell(2, id)
+        assert region.tell(2, id) == {id - 3}
 
     assert region.state() == {1: {18, 19, 20}, 2: {28, 29, 30}, 3: {31}}
 
     # shards now have a limit of 3 entities
     for id in range(31, 41):
-        passivated = region.tell(3, id)
-        if id > 33:
-            assert id - 3 in passivated
+        assert region.tell(3, id) == ({id - 3} if id > 33 else set())
 
     assert region.state() == {1: {18, 19, 20}, 2: {28, 29, 30}, 3: {38, 39, 40}}
 
@@ -110,10 +107,7 @@ def test_lru_passivate_the_least_recently_used_entities_when_the_per_shard_limit
 
     for i in range(1, 4):
         passivated = region.tell(1, 10 + i) | region.tell(2, 20 + i) | region.tell(3, 30 + i)
-        if i == 2:
-            assert {18, 28, 38} <= passivated
-        elif i == 3:
-            assert {20, 30, 40} <= passivated
+        assert passivated == ({18, 28, 38} if i == 2 else {20, 30, 40} if i == 3 else set())
 
     assert region.state() == {1: {11, 12, 13}, 2: {21, 22, 23}, 3: {31, 32, 33}}
 
@@ -125,9 +119,7 @@ def test_segmented_lru_passivate_the_segmented_least_recently_used_entities() ->
     # entities are only accessed once (so all in lowest segment)
     # least recently used entities passivated once the total limit is reached
     for id in range(1, 21):
-        passivated = region.tell(1, id)
-        if id > 10:
-            assert id - 10 in passivated
+        assert region.tell(1, id) == ({id - 10} if id > 10 else set())
 
     # shard 1: level 0: 11-20, level 1: empty
     assert region.state() == {1: set(range(11, 21))}
@@ -136,7 +128,7 @@ def test_segmented_lru_passivate_the_segmented_least_recently_used_entities() ->
     # when limit for higher segment is reached, entities are demoted to lower "probationary"
     # segment
     for id in range(11, 21):
-        region.tell(1, id)
+        assert region.tell(1, id) == set()
 
     # shard 1: level 0: 11-12, level 1: 13-20
     assert region.state() == {1: set(range(11, 21))}
@@ -144,14 +136,14 @@ def test_segmented_lru_passivate_the_segmented_least_recently_used_entities() ->
     # newly activated entities will just cycle through the lower segment
     for id in range(1, 6):
         passivated_id = id + 10 if id < 3 else id - 2
-        assert passivated_id in region.tell(1, id)
+        assert region.tell(1, id) == {passivated_id}
 
     # shard 1: level 0: 4-5, level 1: 13-20
     assert region.state() == {1: {4, 5} | set(range(13, 21))}
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert {4, 5, 13, 14, 15} <= region.tell(2, 21)
+    assert region.tell(2, 21) == {4, 5, 13, 14, 15}
 
     # shard 1: level 0: 16, level 1: 17-20
     # shard 2: level 0: 21, level 1: empty
@@ -161,11 +153,8 @@ def test_segmented_lru_passivate_the_segmented_least_recently_used_entities() ->
     # entities in lower "probationary" segment accessed again are promoted
     # lower segment only has space for one entity
     for id in reversed(range(11, 21)):
-        passivated = region.tell(1, id)
-        if id == 15:
-            assert 20 in passivated
-        elif id < 15:
-            assert id + 1 in passivated
+        expected = {20} if id == 15 else {id + 1} if id < 15 else set()
+        assert region.tell(1, id) == expected
 
     # shard 1: level 0: 11, level 1: 19, 18, 17, 16
     # shard 2: level 0: 21, level 1: empty
@@ -175,20 +164,20 @@ def test_segmented_lru_passivate_the_segmented_least_recently_used_entities() ->
 def test_lru_with_idle_passivate_entities_when_they_havent_seen_messages_for_the_timeout() -> None:
     region = Region(IDLE_CONFIG, TestClock())
 
-    region.tell(1, 1)  # t = 0.0, lastSendNanoTime1
-    region.tell(1, 2)
+    assert region.tell(1, 1) == set()  # t = 0.0, lastSendNanoTime1
+    assert region.tell(1, 2) == set()
 
     # keep entity 3 active to prevent idle passivation
-    region.tell(1, 3)
-    assert region.passes(0.5).isdisjoint({1, 2})
-    region.tell(1, 3)
-    assert region.passes(0.5).isdisjoint({1, 2})  # t = 1.0: 1.0 s since the touch, not more
-    region.tell(1, 3)
-    assert {1, 2} <= region.passes(0.5)  # t = 1.5
-    region.tell(1, 3)  # lastSendNanoTime2
-    assert 3 not in region.passes(0.5)
-    assert 3 not in region.passes(0.5)
-    assert 3 in region.passes(0.5)  # t = 3.0
+    assert region.tell(1, 3) == set()
+    assert region.passes(0.5) == set()
+    assert region.tell(1, 3) == set()
+    assert region.passes(0.5) == set()  # t = 1.0: 1.0 s since the touch, not more
+    assert region.tell(1, 3) == set()
+    assert region.passes(0.5) == {1, 2}  # t = 1.5
+    assert region.tell(1, 3) == set()  # lastSendNanoTime2
+    assert region.passes(0.5) == set()
+    assert region.passes(0.5) == set()
+    assert region.passes(0.5) == {3}  # t = 3.0
 
 
 def test_lru_limit_adjustment_adjust_per_shard_limits_when_the_per_region_limit_is_adjusted() -> (
@@ -198,36 +187,33 @@ def test_lru_limit_adjustment_adjust_per_shard_limits_when_the_per_region_limit_
 
     # only one active shard at first, initial per-shard limit of 10
     for id in range(1, 21):
-        passivated = region.tell(1, id)
-        if id > 10:
-            assert id - 10 in passivated
+        assert region.tell(1, id) == ({id - 10} if id > 10 else set())
 
     assert region.state() == {1: set(range(11, 21))}
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert set(range(11, 16)) <= region.tell(2, 21)
+    assert region.tell(2, 21) == set(range(11, 16))
 
     assert region.state() == {1: set(range(16, 21)), 2: {21}}
 
     # reduce the per-region limit from 10 to 6, per-shard limit becomes 3
-    assert {16, 17} <= region.set_active_entity_limit(6)  # passivate entities over new limit
+    assert region.set_active_entity_limit(6) == {16, 17}  # passivate entities over new limit
 
     assert region.state() == {1: set(range(18, 21)), 2: {21}}
 
     for id in range(1, 11):
         passivated_id = id + 17 if id < 4 else id - 3
-        assert passivated_id in region.tell(1, id)
+        assert region.tell(1, id) == {passivated_id}
 
     assert region.state() == {1: set(range(8, 11)), 2: {21}}
 
     # increase the per-region limit from 6 to 12, per-shard limit becomes 6
-    region.set_active_entity_limit(12)
+    assert region.set_active_entity_limit(12) == set()
 
     for id in range(11, 21):
-        passivated = region.tell(1, id)
-        if id > 13:  # start passivating at new higher limit of 6
-            assert id - 6 in passivated
+        # start passivating at new higher limit of 6
+        assert region.tell(1, id) == ({id - 6} if id > 13 else set())
 
     assert region.state() == {1: set(range(15, 21)), 2: {21}}
 
@@ -239,35 +225,32 @@ def test_segmented_lru_limit_adjustment_adjust_per_shard_limits_when_the_limit_i
 
     # only one active shard at first, initial per-shard limit of 20
     for id in range(1, 31):
-        passivated = region.tell(1, id)
-        if id > 20:
-            assert id - 20 in passivated
+        assert region.tell(1, id) == ({id - 20} if id > 20 else set())
 
     assert region.state() == {1: set(range(11, 31))}
 
     # activating a second shard will divide the per-shard limit in two, passivating half of the
     # first shard
-    assert set(range(11, 21)) <= region.tell(2, 31)
+    assert region.tell(2, 31) == set(range(11, 21))
 
     assert region.state() == {1: set(range(21, 31)), 2: {31}}
 
     # reduce the per-region limit from 20 to 10, per-shard limit becomes 5
-    assert set(range(21, 26)) <= region.set_active_entity_limit(10)
+    assert region.set_active_entity_limit(10) == set(range(21, 26))
 
     assert region.state() == {1: set(range(26, 31)), 2: {31}}
 
     for id in range(1, 11):
         passivated_id = id + 25 if id < 6 else id - 5
-        assert passivated_id in region.tell(1, id)
+        assert region.tell(1, id) == {passivated_id}
 
     assert region.state() == {1: set(range(6, 11)), 2: {31}}
 
     # increase the per-region limit from 10 to 30, per-shard limit becomes 15
-    region.set_active_entity_limit(30)
+    assert region.set_active_entity_limit(30) == set()
 
     for id in range(11, 31):
-        passivated = region.tell(1, id)
-        if id > 20:  # start passivating at new higher limit of 15
-            assert id - 15 in passivated
+        # start passivating at new higher limit of 15
+        assert region.tell(1, id) == ({id - 15} if id > 20 else set())
 
     assert region.state() == {1: set(range(16, 31)), 2: {31}}

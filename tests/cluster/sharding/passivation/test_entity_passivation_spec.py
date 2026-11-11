@@ -14,12 +14,15 @@ Porting rules, shared by the passivation spec ports:
   ``region ! Envelope(shard, id, _)`` is ``region.tell(shard, id)``,
   ``ShardRegion.SetActiveEntityLimit(n)`` is ``set_active_entity_limit(n)`` and
   ``ManuallyPassivate`` is ``manually_passivate``. Each ``expectReceived(id, Stop)`` asserts the
-  id is in what that step passivated; where Scala expects no ``Stop`` in a step, the test asserts
-  nothing about it. Each ``expectState`` asserts ``region.state()``.
+  id is in what that step passivated, and each step (a ``tell``, a limit update or a ``passes``)
+  asserts exactly what it passivated, empty where Scala expects no ``Stop``: Scala's per-entity
+  probes fail on a stray ``Stop``. A module's docstring names any step Scala leaves unchecked.
+  Each ``expectState`` asserts ``region.state()``.
 - A ``Thread.sleep(timeout / 2)`` is ``region.passes(0.5)`` on a ``TestClock``. Each idle
   expectation asserts the entity is passivated by the first ``passes`` after which more than the
   1.0 s timeout has gone since its last touch, and not by an earlier one: Scala's
-  ``> configuredIdleTimeout`` bound, at Pekko's interval granularity.
+  ``> configuredIdleTimeout`` bound, at Pekko's interval granularity. The harness ticks once per
+  ``passes``, so each step is the strategy's 0.5 s interval.
 
 Differences from the Scala: the disabled case asserts that a touch passivates nothing and that
 no interval is scheduled, where Pekko waits a second for no ``Stop``.
@@ -116,7 +119,7 @@ def test_terminating_an_untracked_entity_is_a_no_op(
 
 @pytest.mark.parametrize(
     ("passivation", "first", "second"),
-    [(_LRU, ["1"], []), (_SLRU, ["1"], []), (_MRU, [], ["1"]), (_LFU, [], ["1"])],
+    [(_LRU, ["1"], ["2"]), (_SLRU, ["1"], ["2"]), (_MRU, [], ["1"]), (_LFU, [], ["1"])],
     ids=["lru", "slru", "mru", "lfu"],
 )
 def test_a_per_shard_limit_of_zero(
@@ -126,5 +129,6 @@ def test_a_per_shard_limit_of_zero(
     strategy = EntityPassivationStrategy.create(settings, TestClock())
     assert strategy.shards_updated(2) == []
     assert strategy.entity_touched("1") == first
-    if first == []:
-        assert strategy.entity_touched("2") == second
+    for entity_id in first:
+        strategy.entity_terminated(entity_id)  # the shard, on the entity's Terminated
+    assert strategy.entity_touched("2") == second

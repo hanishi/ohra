@@ -50,7 +50,8 @@ class Region:
 
     def passes(self, seconds: float) -> set[int]:
         """Advance the clock, then the shards' ``PassivateIntervalTick`` (Shard.scala 479-481,
-        1009-1012)."""
+        1009-1012). One tick per call, whatever ``scheduled_interval`` is: it assumes
+        ``seconds`` is the strategy's interval."""
         self._clock.now += seconds
         passivated: set[int] = set()
         for s, strategy in self._strategies.items():

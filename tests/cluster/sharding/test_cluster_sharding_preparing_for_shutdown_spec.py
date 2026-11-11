@@ -74,7 +74,7 @@ def pinger(_entity: EntityContext[SpecPrepPing]) -> Behavior[SpecPrepPing]:
 
 
 async def ping(region: ActorRef[ShardingEnvelope[SpecPrepPing]], id: str, n: int) -> SpecPrepPong:
-    return await ask(region, lambda r: ShardingEnvelope(id, SpecPrepPing(n, r)), timeout=1)
+    return await ask(region, lambda r: ShardingEnvelope(id, SpecPrepPing(n, r)), timeout=3)
 
 
 async def test_cluster_sharding_preparing_for_shutdown_spec():

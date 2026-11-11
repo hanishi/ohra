@@ -119,8 +119,11 @@ async def test_a_shard_learns_of_an_earlier_preparation_from_the_replayed_state(
         assert n.manual is not None
         cluster = Cluster(n.system)
         cluster.prepare_for_full_cluster_shutdown()
-        while cluster.self_member.status != "ready_for_shutdown":
+        for _ in range(500):
+            if cluster.self_member.status == "ready_for_shutdown":
+                break
             await n.manual.time_passes(0.02)
+        assert cluster.self_member.status == "ready_for_shutdown"
         events, region = n.probe(), n.probe()
         shard = spawn(n, shard_behavior(ignoring_halt(events), "7", region.ref), "shard")
         await region.expect_message(ShardInitialized("7"))

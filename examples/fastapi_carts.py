@@ -35,6 +35,7 @@ from ohra import (
     EntityRef,
     EntityTypeKey,
     GetShardRegionState,
+    GetShardRegionStats,
     Passivate,
     PassivationStrategySettings,
     SetActiveEntityLimit,
@@ -103,7 +104,9 @@ def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
 
 # --- HTTP ------------------------------------------------------------------------------------
 
-type RegionCmd = ShardingEnvelope[CartCmd] | GetShardRegionState | SetActiveEntityLimit
+type RegionCmd = (
+    ShardingEnvelope[CartCmd] | GetShardRegionState | GetShardRegionStats | SetActiveEntityLimit
+)
 
 actors = Actors(
     Sharding.init(

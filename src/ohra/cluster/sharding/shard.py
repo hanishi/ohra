@@ -19,7 +19,7 @@ import asyncio
 import logging
 import sys
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote
@@ -29,7 +29,9 @@ from ...context import ActorContext
 from ...coordinated_shutdown import CoordinatedShutdown
 from ...coordination.lease import Lease, LeaseProvider, LeaseUsageSettings
 from ...eventstream import DeadLetterSuppression
+from ...patterns import Replyable
 from ...ref import ActorRef
+from ...remote import Address
 from ...remote.serialization import remotable
 from ...result import Failure, Success, Try
 from ...signals import PostStop, Signal, Terminated
@@ -359,11 +361,6 @@ class EntityRef[T](ActorRef[T]):
 
 
 @dataclass(frozen=True)
-class _QueryTimeout:
-    pass
-
-
-@dataclass(frozen=True)
 class ShardInitialized:
     """ShardRegion.scala 235: a shard tells its region it is ready for messages."""
 
@@ -400,6 +397,43 @@ class GetShardStats:
     """Shard.scala 89."""
 
     reply_to: ActorRef[ShardStats]
+
+
+@remotable
+@dataclass(frozen=True)
+class ShardRegionStats:
+    """ShardRegion.scala 321: the number of entities of each shard of a region, and the shards
+    that did not answer within ``shard_region_query_timeout``."""
+
+    stats: dict[str, int]
+    failed: frozenset[str] = frozenset()
+
+
+@remotable
+@dataclass(frozen=True)
+class GetShardRegionStats:
+    """ShardRegion.scala 311: ask a region for its ``ShardRegionStats``."""
+
+    reply_to: ActorRef[ShardRegionStats]
+
+
+@remotable
+@dataclass(frozen=True)
+class ClusterShardingStats:
+    """ShardRegion.scala 289: every region's stats, by the address of its node; empty when a
+    region did not answer in time."""
+
+    regions: dict[Address, ShardRegionStats]
+
+
+@remotable
+@dataclass(frozen=True)
+class GetClusterShardingStats:
+    """ShardRegion.scala 281: ask a region for the stats of every region of its entity type,
+    gathered by the coordinator within ``timeout`` seconds."""
+
+    timeout: float
+    reply_to: ActorRef[ClusterShardingStats]
 
 
 @dataclass(frozen=True)
@@ -1011,44 +1045,120 @@ def shard_behavior[T](
     )
 
 
-def _aggregate_shard_states(
-    shards: list[ActorRef[Any]], reply_to: ActorRef[CurrentShardRegionState], timeout: float
-) -> Behavior[CurrentShardState | _QueryTimeout]:
-    """Pekko's region query: ask every Shard, reply the union when all have answered or at the
-    timeout."""
+def _ask_all[R](
+    targets: Mapping[str, ActorRef[Any]],
+    query: Callable[[ActorRef[R]], Replyable[R]],
+    timeout: float,
+    done: Callable[[dict[str, R], frozenset[str]], None],
+) -> Behavior[Any]:
+    """Pekko's ``Future.traverse`` of ``askOne`` (ShardRegion.scala 1087-1098): a short-lived
+    child that asks every target, each ask with its own ``timeout``, and once each has answered
+    or failed calls ``done`` with the answers and the keys of the targets that failed. With no
+    targets it calls ``done`` at once."""
+    targets = dict(targets)  # as Pekko's immutable map, whatever the caller does next
 
     @Behaviors.setup
-    def setup(
-        ctx: ActorContext[CurrentShardState | _QueryTimeout],
-    ) -> Behavior[CurrentShardState | _QueryTimeout]:
-        ids: set[str] = set()
-        shard_ids: set[str] = set()
-        remaining = len(shards)
-        for shard in shards:
-            shard.tell(GetShardState(ctx.self))
-        ctx.timers.start_single_timer("timeout", _QueryTimeout(), timeout)
+    def setup(ctx: ActorContext[tuple[str, Try[R]]]) -> Behavior[tuple[str, Try[R]]]:
+        responses: dict[str, R] = {}
+        failed: set[str] = set()
+
+        def complete() -> Behavior[tuple[str, Try[R]]]:
+            done(responses, frozenset(failed))
+            return Behaviors.stopped()
+
+        if not targets:
+            return complete()
+
+        def ask_one(key: str) -> Callable[[Try[R]], tuple[str, Try[R]]]:
+            return lambda result: (key, result)
+
+        for key, target in targets.items():
+            ctx.ask(target, query, ask_one(key), timeout)
 
         @Behaviors.receive
         def on_message(
-            _ctx: ActorContext[Any], msg: CurrentShardState | _QueryTimeout
-        ) -> Behavior[Any]:
-            nonlocal remaining
-            if isinstance(msg, CurrentShardState):
-                ids.update(msg.entity_ids)
-                shard_ids.add(msg.shard)
-                remaining -= 1
-                if remaining > 0:
-                    return Behaviors.same
-            reply_to.tell(CurrentShardRegionState(frozenset(ids), frozenset(shard_ids)))
-            return Behaviors.stopped()
+            _ctx: ActorContext[tuple[str, Try[R]]], msg: tuple[str, Try[R]]
+        ) -> Behavior[tuple[str, Try[R]]]:
+            match msg:
+                case (key, Success(value)):
+                    responses[key] = value
+                case (key, _):
+                    failed.add(key)
+            return complete() if len(responses) + len(failed) == len(targets) else Behaviors.same
 
         return on_message
 
     return setup
 
 
+def query_shards[R](
+    type_name: str,
+    shards: Mapping[str, ActorRef[Any]],
+    query: Callable[[ActorRef[R]], Replyable[R]],
+    timeout: float,
+    done: Callable[[dict[str, R], frozenset[str]], None],
+) -> Behavior[Any]:
+    """Pekko's ``queryShards`` (ShardRegion.scala 1084-1101) as a short-lived child: ask every
+    shard, and pass ``done`` the answers by shard id and the shards that did not answer within
+    ``timeout``. When some failed, it logs Pekko's ``ShardsQueryResult.toString``
+    (ShardingQueries.scala 37-57) at WARNING; every shard is queried, so ``queried`` is the
+    total."""
+
+    def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+        def logged(responses: dict[str, R], failed: frozenset[str]) -> None:
+            if failed:
+                ctx.log.warning(
+                    "%s: Queried [%d] shards: [%d] responsive, [%d] failed after %s.",
+                    type_name,
+                    len(failed) + len(responses),
+                    len(responses),
+                    len(failed),
+                    f"{timeout:g} s",
+                )
+            done(responses, failed)
+
+        return _ask_all(shards, query, timeout, logged)
+
+    return Behaviors.setup(setup)
+
+
+def region_state_query(
+    type_name: str,
+    shards: Mapping[str, ActorRef[Any]],
+    reply_to: ActorRef[CurrentShardRegionState],
+    timeout: float,
+) -> Behavior[Any]:
+    """``replyToRegionStateQuery`` (ShardRegion.scala 1056-1064): the union of what the shards
+    that answered hold."""
+
+    def done(responses: dict[str, CurrentShardState], _failed: frozenset[str]) -> None:
+        ids = frozenset(i for r in responses.values() for i in r.entity_ids)
+        reply_to.tell(CurrentShardRegionState(ids, frozenset(r.shard for r in responses.values())))
+
+    return query_shards(type_name, shards, GetShardState, timeout, done)
+
+
+def region_stats_query(
+    type_name: str,
+    shards: Mapping[str, ActorRef[Any]],
+    reply_to: ActorRef[ShardRegionStats],
+    timeout: float,
+) -> Behavior[Any]:
+    """``replyToRegionStatsQuery`` (ShardRegion.scala 1066-1072)."""
+
+    def done(responses: dict[str, ShardStats], failed: frozenset[str]) -> None:
+        stats = {s.shard_id: s.entity_count for s in responses.values()}
+        reply_to.tell(ShardRegionStats(stats, failed))
+
+    return query_shards(type_name, shards, GetShardStats, timeout, done)
+
+
 type _RegionCmd[T] = (
-    ShardingEnvelope[T] | GetShardRegionState | ShardInitialized | SetActiveEntityLimit
+    ShardingEnvelope[T]
+    | GetShardRegionState
+    | GetShardRegionStats
+    | ShardInitialized
+    | SetActiveEntityLimit
 )
 
 
@@ -1065,11 +1175,15 @@ class Sharding:
     @staticmethod
     def init[T](
         entity: Entity[T],
-    ) -> Behavior[ShardingEnvelope[T] | GetShardRegionState | SetActiveEntityLimit]:
+    ) -> Behavior[
+        ShardingEnvelope[T] | GetShardRegionState | GetShardRegionStats | SetActiveEntityLimit
+    ]:
         """The shard region behavior for one entity type, inside one process. Spawn it; message it
         through entity refs. Each shard id gets a child Shard actor on first use. As Pekko's
         region, it passes ``SetActiveEntityLimit`` to every shard, and tells every shard the
-        shard count when it changes; it has no graceful shutdown."""
+        shard count when it changes; it has no graceful shutdown. It answers
+        ``GetShardRegionState`` and ``GetShardRegionStats`` through a child that asks every
+        shard."""
         settings = entity.effective_settings
         strategy = settings.passivation_strategy
 
@@ -1114,16 +1228,23 @@ class Sharding:
                         for shard in shards.values():
                             shard.tell(msg)
                     case GetShardRegionState(reply_to):
-                        if not shards:
-                            reply_to.tell(CurrentShardRegionState(frozenset()))
-                        else:
-                            ctx.spawn_anonymous(
-                                _aggregate_shard_states(
-                                    list(shards.values()),
-                                    reply_to,
-                                    settings.shard_region_query_timeout,
-                                )
+                        ctx.spawn_anonymous(
+                            region_state_query(
+                                entity.type_key.name,
+                                shards,
+                                reply_to,
+                                settings.shard_region_query_timeout,
                             )
+                        )
+                    case GetShardRegionStats(reply_to):
+                        ctx.spawn_anonymous(
+                            region_stats_query(
+                                entity.type_key.name,
+                                shards,
+                                reply_to,
+                                settings.shard_region_query_timeout,
+                            )
+                        )
                 return Behaviors.same
 
             def on_signal(

@@ -16,17 +16,20 @@ from ...signals import PostStop, Signal
 from ...supervision import SupervisorStrategy
 from .shard import (
     ClusterShardingSettings,
-    CurrentShardRegionState,
+    ClusterShardingStats,
     Entity,
+    GetClusterShardingStats,
     GetShardRegionState,
+    GetShardRegionStats,
     HandOff,
     SetActiveEntityLimit,
     ShardingEnvelope,
     ShardInitialized,
     ShardsUpdated,
     ShardStopped,
-    _aggregate_shard_states,  # pyright: ignore[reportPrivateUsage]
     _log_passivation_strategy,  # pyright: ignore[reportPrivateUsage]
+    region_state_query,
+    region_stats_query,
     shard_behavior,
     shard_id_of,
 )
@@ -313,17 +316,30 @@ class _Region:
                     else Behaviors.same
                 )
             match msg:
-                case GetShardRegionState(reply_to):
-                    if not self.shards:
-                        reply_to.tell(CurrentShardRegionState(frozenset()))
+                # receiveQuery (ShardRegion.scala 966-985)
+                case GetClusterShardingStats(_, reply_to):
+                    if self.coordinator is None:
+                        reply_to.tell(ClusterShardingStats({}))
                     else:
-                        self.ctx.spawn_anonymous(
-                            _aggregate_shard_states(
-                                list(self.shards.values()),
-                                reply_to,
-                                self.settings.shard_region_query_timeout,
-                            )
+                        self.coordinator.tell(msg)
+                case GetShardRegionState(reply_to):
+                    self.ctx.spawn_anonymous(
+                        region_state_query(
+                            self.type_name,
+                            self.shards,
+                            reply_to,
+                            self.settings.shard_region_query_timeout,
                         )
+                    )
+                case GetShardRegionStats(reply_to):
+                    self.ctx.spawn_anonymous(
+                        region_stats_query(
+                            self.type_name,
+                            self.shards,
+                            reply_to,
+                            self.settings.shard_region_query_timeout,
+                        )
+                    )
                 case MemberUp(member=m) | MemberLeft(member=m) | MemberExited(member=m):
                     self.change_members(
                         by_age(

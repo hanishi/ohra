@@ -19,8 +19,13 @@ from ...cell import is_local_actor
 from ...signals import PostStop, PreRestart, Signal
 from .shard import (
     ClusterShardingSettings,
+    ClusterShardingStats,
+    GetClusterShardingStats,
+    GetShardRegionStats,
     HandOff,
+    ShardRegionStats,
     ShardStopped,
+    _ask_all,  # pyright: ignore[reportPrivateUsage]
 )
 from ..ddata import SelfUniqueAddress
 from ..ddata.distributed_data import ReplicatorMessageAdapter
@@ -397,6 +402,11 @@ _OF_INTEREST = frozenset(
 def _is_at(ref_or_path: ActorRef[Any] | str, address: Address) -> bool:
     path = ref_or_path if isinstance(ref_or_path, str) else ref_or_path.path
     return path.startswith(address.root + "/")
+
+
+def _address_of(path: str) -> Address:
+    """The address of the node an actor path is on."""
+    return Address.parse(path[: path.index("/", len("ohra://"))])
 
 
 def by_age(members: Iterable[Member]) -> list[Member]:
@@ -866,9 +876,30 @@ class _Coordinator:
                 self.region_terminated(path)
             case _Terminate():
                 self.terminate()
+            case GetClusterShardingStats(timeout, reply_to):
+                self.cluster_sharding_stats(timeout, reply_to)
             case _:
                 pass
         return Behaviors.same
+
+    def cluster_sharding_stats(
+        self, timeout: float, reply_to: ActorRef[ClusterShardingStats]
+    ) -> None:
+        """active's GetClusterShardingStats (917-940): a child asks every alive region for its
+        stats within ``timeout``, and replies them by the address of each region's node, or
+        nothing when a region did not answer, as Pekko's ``recover`` of the failed
+        ``Future.sequence``. Pekko maps a local region's address to the cluster's self address;
+        an ohra path always carries its node's address."""
+
+        def done(responses: dict[str, ShardRegionStats], failed: frozenset[str]) -> None:
+            if failed:
+                reply_to.tell(ClusterShardingStats({}))
+            else:
+                regions = {_address_of(path): stats for path, stats in responses.items()}
+                reply_to.tell(ClusterShardingStats(regions))
+
+        regions = {p: self.refs[p] for p in self.alive_regions if p in self.refs}
+        self.ctx.spawn_anonymous(_ask_all(regions, GetShardRegionStats, timeout, done))
 
     # --- registration and shard homes ------------------------------------------------------------
 

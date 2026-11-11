@@ -104,3 +104,12 @@ def test_track_recency_of_elements() -> None:
     clock.tick()  # time = 20
     assert recency.remove_most_recent(10) == ["c", "b", "a"]
     check(recency, [])
+
+
+def test_a_negative_count_or_skip_clamps_as_scalas_slice() -> None:
+    """ohra's own: Scala's ``take`` and ``slice`` clamp a negative bound at 0."""
+    recency = RecencyList[str](TestClock()).update("a").update("b").update("c")
+    assert recency.remove_least_recent(-1) == []
+    assert recency.remove_most_recent(1, skip=-1) == []
+    assert recency.remove_least_recent(2, skip=-1) == ["a"]
+    assert recency.size == 2

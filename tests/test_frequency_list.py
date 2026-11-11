@@ -11,6 +11,8 @@ Differences: ``FrequencyList.empty[String]()`` is ``FrequencyList[str]()``;
 ``check`` calls are comments here.
 """
 
+import pytest
+
 from ohra.util.frequency_list import FrequencyList
 
 from .util import TestClock
@@ -249,3 +251,21 @@ def test_support_dynamic_aging_with_least_frequently_used_eviction() -> None:
     check(aging, ["x", "y", "z"])  # 1+9, 4+9
 
     # age = 10 (from last removal of "c")
+
+
+def test_a_negative_count_removes_nothing_as_scalas_take() -> None:
+    """ohra's own: Scala's ``take`` returns nothing for a negative count."""
+    frequency = FrequencyList[str](clock=TestClock()).update("a").update("b")
+    assert frequency.remove_least_frequent(-1) == []
+    assert frequency.remove_most_frequent(-1) == []
+    assert frequency.remove_overall_least_recent(-1) == []
+    assert frequency.remove_overall_most_recent(-1) == []
+    assert frequency.size == 2
+
+
+def test_overall_recency_without_a_clock_raises_pekkos_message() -> None:
+    """ohra's own: Pekko's UnsupportedOperationException, FrequencyList.scala 171."""
+    with pytest.raises(
+        RuntimeError, match="^Overall recency is not enabled for this FrequencyList$"
+    ):
+        FrequencyList[str]().remove_overall_least_recent()

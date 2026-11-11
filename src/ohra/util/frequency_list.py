@@ -82,7 +82,7 @@ class FrequencyList[A: Hashable]:
     def remove_least_frequent(self, n: int = 1, skip: A | None = None) -> list[A]:
         """Scala 134-148: the first ``n`` of the least-to-most order but ``skip``; each removal
         sets the age under dynamic aging (``removeLeastFrequentNode``, 262-265)."""
-        removed = list(islice((v for v in self._forward() if v != skip), n))
+        removed = list(islice((v for v in self._forward() if v != skip), max(n, 0)))
         for value in removed:
             if self._dynamic_aging:
                 self._age = self._priority_of[value]
@@ -91,7 +91,7 @@ class FrequencyList[A: Hashable]:
 
     def remove_most_frequent(self, n: int = 1, skip: A | None = None) -> list[A]:
         """Scala 150-164: the first ``n`` of the most-to-least order but ``skip``."""
-        return self._remove_all(islice((v for v in self._backward() if v != skip), n))
+        return self._remove_all(islice((v for v in self._backward() if v != skip), max(n, 0)))
 
     def overall_least_to_most_recent(self) -> Iterator[A]:
         """Scala 166."""
@@ -105,12 +105,12 @@ class FrequencyList[A: Hashable]:
         """Scala 170-173: needs a clock, else ``RuntimeError`` (Scala's
         ``UnsupportedOperationException``), as do the other overall removals."""
         self._require_clock()
-        return self._remove_all(islice(self._overall, n))
+        return self._remove_all(islice(self._overall, max(n, 0)))
 
     def remove_overall_most_recent(self, n: int = 1) -> list[A]:
         """Scala 175-178."""
         self._require_clock()
-        return self._remove_all(islice(reversed(self._overall), n))
+        return self._remove_all(islice(reversed(self._overall), max(n, 0)))
 
     def remove_overall_least_recent_outside(self, duration: float) -> list[A]:
         """Scala 180-184."""

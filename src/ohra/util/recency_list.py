@@ -60,11 +60,11 @@ class RecencyList[A: Hashable]:
 
     def remove_least_recent(self, n: int = 1, skip: int = 0) -> list[A]:
         """Scala 96-106: ``slice(skip, skip + n)`` of the least-to-most order."""
-        return self._remove_all(islice(self._recency, skip, skip + n))
+        return self._remove_all(islice(self._recency, *_slice(n, skip)))
 
     def remove_most_recent(self, n: int = 1, skip: int = 0) -> list[A]:
         """Scala 108-118: ``slice(skip, skip + n)`` of the most-to-least order."""
-        return self._remove_all(islice(reversed(self._recency), skip, skip + n))
+        return self._remove_all(islice(reversed(self._recency), *_slice(n, skip)))
 
     def remove_least_recent_outside(self, duration: float) -> list[A]:
         """Scala 120-123: remove from the least recent while older than ``duration``."""
@@ -86,3 +86,9 @@ class RecencyList[A: Hashable]:
         for value in removed:
             del self._recency[value]
         return removed
+
+
+def _slice(n: int, skip: int) -> tuple[int, int]:
+    """Scala's ``slice(skip, skip + n)`` bounds, which clamp below at 0 where ``islice`` raises."""
+    start = max(skip, 0)
+    return start, max(skip + n, start)

@@ -122,7 +122,7 @@ stateDiagram-v2
   Down --> Removed: leader
 ```
 
-A node asks to leave and the split-brain resolver downs, but every other move is the leader's. Any status can be downed; the diagram shows it from Up only.
+A node asks to leave, the split-brain resolver downs, and the node that runs the full cluster shutdown moves Up members to PreparingForShutdown, but every other move is the leader's. Any status can be downed; the diagram shows it from Up only.
 
 **Failure detection.** Each node heartbeats a few neighbours on a hash ring, up to nine. A phi-accrual detector turns the gaps between heartbeat replies into a suspicion level. Past the threshold the observer records the peer as unreachable in its reachability row, and the gossip spreads that observation. Unreachable is not removed: a member stays in until it is downed, and the leader cannot converge while anyone is unreachable.
 
@@ -166,12 +166,18 @@ Sometimes a rolling deploy is the wrong tool and the whole cluster has to stop a
 
 ```python
 async def full_shutdown() -> None:
-    async with node(2551) as first, node(2552), node(2553):
+    async with node(2551) as first, node(2552) as second, node(2553) as third:
         await members_up(first, 3)  # from the first example
         Cluster(first).prepare_for_full_cluster_shutdown()
-        while any(m.status != "ready_for_shutdown" for m in Cluster(first).state.members):
+        nodes = (first, second, third)
+        while any(Cluster(n).self_member.status != "ready_for_shutdown" for n in nodes):
             await asyncio.sleep(0.1)
-        print(sorted((m.address.port, m.status) for m in Cluster(first).state.members))
+        print([(Cluster(n).self_address.port, Cluster(n).self_member.status) for n in nodes])
+        for i, n in enumerate((third, second)):  # one at a time, see the notes below
+            n.terminate()
+            await n.when_terminated()
+            while any(len(Cluster(m).state.members) != 2 - i for m in nodes[: 2 - i]):
+                await asyncio.sleep(0.1)
 ```
 
 It prints:
@@ -180,11 +186,12 @@ It prints:
 [(2551, 'ready_for_shutdown'), (2552, 'ready_for_shutdown'), (2553, 'ready_for_shutdown')]
 ```
 
-- **`prepare_for_full_cluster_shutdown()`** tells the local core daemon. `Cluster(system).manager.tell(PrepareForFullClusterShutdown())` does the same. Call it on one node.
-- **Every Up member** moves to `preparing_for_shutdown`: any Up node that sees a preparing member prepares itself. Then the leader, on convergence, moves each of them to `ready_for_shutdown`. Subscribers get `MemberPreparingForShutdown` and `MemberReadyForShutdown`.
-- **Members that are not Up yet** stay Joining or WeaklyUp. Members that are Leaving or Exiting leave by the normal path.
-- **The node that prepared ignores new joins** and logs it.
-- **It does not stop the nodes.** Wait until every Up member is ready, then stop them and start the new version. Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
+- **`prepare_for_full_cluster_shutdown()`** tells the local core daemon, and a call made before the node has joined is dropped. `Cluster(system).manager.tell(PrepareForFullClusterShutdown())` does the same. Call it on one node.
+- **The node you call** moves every Up member to `preparing_for_shutdown` in its own gossip, which then spreads. Any other Up node that sees a preparing member prepares itself. Then the leader, on convergence, moves each of them to `ready_for_shutdown`. Subscribers get `MemberPreparingForShutdown` and `MemberReadyForShutdown`.
+- **Members that are not Up yet** stay Joining or WeaklyUp: the leader moves none of them to Up while it is preparing. Members that are Leaving or Exiting leave by the normal path.
+- **Only the node you called ignores new joins**, and logs it. A node that joins through another member can still come Up, if the leader did not run the prepare. It then sees the preparing members, prepares itself and ends `ready_for_shutdown` too.
+- **It does not stop the nodes.** Wait until every member that was Up sees itself `ready_for_shutdown`, then stop them and start the new version. Stopping the processes is the usual way. A graceful leave from a ready node can be lost: ReadyForShutdown outranks Leaving when two views of a member merge, as in Pekko, so a leave that is concurrent with any move by the leader is overwritten, and that node's shutdown waits out the `cluster-exiting` timeout (10 s) with a warning. The example therefore stops the nodes one at a time and waits until the others no longer list the one that left.
+- Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
 - **The singleton** stops handing over while any member is preparing or ready, see [chapter 6](06-singleton.md).
 
 ### Split-brain resolver

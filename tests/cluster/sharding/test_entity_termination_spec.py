@@ -1,0 +1,136 @@
+"""EntityTerminationSpec, ported from Apache Pekko's cluster-sharding/src/test/scala/org/apache/
+pekko/cluster/sharding/EntityTerminationSpec.scala.
+
+The spec checks that the automatic restart of an entity that stopped, which remembered entities
+bring, does not apply when they are off. Cases, in Scala order:
+
+- "allow stop without passivation if not remembering entities" (89): ported here.
+- "automatically restart a terminating entity (not passivating) if remembering entities" (119):
+  left for sub-project 10 (remembered entities). It needs the remember store and the entity
+  restart backoff, which the shard does not have yet.
+- "allow terminating entity to passivate if remembering entities" (144): left for sub-project
+  10 for the same reason, it runs with ``withRememberEntities(true)``.
+
+Differences from the Scala spec:
+
+- one real cluster node that joins itself, with ``verbose_debug_logging`` and
+  ``fail_on_invalid_entity_state_transition`` on, as the spec's config;
+- the ``StoppingActor`` is a typed entity: ``Stop`` returns ``Behaviors.stopped()``, and ``Ping``
+  replies ``Pong("pong-<n>", entity)`` to its ``reply_to``, as the classic test takes the
+  entity from ``lastSender``;
+- the spec's single shard ``"1"`` is ``number_of_shards=1``, so ohra's shard is ``"0"``;
+- ``Thread.sleep(400)`` is ``asyncio.sleep(0.4)``: Pekko waits out a restart backoff that must
+  not happen, and no condition can show a non-event;
+- the ``GetShardRegionState`` reply is ``CurrentShardRegionState(frozenset({"2"}),
+  frozenset({"0"}))``: the live entity ids, and the shards.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, replace
+from typing import Any
+
+from ohra import (
+    ActorContext,
+    ActorRef,
+    Behavior,
+    Behaviors,
+    ClusterSharding,
+    Entity,
+    EntityContext,
+    EntityTypeKey,
+    ShardingEnvelope,
+    ask,
+)
+from ohra.cluster.sharding.shard import CurrentShardRegionState, GetShardRegionState
+from ohra.testkit import TestProbe
+from ohra.testkit.settings import TestKitSettings
+
+from ...util import eventually, free_port
+from ..test_cluster import all_up, cluster_node
+from ..test_cluster_sharding import FAST_SHARDING
+
+
+@dataclass(frozen=True)
+class Ping:
+    reply_to: ActorRef[Pong]
+
+
+@dataclass(frozen=True)
+class Pong:
+    text: str
+    entity: ActorRef[Any]
+
+
+@dataclass(frozen=True)
+class Stop:
+    pass
+
+
+type Command = Ping | Stop
+
+STOPPING = EntityTypeKey[Command]("regular")
+
+
+def stopping_actor(_entity: EntityContext[Command]) -> Behavior[Command]:
+    def active(counter: int) -> Behavior[Command]:
+        def on_message(ctx: ActorContext[Command], msg: Command) -> Behavior[Command]:
+            match msg:
+                case Stop():
+                    return Behaviors.stopped()
+                case Ping(reply_to):
+                    reply_to.tell(Pong(f"pong-{counter + 1}", ctx.self))
+                    return active(counter + 1)
+
+        return Behaviors.receive(on_message)
+
+    return active(0)
+
+
+@dataclass
+class Host:
+    system: Any
+    settings: TestKitSettings
+
+    @staticmethod
+    def of(system: Any) -> Host:
+        return Host(system, TestKitSettings())
+
+
+async def test_allow_stop_without_passivation_if_not_remembering_entities():
+    # "allow stop without passivation if not remembering entities" (89)
+    port = free_port()
+    settings = replace(
+        FAST_SHARDING,
+        number_of_shards=1,
+        verbose_debug_logging=True,
+        fail_on_invalid_entity_state_transition=True,
+        entity_restart_backoff=0.25,
+    )
+    async with cluster_node("c", port, [port]) as system:
+        await eventually(lambda: all_up(system, 1), timeout=5)
+        probe: TestProbe[Pong] = TestProbe(Host.of(system))
+        sharding = ClusterSharding(system).init(
+            Entity(STOPPING, stopping_actor).with_settings(settings)
+        )
+
+        sharding.tell(ShardingEnvelope("1", Ping(probe.ref)))
+        first = await probe.receive_message(5)
+        assert first.text == "pong-1"
+        entity = first.entity
+
+        sharding.tell(ShardingEnvelope("2", Ping(probe.ref)))
+        assert (await probe.receive_message(5)).text == "pong-1"
+
+        sharding.tell(ShardingEnvelope("1", Stop()))
+        await probe.expect_terminated(entity, 5)
+
+        await asyncio.sleep(0.4)  # restart backoff is 250 ms
+        state: CurrentShardRegionState = await ask(sharding, GetShardRegionState, timeout=3)
+        assert state == CurrentShardRegionState(frozenset({"2"}), frozenset({"0"}))
+
+        # make sure the shard didn't crash (coverage for regression bug #29383)
+        sharding.tell(ShardingEnvelope("2", Ping(probe.ref)))
+        # if it lost state we know it restarted
+        assert (await probe.receive_message(5)).text == "pong-2"

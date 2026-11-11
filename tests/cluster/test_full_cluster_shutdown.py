@@ -103,6 +103,8 @@ def test_the_events_are_member_events_from_every_package(name: str):
 
 # --- the daemon on real nodes (Pekko's ClusterShutdownSpec, multi-jvm) ---------------------------
 
+# "It does not happen" checks wait ten leader ticks, as `expect_no_message` would: no condition
+# can show that something never happens.
 TICKS = 10 * FAST["leader_actions_interval"]
 
 
@@ -180,6 +182,7 @@ async def test_an_up_member_that_sees_a_preparing_member_prepares_itself(
         with caplog.at_level(logging.DEBUG):
             d = await stack.enter_async_context(cluster_node("c", ports[3], [ports[0]]))
             await eventually(lambda: all(all_ready(n, 4) for n in (a, b, c, d)), timeout=5)
+        # a, b and c were Ready before d started, so only d, still Up, can detect the shutdown.
         assert any("Detected full cluster shutdown" in r.getMessage() for r in caplog.records)
 
 

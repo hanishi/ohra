@@ -3,6 +3,7 @@
 from .lease import (
     Lease,
     LeaseError,
+    LeaseProvider,
     LeaseSettings,
     LeaseTimeoutError,
     LeaseUsageSettings,
@@ -12,6 +13,7 @@ from .lease import (
 __all__ = [
     "Lease",
     "LeaseError",
+    "LeaseProvider",
     "LeaseSettings",
     "LeaseTimeoutError",
     "LeaseUsageSettings",

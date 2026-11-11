@@ -6,9 +6,16 @@ name from the config (deviation D7).
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..system import ActorSystem
+
+log = logging.getLogger("ohra.coordination.lease")
 
 
 class LeaseError(RuntimeError):
@@ -109,3 +116,68 @@ class Lease(ABC):
     def check_lease(self) -> bool:
         """``checkLease`` (``Lease.scala`` 62). ``True`` means the owner certainly holds the
         lease; ``False`` means it might not, and only ``acquire`` or ``release`` can say."""
+
+
+class LeaseProvider:
+    """Pekko's ``scaladsl.LeaseProvider`` extension (``LeaseProvider.scala`` 34-124):
+    ``LeaseProvider(system)`` is the one instance per system, on any system. Implementations are
+    registered, not loaded by class name from the config (D7)."""
+
+    _registered: dict[
+        str, tuple[Callable[[LeaseSettings], Lease], TimeoutSettings, Mapping[str, object]]
+    ]
+    _leases: dict[tuple[str, str, str], Lease]
+
+    def __new__(cls, system: ActorSystem[Any]) -> LeaseProvider:
+        if system.lease_provider is None:
+            self = object.__new__(cls)
+            self._registered = {}
+            self._leases = {}
+            system.lease_provider = self
+        return system.lease_provider
+
+    def register(
+        self,
+        implementation: str,
+        factory: Callable[[LeaseSettings], Lease],
+        *,
+        timeout_settings: TimeoutSettings | None = None,
+        lease_config: Mapping[str, object] | None = None,
+    ) -> None:
+        """Stands in for the config block at ``configPath``: ``implementation`` is the path and
+        ``factory`` the ``lease-class``. No ``timeout_settings`` means the defaults of
+        ``pekko.coordination.lease`` (``reference.conf`` 3-24). A second register of the same
+        name replaces the first; leases already created stay cached."""
+        self._registered[implementation] = (
+            factory,
+            timeout_settings or TimeoutSettings(),
+            lease_config or {},
+        )
+
+    def get_lease(self, lease_name: str, implementation: str, owner_name: str) -> Lease:
+        """``getLease`` / ``internalGetLease`` (``LeaseProvider.scala`` 61-101): one lease per
+        ``(lease_name, implementation, owner_name)``, Pekko's ``LeaseKey`` (42). A factory that
+        raises is logged and re-raised, and nothing is cached, as ``computeIfAbsent``."""
+        key = (lease_name, implementation, owner_name)
+        lease = self._leases.get(key)
+        if lease is None:
+            if implementation not in self._registered:
+                # Pekko's require(fqcn.nonEmpty) (110), thrown outside the logged Try
+                raise ValueError(
+                    f"no lease implementation registered as {implementation!r}; "
+                    "register it with LeaseProvider(system).register"
+                )
+            factory, timeouts, config = self._registered[implementation]
+            settings = LeaseSettings(lease_name, owner_name, timeouts, config)
+            try:
+                lease = factory(settings)
+            except Exception:
+                log.exception(
+                    "Invalid lease configuration for lease_name [%s], implementation [%s]. "
+                    "The factory registered with LeaseProvider.register must return a Lease.",
+                    lease_name,
+                    implementation,
+                )
+                raise
+            self._leases[key] = lease
+        return lease

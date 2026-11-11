@@ -110,6 +110,15 @@ from .coordinated_shutdown import (
     JvmExitReason,
     Reason,
 )
+from .coordination import (
+    Lease,
+    LeaseError,
+    LeaseProvider,
+    LeaseSettings,
+    LeaseTimeoutError,
+    LeaseUsageSettings,
+    TimeoutSettings,
+)
 from .eventstream import (
     AllDeadLetters,
     DeadLetter,
@@ -242,6 +251,12 @@ __all__ = [
     "KillSwitches",
     "KubernetesApiServiceDiscovery",
     "KubernetesApiSettings",
+    "Lease",
+    "LeaseError",
+    "LeaseProvider",
+    "LeaseSettings",
+    "LeaseTimeoutError",
+    "LeaseUsageSettings",
     "KeepMajority",
     "KeepOldest",
     "LeaderChanged",
@@ -318,6 +333,7 @@ __all__ = [
     "Success",
     "SupervisorStrategy",
     "Terminated",
+    "TimeoutSettings",
     "TimerScheduler",
     "Try",
     "UniqueAddress",

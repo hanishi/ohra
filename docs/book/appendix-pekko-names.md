@@ -80,7 +80,7 @@
 | `ShardRegion.SetActiveEntityLimit` | `SetActiveEntityLimit` |
 | `ShardRegion.GetShardRegionStats`, `ShardRegionStats` | `GetShardRegionStats(reply_to)`, `ShardRegionStats(stats, failed)` |
 | `ShardRegion.GetClusterShardingStats(timeout)`, `ClusterShardingStats`; typed `GetClusterShardingStats(entityTypeKey, timeout, replyTo)` | `GetClusterShardingStats(timeout, reply_to)`, `ClusterShardingStats`; `region.tell(GetClusterShardingStats(timeout, reply_to))` |
-| `Shard.GetShardStats`, `ShardStats` | `GetShardStats(reply_to)`, `ShardStats(shard_id, entity_count)` |
+| `Shard.GetShardStats`, `ShardStats` | internal, in `shard.py`: `GetShardStats(reply_to)`, `ShardStats(shard_id, entity_count)` |
 | `pekko.cluster.sharding.use-lease`, `lease-retry-interval`; `ClusterShardingSettings.withLeaseSettings` | `ClusterShardingSettings.lease_settings`, a `LeaseUsageSettings`; `with_lease_settings(...)` |
 | `verbose-debug-logging`, `fail-on-invalid-entity-state-transition`, `entity-restart-backoff`, `shard-failure-backoff` | `ClusterShardingSettings.verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff`, `shard_failure_backoff` |
 | `DistributedData(system).replicator`, `selfUniqueAddress` | `DistributedData(system).replicator`, `self_unique_address`; raises `RuntimeError` on a system without `cluster=` |

@@ -195,7 +195,7 @@ It prints:
 - **It does not stop the nodes.** Wait until every member that was Up sees itself `ready_for_shutdown`, then stop them and start the new version. A graceful leave from a ready node can be lost: ReadyForShutdown outranks Leaving when two views of a member merge, as in Pekko, so a leave that is concurrent with any other change to the membership, such as a move by the leader or another node's leave, is overwritten, and that node's shutdown waits out the `cluster-exiting` timeout (10 s) with a warning. The example therefore stops the nodes one at a time and waits until the others no longer list the one that left.
 - Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
 - **The singleton** stops handing over while any member is preparing or ready, see [chapter 6](06-singleton.md).
-- **Cluster sharding** takes part, see [chapter 7](07-sharding.md#the-shard). Its coordinator stops rebalancing, its regions stop handing off, and its shards stop at once, without waiting for their entities.
+- **Cluster sharding** takes part, see [chapter 7](07-sharding.md#the-shard). Its coordinator stops rebalancing, its regions stop handing off, and a shard told to hand off stops at once, without waiting for its entities.
 
 ### Split-brain resolver
 

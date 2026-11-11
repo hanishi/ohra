@@ -483,6 +483,9 @@ type _ShardCmd[T] = (
     | ShardsUpdated
     | _EntityTerminated
     | _PassivateIntervalTick
+    | _LeaseAcquireResult
+    | _LeaseLost
+    | _LeaseRetry
     | MemberEvent
 )
 

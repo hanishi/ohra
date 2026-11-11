@@ -174,6 +174,30 @@ async def test_the_lease_is_released_when_the_shard_stops():
         await lease.probe.expect_message(TestLease.ReleaseReq(owner))
 
 
+async def test_a_hand_off_stashed_while_acquiring_is_replayed_in_order():
+    """Shard.scala 520-544: ``awaitingLease`` stashes every message, ``HandOff`` included, and
+    replays them in arrival order once the lease is acquired."""
+    async with ActorTestKit() as testkit:
+        TestLease.register(testkit.system)
+        region: TestProbe[Any] = testkit.create_test_probe()
+        replies: TestProbe[int] = testkit.create_test_probe()
+        stopped: TestProbe[ShardStopped] = testkit.create_test_probe()
+        shard = testkit.spawn(shard_behavior(leased(), "7", region.ref))
+        lease = await lease_of(testkit.system, region, f"{testkit.system.name}-shard-Counter-7")
+        owner = lease.settings.owner_name
+        await lease.probe.expect_message(TestLease.AcquireReq(owner))
+        shard.tell(ShardingEnvelope("a", Add(2)))
+        shard.tell(ShardingEnvelope("a", Get(replies.ref)))
+        shard.tell(HandOff("7", stopped.ref))
+        shard.tell(ShardingEnvelope("b", Get(replies.ref)))
+        lease.initial_promise.set_result(True)
+        await region.expect_message(ShardInitialized("7"))
+        await replies.expect_message(2)
+        await stopped.expect_message(ShardStopped("7"))
+        await lease.probe.expect_message(TestLease.ReleaseReq(owner))
+        await replies.expect_no_message(0.1)
+
+
 async def test_a_shard_stopped_while_acquiring_leaves_nothing_behind():
     """Review focus 1: the system terminates before the acquire completes."""
     async with ActorTestKit() as testkit:

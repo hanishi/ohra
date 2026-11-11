@@ -29,12 +29,14 @@ from ohra import (
     ActorSystem,
     Behavior,
     Behaviors,
+    ClusterShardingSettings,
     Entity,
     EntityContext,
     EntityRef,
     EntityTypeKey,
     GetShardRegionState,
     Passivate,
+    PassivationStrategySettings,
     Sharding,
     ShardingEnvelope,
     SqliteStore,
@@ -103,7 +105,14 @@ def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
 type RegionCmd = ShardingEnvelope[CartCmd] | GetShardRegionState
 
 actors = Actors(
-    Sharding.init(Entity(Cart, cart_entity).with_passivate_after(IDLE_TIMEOUT)), "carts"
+    Sharding.init(
+        Entity(Cart, cart_entity).with_settings(
+            ClusterShardingSettings().with_passivation_strategy(
+                PassivationStrategySettings.defaults.with_idle_entity_passivation(IDLE_TIMEOUT)
+            )
+        )
+    ),
+    "carts",
 )
 app = FastAPI(
     title="carts",

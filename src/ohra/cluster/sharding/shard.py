@@ -1,31 +1,47 @@
-"""Sharding: one entity actor per id, created on its first message, passivated when idle or on
-request.
+"""Sharding: one entity actor per id, created on its first message, passivated by the passivation
+strategy or on request.
 
-Apache Pekko's layering: a region routes each message by shard id to a Shard actor, which hosts the
-entities of that shard and passivates them. ``Sharding.init`` is the region inside one process;
-``ClusterSharding`` in ``ohra.cluster.sharding`` runs the same Shards under regions that span
-the cluster. Messages for a passivating entity are buffered and delivered to its next incarnation;
-an entity that stops on its own, by returning ``Behaviors.stopped()``, loses what is queued behind
-it, as in Pekko, so entities should passivate rather than stop themselves.
+Apache Pekko's layering: a region routes each message by shard id to a Shard actor (Pekko's
+``Shard``, Shard.scala 424-1200), which hosts the entities of that shard and passivates them by
+``ClusterShardingSettings.passivation_strategy_settings``, idle after 120 s by default.
+``Sharding.init`` is the region inside one process; ``ClusterSharding`` in
+``ohra.cluster.sharding`` runs the same Shards under regions that span the cluster. Messages for a
+passivating entity are buffered, up to ``buffer_size`` for the whole shard, and delivered to its
+next incarnation; what is still buffered when the shard stops is dropped, and a shard handing off
+leaves every message unhandled. An entity that stops on its own, by returning
+``Behaviors.stopped()``, loses what is queued behind it, as in Pekko, so entities should passivate
+rather than stop themselves.
 """
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote
 
 from ...behavior import Behavior, Behaviors
 from ...context import ActorContext
 from ...coordinated_shutdown import CoordinatedShutdown
+from ...eventstream import DeadLetterSuppression
 from ...ref import ActorRef
 from ...remote.serialization import remotable
 from ...signals import PostStop, Signal, Terminated
+from ...util.message_buffer import MessageBufferMap
 from ..ddata.replicator import Replicator
 from ..ddata.settings import ReplicatorSettings
+from .entities import (
+    Active,
+    Entities,
+    Passivating,
+    RememberedButNotCreated,
+    RememberingStart,
+    RememberingStop,
+    WaitingForRestart,
+)
+from .passivation import EntityPassivationStrategy, PassivateEntities
 from .passivation_settings import (
     PassivationStrategy,
     PassivationStrategySettings,
@@ -52,9 +68,9 @@ def shard_id_of(entity_id: str, number_of_shards: int) -> str:
 @dataclass(frozen=True)
 class ClusterShardingSettings:
     """Pekko's cluster sharding settings with their defaults, in seconds. The single-node region
-    uses ``number_of_shards``, ``buffer_size``, ``passivate_after``, ``handoff_timeout`` and
-    ``shard_region_query_timeout`` too. The shard passivates by ``passivate_after``; it does not
-    read ``passivation_strategy_settings`` yet."""
+    uses ``number_of_shards``, ``buffer_size``, ``handoff_timeout`` and
+    ``shard_region_query_timeout`` too, and the shard passivates its entities by
+    ``passivation_strategy_settings``."""
 
     number_of_shards: int = 1000
     retry_interval: float = 2.0
@@ -63,10 +79,10 @@ class ClusterShardingSettings:
     shard_start_timeout: float = 10.0
     coordinator_failure_backoff: float = 5.0
     buffer_size: int = 100_000
+    """The messages a region buffers, and a shard buffers across its entities (buffer-size)."""
     rebalance_absolute_limit: int = 0
     """0 means no absolute cap, as Pekko."""
     rebalance_relative_limit: float = 0.1
-    passivate_after: float | None = None
     shard_region_query_timeout: float = 3.0
     coordinator_singleton_settings: ClusterSingletonSettings | None = None
     """Settings of the coordinator's singleton manager (Pekko's coordinator-singleton); None means
@@ -93,10 +109,23 @@ class ClusterShardingSettings:
     )
     """Pekko's passivationStrategySettings; the default passivates idle entities after 120 s."""
 
+    verbose_debug_logging: bool = False
+    """Debug logs per routed message (verbose-debug-logging)."""
+    fail_on_invalid_entity_state_transition: bool = False
+    """An invalid entity state transition crashes the shard instead of being logged
+    (fail-on-invalid-entity-state-transition)."""
+    entity_restart_backoff: float = 10.0
+    """How long a remembered entity that stopped without passivating waits to restart
+    (entity-restart-backoff). Unused until remembered entities exist."""
+    shard_failure_backoff: float = 10.0
+    """How long a remembering shard that failed to store waits to restart
+    (shard-failure-backoff). Unused until remembered entities exist."""
+
     def __post_init__(self) -> None:
         for name in (
             "retry_interval", "rebalance_interval", "handoff_timeout", "shard_start_timeout",
             "coordinator_failure_backoff", "shard_region_query_timeout",
+            "entity_restart_backoff", "shard_failure_backoff",
         ):  # fmt: skip
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be > 0")
@@ -106,8 +135,6 @@ class ClusterShardingSettings:
             raise ValueError("rebalance_absolute_limit must be >= 0")
         if not 0.0 < self.rebalance_relative_limit <= 1.0:
             raise ValueError("rebalance_relative_limit must be in (0, 1]")
-        if self.passivate_after is not None and self.passivate_after <= 0:
-            raise ValueError("passivate_after must be > 0 or None")
         for name in ("waiting_for_state_timeout", "updating_state_timeout"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be > 0")
@@ -250,20 +277,19 @@ class HandOff:
 
 @dataclass(frozen=True)
 class Entity[T]:
-    """How to create an entity of a type, plus its passivation settings."""
+    """How to create an entity of a type, plus its sharding settings."""
 
     type_key: EntityTypeKey[T]
     create_behavior: Callable[[EntityContext[T]], Behavior[T]]
     stop_message: T | None = None
     # None takes the value from settings; a value set here wins over settings
-    passivate_after: float | None = None
-    # messages kept for a passivating entity; beyond this they are dead letters
     buffer_size: int | None = None
     settings: ClusterShardingSettings | None = None
 
     def with_buffer_size(self, size: int) -> Entity[T]:
-        """Cap on messages buffered while an entity passivates, as Pekko's sharding buffer-size
-        setting."""
+        """Pekko's buffer-size: caps the messages a shard buffers for its passivating entities,
+        in total across them, and the messages the region buffers. The shard drops what is
+        beyond it."""
         return replace(self, buffer_size=size)
 
     def with_stop_message(self, msg: T) -> Entity[T]:
@@ -271,21 +297,14 @@ class Entity[T]:
         outright."""
         return replace(self, stop_message=msg)
 
-    def with_passivate_after(self, seconds: float) -> Entity[T]:
-        """Stop an entity that has received no message for this long. Not in Pekko, which uses
-        settings."""
-        return replace(self, passivate_after=seconds)
-
     def with_settings(self, settings: ClusterShardingSettings) -> Entity[T]:
         return replace(self, settings=settings)
 
     @property
     def effective_settings(self) -> ClusterShardingSettings:
-        """``settings``, with ``passivate_after`` and ``buffer_size`` set on the entity on top,
-        whichever order they were set in."""
+        """``settings``, with ``buffer_size`` set on the entity on top, whichever order they
+        were set in."""
         settings = self.settings or ClusterShardingSettings()
-        if self.passivate_after is not None:
-            settings = replace(settings, passivate_after=self.passivate_after)
         if self.buffer_size is not None:
             settings = replace(settings, buffer_size=self.buffer_size)
         return settings
@@ -326,170 +345,470 @@ class EntityRef[T](ActorRef[T]):
 
 
 @dataclass(frozen=True)
-class _IdleTick:
-    pass
-
-
-@dataclass(frozen=True)
-class _HandOffTimeout:
-    pass
-
-
-@dataclass(frozen=True)
 class _QueryTimeout:
     pass
 
 
+@dataclass(frozen=True)
+class ShardInitialized:
+    """ShardRegion.scala 235: a shard tells its region it is ready for messages."""
+
+    shard_id: str
+
+
+@dataclass(frozen=True)
+class SetActiveEntityLimit:
+    """ShardRegion.scala 505: the region's active entity limit, for the shard's passivation
+    strategy."""
+
+    per_region_limit: int
+
+
+@dataclass(frozen=True)
+class ShardsUpdated(DeadLetterSuppression):
+    """ShardRegion.scala 514: the number of shards active in the region changed."""
+
+    active_shards: int
+
+
+@remotable
+@dataclass(frozen=True)
+class ShardStats:
+    """Shard.scala 92: the number of entities of a shard, passivating ones included."""
+
+    shard_id: str
+    entity_count: int
+
+
+@remotable
+@dataclass(frozen=True)
+class GetShardStats:
+    """Shard.scala 89."""
+
+    reply_to: ActorRef[ShardStats]
+
+
+@dataclass(frozen=True)
+class _EntityTerminated:
+    """Shard.scala 124: an entity's termination, watched with this message."""
+
+    ref: ActorRef[Any]
+
+
+@dataclass(frozen=True)
+class _PassivateIntervalTick:
+    """Shard.scala 122: the passivation strategy's interval has passed."""
+
+
 type _ShardCmd[T] = (
-    ShardingEnvelope[T] | ShardCommand | HandOff | GetShardState | _IdleTick | _HandOffTimeout
+    ShardingEnvelope[T]
+    | ShardCommand
+    | HandOff
+    | GetShardState
+    | GetShardStats
+    | SetActiveEntityLimit
+    | ShardsUpdated
+    | _EntityTerminated
+    | _PassivateIntervalTick
 )
+
+
+class _Shard[T]:
+    """Pekko's ``Shard`` actor (Shard.scala 424-1200), for one shard id of one entity type.
+    Remembered entities wait for sub-project 10, so the shard is never remembering: it starts
+    in ``idle`` and each method below leaves out its remember-store branches. The lease
+    (Task 4) and the member events of a full cluster shutdown (Task 6) are not ported yet.
+
+    ``self.receive`` is Pekko's ``context.become``. Pekko's ``context.parent`` is ``region``,
+    ``context.stop(self)`` is returning ``Behaviors.stopped()``, and a typed message has no
+    sender, so the envelope is what is buffered and redelivered."""
+
+    def __init__(
+        self, ctx: ActorContext[Any], entity: Entity[T], shard_id: str, region: ActorRef[Any]
+    ) -> None:
+        """Shard.scala 449-481."""
+        self.ctx = ctx
+        self.entity = entity
+        self.shard_id = shard_id
+        self.region = region
+        self.settings = entity.effective_settings
+        self.type_name = entity.type_key.name
+        self.log = ctx.log
+        self.verbose_debug = self.settings.verbose_debug_logging
+        self.entities = Entities(
+            ctx.log,
+            False,
+            self.verbose_debug,
+            self.settings.fail_on_invalid_entity_state_transition,
+        )
+        # Messages are buffered while an entity is passivating
+        self.message_buffers = MessageBufferMap[str]()
+        self.hand_off_stopper: ActorRef[Any] | None = None
+        self.passivation_strategy = EntityPassivationStrategy.create(
+            self.settings, lambda: ctx.system.scheduler.current_time
+        )
+        interval = self.passivation_strategy.scheduled_interval
+        if interval is not None:
+            ctx.timers.start_timer_with_fixed_delay(
+                _PassivateIntervalTick, _PassivateIntervalTick(), interval
+            )
+        self.receive: Callable[[Any], Behavior[Any]] = self.idle
+        # Pekko's tryLoadRememberedEntities without a store
+        self.shard_initialized()
+
+    def behavior(self) -> Behavior[Any]:
+        def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+            return self.receive(msg)
+
+        def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
+            if isinstance(sig, Terminated):
+                return self.receive_terminated(sig.ref)
+            if sig is PostStop:
+                self.post_stop()
+                return Behaviors.same
+            return Behaviors.unhandled
+
+        return Behaviors.receive(on_message).receive_signal(on_signal)
+
+    def shard_initialized(self) -> None:
+        """Shard.scala 614-619."""
+        self.log.debug("%s: Shard initialized", self.type_name)
+        self.region.tell(ShardInitialized(self.shard_id))
+        self.receive = self.idle
+
+    def idle(self, msg: Any) -> Behavior[Any]:
+        """Shard.scala 624-639, without the remember-entity commands, ``StartEntity`` and the
+        store's crash; the member events and ``LeaseLost`` come with Tasks 6 and 4.
+        ``Terminated`` is a signal, handled in ``behavior``."""
+        match msg:
+            case _EntityTerminated(ref):
+                self.entity_terminated(ref)
+            case HandOff():
+                return self.receive_coordinator_message(msg)
+            case SetActiveEntityLimit():
+                self.active_entity_limit_updated(msg)
+            case ShardsUpdated():
+                self.shards_updated(msg)
+            case Passivate(ref):
+                self.passivate(ref, self.entity.stop_message)
+            case _PassivateIntervalTick():
+                self.passivate_entities_after_interval()
+            case GetShardState() | GetShardStats():
+                self.receive_shard_query(msg)
+            case ShardingEnvelope():
+                self.deliver_message(cast(ShardingEnvelope[T], msg))
+            case _:
+                return Behaviors.unhandled
+        return Behaviors.same
+
+    def receive_coordinator_message(self, msg: HandOff) -> Behavior[Any]:
+        """Shard.scala 852-858. ``HandOff`` is the only coordinator message a shard gets."""
+        if msg.shard == self.shard_id:
+            return self.hand_off(msg.reply_to)
+        self.log.warning(
+            "%s: Shard [%s] can not hand off for another Shard [%s]",
+            self.type_name,
+            self.shard_id,
+            msg.shard,
+        )
+        return Behaviors.same
+
+    def receive_shard_query(self, msg: GetShardState | GetShardStats) -> None:
+        """Shard.scala 860-870. ``GetShardState`` is Pekko's ``GetCurrentShardState``."""
+        match msg:
+            case GetShardState(reply_to):
+                if self.verbose_debug:
+                    self.log.debug(
+                        "%s: GetCurrentShardState, full state: [%s], active: [%s]",
+                        self.type_name,
+                        self.entities,
+                        self.entities.active_entity_ids(),
+                    )
+                reply_to.tell(CurrentShardState(self.shard_id, self.entities.active_entity_ids()))
+            case GetShardStats(reply_to):
+                reply_to.tell(ShardStats(self.shard_id, self.entities.size))
+
+    def hand_off(self, reply_to: ActorRef[ShardStopped]) -> Behavior[Any]:
+        """Shard.scala 872-905, without the ``preparingForShutdown`` branch (Task 6)."""
+        if self.hand_off_stopper is not None:
+            self.log.warning(
+                "%s: HandOff shard [%s] received during existing handOff",
+                self.type_name,
+                self.shard_id,
+            )
+            return Behaviors.same
+        self.log.debug("%s: HandOff shard [%s]", self.type_name, self.shard_id)
+        # does conversion so only do once
+        active_entities = self.entities.active_entities()
+        if active_entities:
+            entity_hand_off_timeout = self.settings.entity_hand_off_timeout
+            self.log.debug(
+                "%s: Starting HandOffStopper for shard [%s] to terminate [%d] entities.",
+                self.type_name,
+                self.shard_id,
+                len(active_entities),
+            )
+            for ref in active_entities:
+                self.ctx.unwatch(ref)
+            stopper = self.ctx.spawn(
+                hand_off_stopper(
+                    self.type_name,
+                    self.shard_id,
+                    reply_to,
+                    active_entities,
+                    self.entity.stop_message,
+                    entity_hand_off_timeout,
+                    lambda ref, after_pending: self.ctx.stop(ref, after_pending=after_pending),
+                ),
+                "HandOffStopper",
+            )
+            self.ctx.watch(stopper)
+            self.hand_off_stopper = stopper
+            # During hand off we only care about watching for termination of the hand off
+            # stopper
+            self.receive = self.handing_off
+            return Behaviors.same
+        reply_to.tell(ShardStopped(self.shard_id))
+        return Behaviors.stopped()
+
+    def handing_off(self, msg: Any) -> Behavior[Any]:
+        """Shard.scala 898-900, Pekko's anonymous ``become``: every message is unhandled, and
+        the stopper's end arrives as the ``Terminated`` signal."""
+        return Behaviors.unhandled
+
+    def receive_terminated(self, ref: ActorRef[Any]) -> Behavior[Any]:
+        """Shard.scala 907-910."""
+        if self.hand_off_stopper is not None and self.hand_off_stopper == ref:
+            return Behaviors.stopped()
+        return Behaviors.same
+
+    def entity_terminated(self, ref: ActorRef[Any]) -> None:
+        """Shard.scala 913-975, without the remember-store branches of ``Active`` (restart after
+        backoff) and ``Passivating`` (store the stop)."""
+        entity_id = self.entities.entity_id(ref)
+        if entity_id is None:
+            self.log.warning("%s: Unexpected entity terminated: %s", self.type_name, ref)
+            return
+        self.passivation_strategy.entity_terminated(entity_id)
+        match self.entities.entity_state(entity_id):
+            case RememberingStop():
+                if self.verbose_debug:
+                    self.log.debug(
+                        "%s: Stop of [%s] arrived, already is among the pending stops",
+                        self.type_name,
+                        entity_id,
+                    )
+            case Active():
+                self.log.debug("%s: Entity [%s] terminated", self.type_name, entity_id)
+                self.entities.remove_entity(entity_id)
+            case Passivating():
+                if self.message_buffers.get_or_empty(entity_id):
+                    if self.verbose_debug:
+                        self.log.debug(
+                            "%s: [%s] terminated after passivating, buffered messages found, "
+                            "restarting",
+                            self.type_name,
+                            entity_id,
+                        )
+                    self.entities.remove_entity(entity_id)
+                    self.get_or_create_entity(entity_id)
+                    self.send_msg_buffer(entity_id)
+                else:
+                    if self.verbose_debug:
+                        self.log.debug(
+                            "%s: [%s] terminated after passivating", self.type_name, entity_id
+                        )
+                    self.entities.remove_entity(entity_id)
+            case unexpected:
+                self.log.warning(
+                    "%s: Got a terminated for [%s], entityId [%s] which is in unexpected state "
+                    "[%s]",
+                    self.type_name,
+                    self.entities.entity(entity_id),
+                    entity_id,
+                    unexpected,
+                )
+
+    def passivate(self, entity: ActorRef[Any], stop_message: object | None) -> None:
+        """Shard.scala 977-997. With no stop message the entity is stopped after its pending
+        messages, as Pekko's ``PoisonPill``."""
+        entity_id = self.entities.entity_id(entity)
+        if entity_id is None:
+            self.log.debug(
+                "%s: Unknown entity passivating [%s]. Not sending stopMessage back to entity",
+                self.type_name,
+                entity,
+            )
+        elif self.entities.is_passivating(entity_id):
+            self.log.debug(
+                "%s: Passivation already in progress for [%s]. Not sending stopMessage back to "
+                "entity",
+                self.type_name,
+                entity_id,
+            )
+        elif self.message_buffers.get_or_empty(entity_id):
+            self.log.debug(
+                "%s: Passivation when there are buffered messages for [%s], ignoring passivation",
+                self.type_name,
+                entity_id,
+            )
+        else:
+            if self.verbose_debug:
+                self.log.debug("%s: Passivation started for [%s]", self.type_name, entity_id)
+            self.entities.entity_passivating(entity_id)
+            if stop_message is None:
+                self.ctx.stop(entity, after_pending=True)
+            else:
+                entity.tell(stop_message)
+
+    def active_entity_limit_updated(self, updated: SetActiveEntityLimit) -> None:
+        """Shard.scala 999-1002."""
+        self.passivate_entities(self.passivation_strategy.limit_updated(updated.per_region_limit))
+
+    def shards_updated(self, updated: ShardsUpdated) -> None:
+        """Shard.scala 1004-1007."""
+        self.passivate_entities(self.passivation_strategy.shards_updated(updated.active_shards))
+
+    def passivate_entities_after_interval(self) -> None:
+        """Shard.scala 1009-1012."""
+        self.passivate_entities(self.passivation_strategy.interval_passed())
+
+    def passivate_entities(self, entities_to_passivate: PassivateEntities) -> None:
+        """Shard.scala 1014-1024."""
+        if entities_to_passivate:
+            refs_to_passivate = [
+                ref
+                for entity_id in entities_to_passivate
+                if (ref := self.entities.entity(entity_id)) is not None
+            ]
+            if refs_to_passivate:
+                self.log.debug(
+                    "%s: Passivating [%d] entities", self.type_name, len(refs_to_passivate)
+                )
+                for ref in refs_to_passivate:
+                    self.passivate(ref, self.entity.stop_message)
+
+    def deliver_message(self, envelope: ShardingEnvelope[T]) -> None:
+        """Shard.scala 1049-1124, without ``StartEntity`` and the remembering branches: an
+        entity in no state is created and the message delivered at once."""
+        entity_id, payload = envelope.entity_id, envelope.message
+        if not entity_id:
+            self.log.warning(
+                "%s: Id must not be empty, dropping message [%s]",
+                self.type_name,
+                type(envelope).__name__,
+            )
+            self.ctx.system.dropped(envelope, "No recipient entity id", self.ctx.self)
+            return
+        match self.entities.entity_state(entity_id):
+            case Active(ref):
+                if self.verbose_debug:
+                    self.log.debug(
+                        "%s: Delivering message of type [%s] to [%s]",
+                        self.type_name,
+                        type(payload).__name__,
+                        entity_id,
+                    )
+                entities_to_passivate = self.passivation_strategy.entity_touched(entity_id)
+                ref.tell(payload)
+                self.passivate_entities(entities_to_passivate)
+            case RememberingStart() | RememberingStop() | Passivating():
+                self.append_to_message_buffer(entity_id, envelope)
+            case WaitingForRestart() | RememberedButNotCreated() as state:
+                if self.verbose_debug:
+                    self.log.debug(
+                        "%s: Delivering message of type [%s] to [%s] (starting because [%s])",
+                        self.type_name,
+                        type(payload).__name__,
+                        entity_id,
+                        state,
+                    )
+                self.get_or_create_entity(entity_id).tell(payload)
+            case _:  # NoState: don't buffer if remember entities not enabled
+                ref = self.get_or_create_entity(entity_id)
+                entities_to_passivate = self.passivation_strategy.entity_touched(entity_id)
+                ref.tell(payload)
+                self.passivate_entities(entities_to_passivate)
+
+    def get_or_create_entity(self, entity_id: str) -> ActorRef[T]:
+        """Shard.scala 1127-1139. The behavior is created inside the child's own setup, so a
+        failing factory fails that entity, not the shard."""
+        child = self.entities.entity(entity_id)
+        if child is not None:
+            return child
+        entity_ctx = EntityContext(self.entity.type_key, entity_id, self.ctx.self)
+        create = self.entity.create_behavior
+        behavior: Behavior[T] = Behaviors.setup(lambda _ctx: create(entity_ctx))
+        a = self.ctx.spawn(behavior, _child_name(entity_id))
+        self.ctx.watch_with(a, _EntityTerminated(a))
+        self.log.debug(
+            "%s: Started entity [%s] with entity id [%s] in shard [%s]",
+            self.type_name,
+            a,
+            entity_id,
+            self.shard_id,
+        )
+        self.entities.add_entity(entity_id, a)
+        self.entity_created(entity_id)
+        return a
+
+    def entity_created(self, entity_id: str) -> int:
+        """Shard.scala 1146: called when an entity has been created; the number of active
+        entities."""
+        return self.entities.nr_active_entities()
+
+    def append_to_message_buffer(self, entity_id: str, msg: ShardingEnvelope[T]) -> None:
+        """Shard.scala 1149-1163: ``buffer_size`` caps the messages of all the shard's buffers
+        together."""
+        if self.message_buffers.total_size >= self.settings.buffer_size:
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug(
+                    "%s: Buffer is full, dropping message of type [%s] for entity [%s]",
+                    self.type_name,
+                    type(msg).__name__,
+                    entity_id,
+                )
+            self.ctx.system.dropped(msg, f"Buffer for [{entity_id}] is full", self.ctx.self)
+        else:
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug(
+                    "%s: Message of type [%s] for entity [%s] buffered",
+                    self.type_name,
+                    type(msg).__name__,
+                    entity_id,
+                )
+            self.message_buffers.append(entity_id, msg)
+
+    def send_msg_buffer(self, entity_id: str) -> None:
+        """Shard.scala 1166-1181, without ``StartEntity``."""
+        # Get the buffered messages and remove the buffer
+        messages = self.message_buffers.get_or_empty(entity_id)
+        self.message_buffers.remove(entity_id)
+        if messages:
+            self.get_or_create_entity(entity_id)
+            self.log.debug(
+                "%s: Sending message buffer for entity [%s] ([%d] messages)",
+                self.type_name,
+                entity_id,
+                len(messages),
+            )
+            # Now there is no deliveryBuffer we can try to redeliver
+            # and as the child exists, the message will be directly forwarded
+            for msg in messages:
+                self.deliver_message(cast(ShardingEnvelope[T], msg))
+
+    def post_stop(self) -> None:
+        """Shard.scala 1194-1198. The interval timer stops with the shard; what is still
+        buffered is dropped silently, as Pekko's buffers are."""
+        self.log.debug("%s: Shard [%s] shutting down", self.type_name, self.shard_id)
 
 
 def shard_behavior[T](
     entity: Entity[T], shard_id: str, region: ActorRef[ShardingEnvelope[T]]
 ) -> Behavior[_ShardCmd[T]]:
-    """Pekko's Shard: hosts the entities of one shard id. ``region`` names the entities' logical
-    refs."""
-    settings = entity.effective_settings
-
-    @Behaviors.setup
-    def setup(ctx: ActorContext[_ShardCmd[T]]) -> Behavior[_ShardCmd[T]]:
-        entities: dict[str, ActorRef[T]] = {}
-        # LocalRef hashes by identity: a stale incarnation misses
-        ids_by_ref: dict[ActorRef[T], str] = {}
-        # messages buffered until the entity's Terminated arrives
-        passivating: dict[str, list[T]] = {}
-        last_seen: dict[str, float] = {}
-        hand_off_to: ActorRef[ShardStopped] | None = None
-        loop = asyncio.get_running_loop()
-        # one tick for the shard, as Pekko, instead of a timer per message
-        if settings.passivate_after is not None:
-            ctx.timers.start_timer_with_fixed_delay(
-                "idle", _IdleTick(), settings.passivate_after / 2
-            )
-
-        def start(entity_id: str) -> ActorRef[T]:
-            entity_ctx = EntityContext(entity.type_key, entity_id, ctx.self)
-            # Created inside the child's own setup, so a failing factory fails that entity, not the
-            # shard.
-            behavior: Behavior[T] = Behaviors.setup(
-                lambda _ctx: entity.create_behavior(entity_ctx)
-            )
-            ref = ctx.spawn(behavior, _child_name(entity_id))
-            ctx.watch(ref)
-            entities[entity_id] = ref
-            ids_by_ref[ref] = entity_id
-            return ref
-
-        def deliver(entity_id: str, message: T) -> None:
-            (entities.get(entity_id) or start(entity_id)).tell(message)
-            last_seen[entity_id] = loop.time()
-
-        def stop_entity(ref: ActorRef[T]) -> None:
-            if entity.stop_message is not None:
-                ref.tell(entity.stop_message)
-            else:
-                # after what the shard already forwarded, as Pekko's PoisonPill
-                ctx.stop(ref, after_pending=True)
-
-        def passivate(entity_id: str) -> None:
-            ref = entities.get(entity_id)
-            if ref is None or entity_id in passivating:
-                # unknown, or already stopping: a duplicate Passivate must not touch the next
-                # incarnation
-                return
-            passivating[entity_id] = []
-            last_seen.pop(entity_id, None)
-            stop_entity(ref)
-
-        def hand_off_done() -> Behavior[_ShardCmd[T]]:
-            assert hand_off_to is not None
-            hand_off_to.tell(ShardStopped(shard_id))
-            return Behaviors.stopped()
-
-        @Behaviors.receive
-        def on_message(
-            _ctx: ActorContext[_ShardCmd[T]], msg: _ShardCmd[T]
-        ) -> Behavior[_ShardCmd[T]]:
-            nonlocal hand_off_to
-            if hand_off_to is not None:
-                match msg:
-                    case _HandOffTimeout():
-                        # stragglers: stopped outright, as Pekko
-                        for ref in list(entities.values()):
-                            ctx.stop(ref)
-                    case ShardingEnvelope(entity_id, message):
-                        ctx.system.dead_letter(message, EntityRef(region, entity_id))
-                    case GetShardState(reply_to):
-                        reply_to.tell(CurrentShardState(shard_id, frozenset(entities)))
-                    case _:
-                        pass
-                return Behaviors.same
-            match msg:
-                case ShardingEnvelope("", message):
-                    ctx.log.warning("dropping message for empty entity id: %r", message)
-                    ctx.system.dead_letter(message, ctx.self)
-                case ShardingEnvelope(entity_id, message):
-                    buffer = passivating.get(entity_id)
-                    if buffer is None:
-                        deliver(entity_id, message)
-                    elif len(buffer) < settings.buffer_size:
-                        buffer.append(message)
-                    else:
-                        ctx.system.dead_letter(message, EntityRef(region, entity_id))
-                case GetShardState(reply_to):
-                    reply_to.tell(CurrentShardState(shard_id, frozenset(entities)))
-                case Passivate(ref):
-                    entity_id = ids_by_ref.get(ref)
-                    if entity_id is not None:
-                        passivate(entity_id)
-                case HandOff(_, reply_to):
-                    hand_off_to = reply_to
-                    # what waited for a next incarnation is lost
-                    for entity_id, buffered in passivating.items():
-                        for message in buffered:
-                            ctx.system.dead_letter(message, EntityRef(region, entity_id))
-                    passivating.clear()
-                    if not entities:
-                        return hand_off_done()
-                    for ref in list(entities.values()):
-                        stop_entity(ref)
-                    ctx.timers.start_single_timer(
-                        "hand-off", _HandOffTimeout(), settings.entity_hand_off_timeout
-                    )
-                case _IdleTick():
-                    assert settings.passivate_after is not None
-                    cutoff = loop.time() - settings.passivate_after
-                    for entity_id in [i for i, t in last_seen.items() if t <= cutoff]:
-                        passivate(entity_id)
-                case _:
-                    return Behaviors.unhandled
-            return Behaviors.same
-
-        def on_signal(_ctx: ActorContext[_ShardCmd[T]], sig: Signal) -> Behavior[_ShardCmd[T]]:
-            # the shard is going away: what was buffered for passivating entities is lost
-            if sig is PostStop:
-                for entity_id, buffered in passivating.items():
-                    for message in buffered:
-                        ctx.system.dead_letter(message, EntityRef(region, entity_id))
-                return Behaviors.same
-            if isinstance(sig, Terminated):
-                entity_id = ids_by_ref.pop(sig.ref, None)
-                if entity_id is not None:
-                    entities.pop(entity_id, None)
-                    last_seen.pop(entity_id, None)  # the entity may have stopped on its own
-                    if hand_off_to is not None:
-                        if not entities:
-                            return hand_off_done()
-                    else:
-                        for message in passivating.pop(entity_id, []):
-                            deliver(entity_id, message)
-                return Behaviors.same
-            return Behaviors.unhandled
-
-        return on_message.receive_signal(on_signal)
-
-    return setup
+    """Pekko's Shard: hosts the entities of one shard id, and tells ``region`` it is
+    initialized."""
+    return Behaviors.setup(lambda ctx: _Shard(ctx, entity, shard_id, region).behavior())
 
 
 def _aggregate_shard_states(
@@ -528,7 +847,7 @@ def _aggregate_shard_states(
     return setup
 
 
-type _RegionCmd[T] = ShardingEnvelope[T] | GetShardRegionState
+type _RegionCmd[T] = ShardingEnvelope[T] | GetShardRegionState | ShardInitialized
 
 
 class Sharding:
@@ -563,6 +882,8 @@ class Sharding:
                         ctx.system.dead_letter(message, ctx.self)
                     case ShardingEnvelope(entity_id, _):
                         shard_for(entity_id).tell(msg)
+                    case ShardInitialized():
+                        pass  # the region starts using it with the shard's lease (Task 4)
                     case GetShardRegionState(reply_to):
                         if not shards:
                             reply_to.tell(CurrentShardRegionState(frozenset()))

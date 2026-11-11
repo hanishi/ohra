@@ -44,8 +44,10 @@ from ohra import (  # noqa: E402
     Behavior,
     Behaviors,
     ChildFailed,
+    ClusterShardingSettings,
     Entity,
     EntityTypeKey,
+    PassivationStrategySettings,
     Sharding,
     Signal,
     SupervisorStrategy,
@@ -281,9 +283,11 @@ async def test_persisted_entity_survives_passivation():
     counter_key = EntityTypeKey[Cmd]("Counter")
     persisted = counter(store, log)
     region = Sharding.init(
-        Entity(
-            counter_key, lambda e: persisted.recover(e.entity_id, empty=0)
-        ).with_passivate_after(0.02)
+        Entity(counter_key, lambda e: persisted.recover(e.entity_id, empty=0)).with_settings(
+            ClusterShardingSettings().with_passivation_strategy(
+                PassivationStrategySettings.defaults.with_idle_entity_passivation(0.02)
+            )
+        )
     )
     async with ActorSystem(region, "s") as system:
         c = Sharding.entity_ref_for(system, "c")
@@ -918,9 +922,11 @@ async def test_passivating_an_entity_mid_write_loses_no_forwarded_message():
     counter_key = EntityTypeKey[Cmd]("Counter")
     persisted = counter(store, log)
     region = Sharding.init(
-        Entity(
-            counter_key, lambda e: persisted.recover(e.entity_id, empty=0)
-        ).with_passivate_after(0.02)
+        Entity(counter_key, lambda e: persisted.recover(e.entity_id, empty=0)).with_settings(
+            ClusterShardingSettings().with_passivation_strategy(
+                PassivationStrategySettings.defaults.with_idle_entity_passivation(0.02)
+            )
+        )
     )
     async with ActorTestKit() as testkit:
         probe: TestProbe[int] = testkit.create_test_probe()
@@ -928,7 +934,7 @@ async def test_passivating_an_entity_mid_write_loses_no_forwarded_message():
         c.tell(Add(1, probe.ref))
         await eventually(lambda: store.events == ["saving"])
         c.tell(Add(2, probe.ref))
-        await asyncio.sleep(0.1)  # idle past passivate_after while the write is gated
+        await asyncio.sleep(0.1)  # idle past the idle timeout while the write is gated
         store.gate.set()
         assert await probe.receive_messages(2) == [1, 3]
         assert await ask(c, Get, timeout=1) == 3

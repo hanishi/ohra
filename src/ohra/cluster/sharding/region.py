@@ -21,6 +21,7 @@ from .shard import (
     GetShardRegionState,
     HandOff,
     ShardingEnvelope,
+    ShardInitialized,
     ShardStopped,
     _aggregate_shard_states,  # pyright: ignore[reportPrivateUsage]
     shard_behavior,
@@ -353,6 +354,8 @@ class _Region:
                 case _GracefulShutdown():
                     self.graceful_shutdown_in_progress = True
                     self.send_graceful_shutdown_to_coordinator()
+                case ShardInitialized():
+                    pass  # the region starts using it with the shard's lease (Task 4)
                 case _:
                     pass
             return Behaviors.stopped() if self.try_complete_graceful_shutdown() else Behaviors.same

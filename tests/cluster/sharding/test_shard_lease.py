@@ -138,6 +138,26 @@ async def test_no_shard_initialized_until_the_lease_is_acquired():
         await region.expect_message(ShardInitialized("7"))
 
 
+async def test_a_shard_waiting_for_its_lease_stashes_beyond_the_buffer_size():
+    """Pekko's Shard stashes with the classic ``Stash``, unbounded by default
+    (``stash-capacity = -1``), so messages sent to it directly while the lease is pending are
+    all delivered once it is acquired."""
+    async with ActorTestKit() as testkit:
+        TestLease.register(testkit.system)
+        region: TestProbe[Any] = testkit.create_test_probe()
+        replies: TestProbe[int] = testkit.create_test_probe()
+        settings = replace(ClusterShardingSettings(), buffer_size=2)
+        shard = testkit.spawn(shard_behavior(leased(settings), "7", region.ref))
+        lease = await lease_of(testkit.system, region, f"{testkit.system.name}-shard-Counter-7")
+        await lease.probe.expect_message(TestLease.AcquireReq(testkit.system.name))
+        for _ in range(5):
+            shard.tell(ShardingEnvelope("a", Add(1)))
+        shard.tell(ShardingEnvelope("a", Get(replies.ref)))
+        lease.initial_promise.set_result(True)
+        await region.expect_message(ShardInitialized("7"))
+        await replies.expect_message(5)
+
+
 async def test_the_lease_is_released_when_the_shard_stops():
     async with ActorTestKit() as testkit:
         TestLease.register(testkit.system)

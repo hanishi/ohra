@@ -16,6 +16,7 @@ rather than stop themselves.
 from __future__ import annotations
 
 import asyncio
+import sys
 import logging
 import zlib
 from collections.abc import Callable
@@ -963,10 +964,10 @@ def shard_behavior[T](
     entity: Entity[T], shard_id: str, region: ActorRef[ShardingEnvelope[T]]
 ) -> Behavior[_ShardCmd[T]]:
     """Pekko's Shard: hosts the entities of one shard id, and tells ``region`` it is
-    initialized, once it holds its lease if it has lease settings. Pekko's ``Stash`` holds up
-    to ``buffer_size`` messages while the lease is pending."""
+    initialized, once it holds its lease if it has lease settings. While the lease is pending
+    it stashes without a limit, as Pekko's classic ``Stash`` does (``stash-capacity = -1``)."""
     return Behaviors.with_stash(
-        entity.effective_settings.buffer_size,
+        sys.maxsize,
         lambda stash: Behaviors.setup(
             lambda ctx: _Shard(ctx, entity, shard_id, region, stash).behavior()
         ),

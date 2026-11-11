@@ -103,6 +103,7 @@ via 2552: 9 left, counted on 2552
 - **The manager** at `/system/singletonManager<name>` tracks members ordered by age. Only the manager on the oldest Up member starts the real actor. The others wait as the next in line.
 - **The proxy** at `/system/singletonProxy<name>` finds the current instance by asking each node's manager in age order, buffers messages until it does, and forwards to it. When the instance moves, the proxy buffers again and finds the new one.
 - **Hand-over.** When the oldest member leaves, its manager stops the instance and confirms with `HandOverDone` to the next oldest, which then starts its own. The two coordinated-shutdown tasks in `cluster-exiting` hold the leaving node until the hand-over is through. If the oldest crashes instead, the next oldest takes over once the crashed member is removed.
+- **Full cluster shutdown.** Once any member is PreparingForShutdown or ReadyForShutdown (see [full cluster shutdown](05-cluster.md#full-cluster-shutdown)), the managers stop handing over and taking over. A new oldest does not start an instance, and a leaving oldest exits without waiting for a hand-over. A manager that is handing over or stopping gives up when its own member starts preparing, and a singleton started on a node that is already ReadyForShutdown never starts its instance.
 
 There is never more than one instance as long as membership is agreed. That is why removal of a crashed member waits for the split-brain resolver rather than happening on a timeout.
 

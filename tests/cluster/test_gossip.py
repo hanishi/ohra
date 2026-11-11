@@ -3,6 +3,9 @@ MembershipState.scala."""
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 import pytest
 
 from ohra.cluster.gossip import (
@@ -13,7 +16,9 @@ from ohra.cluster.gossip import (
     highest_priority_of,
     vclock_name,
 )
+from ohra.cluster.gossip import leader_status_key
 from ohra.remote import Address, UniqueAddress
+from ohra.remote.serialization import Serialization
 
 A = UniqueAddress("127.0.0.1", 1, 11, "s")
 B = UniqueAddress("127.0.0.1", 2, 22, "s")
@@ -151,3 +156,88 @@ def test_target_selector_prefers_nodes_that_have_not_seen_the_gossip():
     assert selector.gossip_target(state) == C
     assert set(selector.random_nodes_for_full_gossip(state, 5)) == {B, C}
     assert state.valid_node_for_gossip(A) is False
+
+
+def test_prepare_for_shutdown_transitions_follow_pekkos_table():
+    assert up(A, 1).with_status("preparing_for_shutdown").status == "preparing_for_shutdown"
+    preparing = up(A, 1).with_status("preparing_for_shutdown")
+    for to in ("ready_for_shutdown", "removed", "leaving", "down"):
+        assert preparing.with_status(to).status == to
+    ready = preparing.with_status("ready_for_shutdown")
+    for to in ("removed", "leaving", "down"):
+        assert ready.with_status(to).status == to
+    for frm in ("joining", "weakly_up", "leaving", "exiting", "down"):
+        with pytest.raises(ValueError):
+            replace(up(A, 1), status=frm).with_status("preparing_for_shutdown")
+    with pytest.raises(ValueError):
+        preparing.with_status("up")
+    with pytest.raises(ValueError):
+        ready.with_status("up")
+    with pytest.raises(ValueError):
+        ready.with_status("preparing_for_shutdown")
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "winner"),
+    [
+        ("ready_for_shutdown", "down", "ready_for_shutdown"),
+        ("removed", "ready_for_shutdown", "removed"),
+        ("ready_for_shutdown", "exiting", "ready_for_shutdown"),
+        ("ready_for_shutdown", "leaving", "ready_for_shutdown"),
+        ("ready_for_shutdown", "preparing_for_shutdown", "ready_for_shutdown"),
+        ("ready_for_shutdown", "up", "ready_for_shutdown"),
+        ("down", "preparing_for_shutdown", "down"),
+        ("exiting", "preparing_for_shutdown", "exiting"),
+        ("leaving", "preparing_for_shutdown", "leaving"),
+        ("preparing_for_shutdown", "up", "preparing_for_shutdown"),
+        ("preparing_for_shutdown", "weakly_up", "preparing_for_shutdown"),
+        ("preparing_for_shutdown", "joining", "preparing_for_shutdown"),
+    ],
+)
+def test_highest_priority_of_places_the_shutdown_statuses_as_pekko(a, b, winner):
+    ma, mb = replace(up(A, 1), status=a), replace(up(A, 1), status=b)
+    assert highest_priority_of(ma, mb).status == winner
+    assert highest_priority_of(mb, ma).status == winner
+
+
+def test_shutdown_statuses_count_for_convergence():
+    g = (
+        Gossip.empty()
+        .with_member(replace(up(A, 1), status="preparing_for_shutdown"))
+        .with_member(replace(up(B, 2), status="ready_for_shutdown"))
+    )
+    assert MembershipState(g.seen(A), A).convergence(frozenset()) is False
+    both = g.seen(A).seen(B)
+    assert MembershipState(both, A).convergence(frozenset()) is True
+    # a Joining member need not have seen it: preparing counts as a convergence status
+    assert MembershipState(both.with_member(Member(C, 0, "joining")), A).convergence(frozenset())
+
+
+def test_shutdown_statuses_are_leader_statuses():
+    g = (
+        Gossip.empty()
+        .with_member(Member(A, 0, "joining"))
+        .with_member(replace(up(B, 1), status="preparing_for_shutdown"))
+        .with_member(replace(up(C, 2), status="ready_for_shutdown"))
+    )
+    assert MembershipState(g, A).leader == B
+    members = [
+        Member(A, 0, "joining"),
+        replace(up(C, 2), status="preparing_for_shutdown"),
+        replace(up(B, 1), status="ready_for_shutdown"),
+    ]
+    assert [m.unique_address for m in sorted(members, key=leader_status_key)] == [B, C, A]
+
+
+def test_shutdown_statuses_cross_the_wire():
+    g = (
+        Gossip.empty()
+        .with_member(replace(up(A, 1), status="preparing_for_shutdown"))
+        .with_member(replace(up(B, 2), status="ready_for_shutdown"))
+    )
+    data = Serialization.encode(g, lambda r: r.path)
+    text = json.dumps(data)
+    assert "preparing_for_shutdown" in text and "ready_for_shutdown" in text
+    decoded = Serialization.decode(data, lambda p: pytest.fail(p))
+    assert isinstance(decoded, Gossip)
+    assert [m.status for m in decoded.members] == ["preparing_for_shutdown", "ready_for_shutdown"]

@@ -14,39 +14,69 @@ from ..remote.serialization import remotable
 from .reachability import Reachability
 from .vector_clock import VectorClock
 
-type MemberStatus = Literal["joining", "weakly_up", "up", "leaving", "exiting", "down", "removed"]
+type MemberStatus = Literal[
+    "joining",
+    "weakly_up",
+    "up",
+    "leaving",
+    "exiting",
+    "down",
+    "removed",
+    "preparing_for_shutdown",
+    "ready_for_shutdown",
+]
 
+# Member.scala 302-312, with PreparingForShutdown and ReadyForShutdown.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "joining": frozenset({"weakly_up", "up", "leaving", "down", "removed"}),
     "weakly_up": frozenset({"up", "leaving", "down", "removed"}),
-    "up": frozenset({"leaving", "down", "removed"}),
+    "up": frozenset({"leaving", "down", "removed", "preparing_for_shutdown"}),
     "leaving": frozenset({"exiting", "down", "removed"}),
     "down": frozenset({"removed"}),
     "exiting": frozenset({"removed", "down"}),
     "removed": frozenset(),
+    "preparing_for_shutdown": frozenset({"ready_for_shutdown", "removed", "leaving", "down"}),
+    "ready_for_shutdown": frozenset({"removed", "leaving", "down"}),
 }
 
 UP_NUMBER_UNSET = 2**31 - 1  # Pekko's Int.MaxValue: not yet Up
 
-# Statuses the leader may hold, and the ones that must have seen the gossip for convergence.
-LEADER_MEMBER_STATUS: frozenset[str] = frozenset({"up", "leaving"})
-CONVERGENCE_MEMBER_STATUS: frozenset[str] = frozenset({"up", "leaving"})
+# Statuses the leader may hold, and the ones that must have seen the gossip for convergence
+# (MembershipState.scala 31-40).
+LEADER_MEMBER_STATUS: frozenset[str] = frozenset(
+    {"up", "leaving", "preparing_for_shutdown", "ready_for_shutdown"}
+)
+CONVERGENCE_MEMBER_STATUS: frozenset[str] = frozenset(
+    {"up", "leaving", "preparing_for_shutdown", "ready_for_shutdown"}
+)
+# Only an Up member may start preparing for shutdown; the two states are the prepared ones
+# (MembershipState.scala 31-40).
+ALLOWED_TO_PREPARE_TO_SHUTDOWN: frozenset[str] = frozenset({"up"})
+PREPARE_FOR_SHUTDOWN_STATES: frozenset[str] = frozenset(
+    {"preparing_for_shutdown", "ready_for_shutdown"}
+)
 # Unreachable members with these statuses neither block convergence nor stay: the leader removes
 # them.
 REMOVE_UNREACHABLE_WITH_MEMBER_STATUS: frozenset[str] = frozenset({"down", "exiting"})
 
+# Member.scala 208-231 (highestPriorityOf): lower wins. ReadyForShutdown outranks Down there.
 _PRIORITY = {
     "removed": 0,
-    "down": 1,
-    "exiting": 2,
-    "leaving": 3,
-    "up": 4,
-    "weakly_up": 5,
-    "joining": 6,
+    "ready_for_shutdown": 1,
+    "down": 2,
+    "exiting": 3,
+    "leaving": 4,
+    "preparing_for_shutdown": 5,
+    "up": 6,
+    "weakly_up": 7,
+    "joining": 8,
 }
+# Member.scala 145-158 (leaderStatusOrdering): the shutdown statuses rank with Up and Leaving.
 _LEADER_RANK = {
     "up": 0,
     "leaving": 0,
+    "preparing_for_shutdown": 0,
+    "ready_for_shutdown": 0,
     "weakly_up": 1,
     "joining": 2,
     "exiting": 3,

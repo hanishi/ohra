@@ -30,6 +30,8 @@ _STATUS_NAMES = {
     "exiting": "Exiting",
     "down": "Down",
     "removed": "Removed",
+    "preparing_for_shutdown": "PreparingForShutdown",
+    "ready_for_shutdown": "ReadyForShutdown",
 }
 
 

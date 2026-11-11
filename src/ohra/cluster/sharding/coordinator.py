@@ -515,7 +515,10 @@ class _Coordinator:
         self.stop_now = False
         # DDataShardCoordinator's
         self.replicator = ReplicatorMessageAdapter[Any, _StateRegister](
-            ctx, replicator, settings.updating_state_timeout + 1
+            ctx,
+            replicator,
+            # past both the Get's and the Update's own timeout, by which the Replicator answers
+            max(settings.waiting_for_state_timeout, settings.updating_state_timeout) + 1,
         )
         self.key = LWWRegisterKey[CoordinatorState](f"{type_name}CoordinatorState")
         self.self_unique_address = SelfUniqueAddress(self.cluster.self_unique_address)
@@ -795,6 +798,8 @@ class _Coordinator:
         """unbecomeAfterUpdate (1839-1846)."""
         self.updating = None
         f()
+        if self.stop_now:  # f completed a deferred Terminate: nothing is processed after it
+            return Behaviors.stopped()
         if self.updating is None and self.queued_updates:
             self.updating = self.queued_updates.popleft()
             self.send_coordinator_state_update(self.updating[0])

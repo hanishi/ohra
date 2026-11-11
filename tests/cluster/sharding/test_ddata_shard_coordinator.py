@@ -80,8 +80,13 @@ class Node:
     def unique_address(self) -> UniqueAddress:
         return Cluster(self.system).self_unique_address
 
-    def coordinator(self, replicator: TestProbe[Any], supervised: bool = False) -> ActorRef[Any]:
-        behavior = coordinator_behavior("Counter", SETTINGS, replicator.ref)
+    def coordinator(
+        self,
+        replicator: TestProbe[Any],
+        supervised: bool = False,
+        settings: ClusterShardingSettings = SETTINGS,
+    ) -> ActorRef[Any]:
+        behavior = coordinator_behavior("Counter", settings, replicator.ref)
         if supervised:
             behavior = Behaviors.supervise(behavior).on_failure(SupervisorStrategy.restart())
         return self.system._system_root.spawn_child(behavior, "coordinator", None).ref  # pyright: ignore[reportPrivateUsage]
@@ -298,6 +303,39 @@ async def test_terminate_during_an_update_stops_after_it():
         await replicator.expect_no_message(0.1)  # no retry
 
 
+async def test_nothing_stashed_is_processed_after_the_local_region_lets_terminate_stop():
+    """Terminate waits for the local region; its termination's write completes the stop, and a
+    Register stashed during that write is not processed (Pekko's context.stop)."""
+    async with manual_node() as node:
+        replicator, region, late = node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, region)
+        coordinator.tell(_Terminate())  # deferred: the local region is alive
+        region.stop()
+        terminated = await expect_update(replicator)
+        coordinator.tell(Register(late.ref))
+        await settle(node)
+        terminated.reply_to.tell(Replicator.UpdateSuccess(terminated.key))
+        await replicator.expect_terminated(coordinator)
+        await replicator.expect_no_message(0.1)
+
+
+async def test_the_get_waits_out_a_long_waiting_for_state_timeout():
+    """The adapter's ask timeout covers the Get's own timeout, so a late answer is taken."""
+    async with manual_node() as node:
+        assert node.manual is not None
+        replicator, region = node.probe(), node.probe()
+        settings = replace(SETTINGS, waiting_for_state_timeout=10.0)
+        coordinator = node.coordinator(replicator, settings=settings)
+        get = await expect_get(replicator)
+        await node.manual.time_passes(9.0)
+        await replicator.expect_no_message(0.1)  # no retry from the ask's own timeout
+        get.reply_to.tell(Replicator.NotFound(get.key))
+        await settle(node)
+        coordinator.tell(Register(region.ref))
+        await expect_update(replicator)
+
+
 async def test_a_loaded_region_of_a_gone_incarnation_is_terminated():
     """D5: the path is at this node's address, a member, but its uid is another incarnation's."""
     async with manual_node() as node:
@@ -430,7 +468,7 @@ async def test_a_hundred_new_shards_at_once_are_each_allocated_once():
         assert all(state.shards[s] == r for r, shards in state.regions.items() for s in shards)
 
 
-async def test_a_rejoined_node_at_the_same_address_gets_its_shards_back():
+async def test_a_rejoined_node_at_the_same_address_serves_its_entities_again():
     p1, p2 = free_port(), free_port()
     async with AsyncExitStack() as stack:
         a, b = [

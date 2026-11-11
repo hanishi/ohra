@@ -497,703 +497,735 @@ _STASH_CAPACITY = 100_000
 """Pekko's classic Stash has no bound; a typed StashBuffer needs one."""
 
 
-class _Coordinator:
-    """ShardCoordinator's vars and receives (ShardCoordinator.scala 600-1385), with
-    DDataShardCoordinator's (1535-1976): the state is the value of an LWWRegister in sharding's
-    Replicator, read by majority when the coordinator starts and written by majority before each
-    change takes effect. Pekko's ``context.become`` is ``self.receive``; ``waitingForUpdate`` is
-    on top of it while ``self.updating`` holds an update."""
-
-    def __init__(
-        self,
-        ctx: ActorContext[Any],
-        type_name: str,
-        settings: ClusterShardingSettings,
-        replicator: ActorRef[Replicator.Command],
-        stash: StashBuffer[Any],
-    ) -> None:
-        self.ctx = ctx
-        self.type_name = type_name
-        self.settings = settings
-        self.log = ctx.log
-        self.cluster = Cluster(ctx.system)
-        self.strategy = LeastShardAllocationStrategy(
-            settings.rebalance_absolute_limit, settings.rebalance_relative_limit
-        )
-        self.state = CoordinatorState.EMPTY
-        self.refs: dict[str, ActorRef[Any]] = {}
-        self.alive_regions: set[str] = set()
-        self.graceful_shutdown_in_progress: set[str] = set()
-        self.region_termination_in_progress: set[str] = set()
-        self.rebalance_in_progress: dict[str, list[ActorRef[Any]]] = {}
-        self.rebalance_workers: dict[str, ActorRef[Any]] = {}
-        self.waiting_for_local_region_to_terminate = False
-        self.stop_now = False
-        self.preparing_for_shutdown = False
-        # DDataShardCoordinator's
-        self.replicator = ReplicatorMessageAdapter[Any, _StateRegister](
-            ctx,
-            replicator,
-            # past both the Get's and the Update's own timeout, by which the Replicator answers
-            max(settings.waiting_for_state_timeout, settings.updating_state_timeout) + 1,
-        )
-        self.key = LWWRegisterKey[CoordinatorState](f"{type_name}CoordinatorState")
-        self.self_unique_address = SelfUniqueAddress(self.cluster.self_unique_address)
-        self.read_consistency = settings.state_read_consistency()
-        self.write_consistency = settings.state_write_consistency()
-        self.stash = stash
-        self.terminating = False
-        self.get_shard_home_requests: deque[GetShardHome] = deque()
-        self.initial_state_retries = 0
-        self.update_state_retries = 0
-        self.receive: Callable[[Any], Behavior[Any]] = self.waiting_for_initial_state
-        self.updating: tuple[DomainEvent, Callable[[], None]] | None = None
-        self.queued_updates: deque[tuple[DomainEvent, Callable[[], None]]] = deque()
-        self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, ClusterDomainEvent))
-        ctx.timers.start_timer_with_fixed_delay(
-            "rebalance", _RebalanceTick(), settings.rebalance_interval
-        )
-        # get state from ddata replicator, repeat until GetSuccess
-        self.get_coordinator_state()
-
-    # --- membership views ------------------------------------------------------------------------
-
-    def member_for(self, ref_or_path: ActorRef[Any] | str) -> Member | None:
-        return next(
-            (m for m in self.cluster.state.members if _is_at(ref_or_path, m.address)), None
-        )
-
-    def members_by_region(self, regions: Iterable[str]) -> dict[str, Member]:
-        out: dict[str, Member] = {}
-        for r in regions:
-            m = self.member_for(r)
-            if m is not None:
-                out[r] = m
-        return out
-
-    # --- the behavior ----------------------------------------------------------------------------
-
-    def behavior(self) -> Behavior[Any]:
-        @Behaviors.receive
-        def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
-            updating = self.updating
-            if updating is not None:
-                next_behavior = self.waiting_for_update(msg, *updating)
-            else:
-                next_behavior = self.receive(msg)
-            return Behaviors.stopped() if self.stop_now else next_behavior
-
-        def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
-            if sig is PostStop or sig is PreRestart:
-                # what their DeathWatch of the coordinator would tell them: they register again
-                for path in self.alive_regions:
-                    if path in self.refs:
-                        self.refs[path].tell(CoordinatorStopped(self.ctx.self))
-            return Behaviors.same
-
-        return on_message.receive_signal(on_signal)
-
-    # --- DDataShardCoordinator: the initial state (ShardCoordinator.scala 1592-1700) -------------
-
-    def get_coordinator_state(self) -> None:
-        """getCoordinatorState (1916-1918)."""
-        self.replicator.ask_get(
-            lambda reply_to: Replicator.Get(self.key, self.read_consistency, reply_to), _GetResult
-        )
-
-    def waiting_for_initial_state(self, msg: Any) -> Behavior[Any]:
-        """waitingForInitialState (1592-1647): every other message is dropped, since the regions
-        retry."""
-        match msg:
-            case _GetResult(Replicator.GetSuccess() as success):
-                loaded = success.get(self.key).value
-                self.log.debug(
-                    "%s: Received initial coordinator state with [%d] shards",
-                    self.type_name,
-                    len(loaded.shards),
-                )
-                return self.on_initial_state(loaded)
-            case _GetResult(Replicator.GetFailure()):
-                self.initial_state_retries += 1
-                if self.initial_state_retries == 1:
-                    log = self.log.info
-                elif self.initial_state_retries < 5:
-                    log = self.log.warning
-                else:
-                    log = self.log.error
-                log(
-                    "%s: The ShardCoordinator was unable to get an initial state within "
-                    "'waiting-for-state-timeout': %d millis (retrying). Has ClusterSharding been "
-                    "started on all nodes?",
-                    self.type_name,
-                    int(self.settings.waiting_for_state_timeout * 1000),
-                )
-                # repeat until GetSuccess
-                self.get_coordinator_state()
-            case _GetResult(Replicator.NotFound()):
-                self.log.debug("%s: Initial coordinator is empty.", self.type_name)
-                # this.state is empty initially
-                return self.on_initial_state(self.state)
-            case _Terminate():
-                self.log.debug(
-                    "%s: Received termination message while waiting for state", self.type_name
-                )
-                return Behaviors.stopped()
-            case Register(region):
-                self.log.debug(
-                    "%s: ShardRegion tried to register but ShardCoordinator not initialized yet: "
-                    "[%s]",
-                    self.type_name,
-                    region.path,
-                )
-            case _:
-                pass
-        return Behaviors.same
-
-    def on_initial_state(self, loaded: CoordinatorState) -> Behavior[Any]:
-        """onInitialState (1649-1665), without remembered entities."""
-        self.state = loaded
-        if not loaded.shards and not loaded.regions:
-            # empty state, activate immediately
-            return self.activate()
-        self.receive = self.waiting_for_state_initialized
-        # note that watchStateActors may call update
-        self.watch_state_actors()
-        return Behaviors.same
-
-    def waiting_for_state_initialized(self, msg: Any) -> Behavior[Any]:
-        """waitingForStateInitialized (1667-1700): stash everything until StateInitialized, which
-        watchStateActors scheduled."""
-        match msg:
-            case _StateInitialized():
-                self.unstash_one_get_shard_home_request()
-                self.state_initialized()
-                self.activate()
-                return self.stash.unstash_all(Behaviors.same)
-            case GetShardHome():
-                self.stash_get_shard_home_request(msg)
-            case _Terminate():
-                self.log.debug(
-                    "%s: Received termination message while waiting for state initialized",
-                    self.type_name,
-                )
-                return Behaviors.stopped()
-            case _:
-                self.stash.stash(msg)
-        return Behaviors.same
-
-    def activate(self) -> Behavior[Any]:
-        """activate (1868-1873)."""
-        self.receive = self.active
-        self.log.info(
-            "%s: ShardCoordinator was moved to the active state with [%d] shards",
-            self.type_name,
-            len(self.state.shards),
-        )
-        return Behaviors.same
-
-    def watch_state_actors(self) -> None:
-        """watchStateActors (1174-1202). A region whose node incarnation is not a member is
-        terminated: paths carry no uid here, so its node is recorded in the state (D5). The rest
-        are alive; a local one is watched, a remote one through membership (MemberRemoved)."""
-        members = {m.unique_address for m in self.cluster.state.members}
-        for path in list(self.state.regions):
-            if self.state.region_nodes.get(path) not in members:
-                self.region_terminated(path)  # not part of cluster
-                continue
-            try:
-                region = self.ctx.system.resolve(path)
-            except LookupError:  # a local region that is gone: Pekko's watch tells it at once
-                self.region_terminated(path)
-                continue
-            self.refs[path] = region
-            self.alive_regions.add(path)
-            if is_local_actor(region):
-                self.ctx.watch_with(region, RegionStopped(path))
-        # Let the quick Terminated messages be processed before starting to reply to GetShardHome
-        self.ctx.timers.start_single_timer("state-initialized", _StateInitialized(), 0.5)
-
-    def state_initialized(self) -> None:
-        """stateInitialized (1204-1207)."""
-        for shard, region in self.state.shards.items():
-            if region in self.refs:
-                self.send_host_shard(shard, region)
-
-    # --- DDataShardCoordinator: update (1702-1866, 1891-1940) ------------------------------------
-
-    def update[E: DomainEvent](self, evt: E, f: Callable[[E], None]) -> None:
-        """update (1891-1914), without remembered entities: write the state with ``evt``, and run
-        ``f`` once the write succeeds, in waitingForUpdate meanwhile."""
-        pending = (evt, lambda: f(evt))
-        if self.updating is not None:
-            # a second update from the same message waits for the first; Pekko stacks both, and
-            # the second write can then miss the first's change
-            self.queued_updates.append(pending)
-            return
-        self.updating = pending
-        self.send_coordinator_state_update(evt)
-
-    def send_coordinator_state_update(self, evt: DomainEvent) -> None:
-        """sendCoordinatorStateUpdate (1928-1940): Pekko's ``Some(evt)`` request is the response
-        adapter's ``evt``."""
-        s = self.state.updated(evt)
-        self.replicator.ask_update(
-            lambda reply_to: Replicator.Update(
-                self.key,
-                LWWRegister.create(self.self_unique_address, CoordinatorState.EMPTY),
-                self.write_consistency,
-                reply_to,
-                lambda reg: reg.with_value(self.self_unique_address, s),
-            ),
-            lambda rsp: _UpdateResult(evt, rsp),
-        )
-
-    def waiting_for_update(
-        self, msg: Any, evt: DomainEvent, f: Callable[[], None]
-    ) -> Behavior[Any]:
-        """waitingForUpdate (1702-1837), without remembered entities."""
-        match msg:
-            case _UpdateResult(e, Replicator.UpdateSuccess()) if e == evt:
-                self.update_state_retries = 0
-                self.log.debug(
-                    "%s: The coordinator state was successfully updated with %s",
-                    self.type_name,
-                    evt,
-                )
-                return self.unbecome_after_update(f)
-            case _UpdateResult(e, Replicator.UpdateTimeout()) if e == evt:
-                self.update_state_retries += 1
-                log = self.log.warning if self.update_state_retries < 5 else self.log.error
-                log(
-                    "%s: The ShardCoordinator was unable to update a distributed state within "
-                    "'updating-state-timeout': %d millis (%s). Attempt %d. Perhaps the "
-                    "ShardRegion has not started on all active nodes yet? event=%s",
-                    self.type_name,
-                    int(self.settings.updating_state_timeout * 1000),
-                    "terminating" if self.terminating else "retrying",
-                    self.update_state_retries,
-                    evt,
-                )
-                if self.terminating:
-                    return Behaviors.stopped()
-                # repeat until UpdateSuccess
-                self.send_coordinator_state_update(evt)
-            case _UpdateResult(_, Replicator.ModifyFailure(key, error, cause)):
-                self.log.error(
-                    "%s: The ShardCoordinator was unable to update a distributed state %s with "
-                    "error %s and event %s. %s",
-                    self.type_name,
-                    key,
-                    error,
-                    evt,
-                    "Coordinator will be terminated due to Terminate message received"
-                    if self.terminating
-                    else "Coordinator will be restarted",
-                    exc_info=cause,
-                )
-                if self.terminating:
-                    return Behaviors.stopped()
-                raise cause
-            case GetShardHome(shard, reply_to):
-                if not self.handle_get_shard_home(shard, reply_to):
-                    # must wait for update that is in progress
-                    self.stash_get_shard_home_request(msg)
-            case _Terminate():
-                self.log.debug(
-                    "%s: The ShardCoordinator received termination message while waiting for "
-                    "update",
-                    self.type_name,
-                )
-                self.terminating = True
-                self.stash.stash(msg)
-            case _:
-                self.stash.stash(msg)
-        return Behaviors.same
-
-    def unbecome_after_update(self, f: Callable[[], None]) -> Behavior[Any]:
-        """unbecomeAfterUpdate (1839-1846)."""
-        self.updating = None
-        f()
-        if self.stop_now:  # f completed a deferred Terminate: nothing is processed after it
-            return Behaviors.stopped()
-        if self.updating is None and self.queued_updates:
-            self.updating = self.queued_updates.popleft()
-            self.send_coordinator_state_update(self.updating[0])
-        self.unstash_one_get_shard_home_request()
-        return self.stash.unstash_all(Behaviors.same)
-
-    def stash_get_shard_home_request(self, request: GetShardHome) -> None:
-        """stashGetShardHomeRequest (1848-1856): Pekko's set, kept in arrival order."""
-        self.log.debug(
-            "%s: GetShardHome [%s] request from [%s] stashed, because waiting for initial state "
-            "or update of state. It will be handled afterwards.",
-            self.type_name,
-            request.shard,
-            request.reply_to.path,
-        )
-        if request not in self.get_shard_home_requests:
-            self.get_shard_home_requests.append(request)
-
-    def unstash_one_get_shard_home_request(self) -> None:
-        """unstashOneGetShardHomeRequest (1858-1866): unstash one, the next follows when it is
-        handled or the update completes."""
-        if self.get_shard_home_requests:
-            self.ctx.self.tell(self.get_shard_home_requests.popleft())
-
-    # --- ShardCoordinator: active (740-967) ------------------------------------------------------
-
-    def active(self, msg: Any) -> Behavior[Any]:
-        """active (740-967). ``StopShards`` (1118) has no ohra counterpart."""
-        match msg:
-            case Register(region):
-                self.register(region)
-            case GetShardHome(shard, reply_to):
-                self.get_shard_home(shard, reply_to)
-            case ShardStarted(shard):
-                self.ctx.timers.cancel(("host", shard))
-            case _ResendShardHost(shard, region):
-                if self.state.shards.get(shard) == region and region in self.refs:
-                    self.send_host_shard(shard, region)
-            case MemberRemoved(member=m):
-                self.on_member_removed(m)
-            case MemberPreparingForShutdown() | MemberReadyForShutdown():
-                # 949-956
-                if not self.preparing_for_shutdown:
-                    self.log.info(
-                        "%s: Shard coordinator detected prepare for full cluster shutdown. No new "
-                        "rebalances will take place.",
-                        self.type_name,
-                    )
-                    self.ctx.timers.cancel("rebalance")
-                    self.preparing_for_shutdown = True
-            case ClusterDomainEvent():
-                pass
-            case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
-                self.on_rebalance_message(msg)
-            case RegionStopped(path):
-                self.region_terminated(path)
-            case _DelayedShardRegionTerminated(path):
-                self.region_terminated(path)
-            case _Terminate():
-                self.terminate()
-            case GetClusterShardingStats(timeout, reply_to):
-                self.cluster_sharding_stats(timeout, reply_to)
-            case _:
-                pass
-        return Behaviors.same
-
-    def cluster_sharding_stats(
-        self, timeout: float, reply_to: ActorRef[ClusterShardingStats]
-    ) -> None:
-        """active's GetClusterShardingStats (917-940): a child asks every alive region for its
-        stats within ``timeout``, and replies them by the address of each region's node, or
-        nothing when a region did not answer, as Pekko's ``recover`` of the failed
-        ``Future.sequence``. Pekko maps a local region's address to the cluster's self address;
-        an ohra path always carries its node's address."""
-
-        def done(responses: dict[str, ShardRegionStats], failed: frozenset[str]) -> None:
-            if failed:
-                reply_to.tell(ClusterShardingStats({}))
-            else:
-                regions = {_address_of(path): stats for path, stats in responses.items()}
-                reply_to.tell(ClusterShardingStats(regions))
-
-        regions = {p: self.refs[p] for p in self.alive_regions if p in self.refs}
-        self.ctx.spawn_anonymous(_ask_all(regions, GetShardRegionStats, timeout, done))
-
-    # --- registration and shard homes ------------------------------------------------------------
-
-    def register(self, region: ActorRef[Any]) -> None:
-        """active's Register (742-766)."""
-        path = region.path
-        member = self.member_for(region)
-        if member is None or member.status not in _OF_INTEREST:
-            self.log.debug(
-                "%s: ShardRegion [%s] was not registered since the coordinator currently does not "
-                "know about a node of that region",
-                self.type_name,
-                path,
-            )
-            return
-        node = member.unique_address
-        known = self.state.region_nodes.get(path)
-        if known is not None and known != node:
-            # A new incarnation at the address of one in the state (D5): the old process is gone
-            # for certain, so its shards are released now and the registration follows. Pekko's
-            # refs carry the uid, so there the new incarnation is simply another region.
-            self.ctx.timers.cancel(("region-removed", path))
-            self.region_terminated(path)
-            self.ctx.self.tell(Register(region))
-            return
-        self.log.debug("%s: ShardRegion registered: [%s]", self.type_name, path)
-        self.refs[path] = region
-        self.alive_regions.add(path)
-        if path in self.state.regions:
-            region.tell(RegisterAck(self.ctx.self))
-            self.inform_about_current_shards(region)
-        else:
-            self.graceful_shutdown_in_progress.discard(path)
-            # we don't have to wait for updated state for this
-            self.inform_about_current_shards(region)
-
-            def registered(evt: ShardRegionRegistered) -> None:
-                self.state = self.state.updated(evt)
-                # Pekko's RegionStopped: the local region's end is what Terminate waits for
-                if is_local_actor(region):
-                    self.ctx.watch_with(region, RegionStopped(path))
-                region.tell(RegisterAck(self.ctx.self))
-
-            self.update(ShardRegionRegistered(path, node), registered)
-
-    def inform_about_current_shards(self, ref: ActorRef[Any]) -> None:
-        homes = tuple(
-            (self.refs[r], tuple(s for s in shards if s not in self.rebalance_in_progress))
-            for r, shards in self.state.regions.items()
-            if shards and r in self.refs
-        )
-        if homes:
-            ref.tell(ShardHomes(homes))
-
-    def handle_get_shard_home(self, shard: str, reply_to: ActorRef[Any]) -> bool:
-        """handleGetShardHome (1061-1091): True when answered without a state update, that is
-        known, deferred or ignored."""
-        if shard in self.rebalance_in_progress:
-            # deferred until the hand-off completes
-            self.rebalance_in_progress[shard].append(reply_to)
-            self.unstash_one_get_shard_home_request()  # continue unstashing
-            return True
-        known = self.state.shards.get(shard)
-        if known is None:
-            return False  # location not known, yet, caller will handle allocation
-        if known in self.region_termination_in_progress:
-            self.log.debug(
-                "%s: GetShardHome [%s] request ignored, due to region [%s] termination in "
-                "progress.",
-                self.type_name,
-                shard,
-                known,
-            )
-        else:
-            reply_to.tell(ShardHome(shard, self.refs[known]))
-        self.unstash_one_get_shard_home_request()  # continue unstashing
-        return True
-
-    def get_shard_home(self, shard: str, reply_to: ActorRef[Any]) -> None:
-        """active's GetShardHome (788-811)."""
-        if self.handle_get_shard_home(shard, reply_to):
-            return
-        active = [
-            r
-            for r in self.state.regions
-            if r not in self.graceful_shutdown_in_progress
-            and r not in self.region_termination_in_progress
-        ]
-        if not active:
-            return
-        region = self.strategy.allocate_shard(
-            shard, {r: self.state.regions[r] for r in active}, self.members_by_region(active)
-        )
-        if region is not None:
-            self.continue_get_shard_home(shard, region, reply_to)
-
-    def continue_get_shard_home(self, shard: str, region: str, reply_to: ActorRef[Any]) -> None:
-        """continueGetShardHome (1276-1314)."""
-        if shard in self.rebalance_in_progress:
-            self.rebalance_in_progress[shard].append(reply_to)
-            return
-        known = self.state.shards.get(shard)
-        if known is not None:
-            reply_to.tell(ShardHome(shard, self.refs[known]))
-            return
-        if (
-            region in self.state.regions
-            and region not in self.graceful_shutdown_in_progress
-            and region not in self.region_termination_in_progress
-        ):
-
-            def allocated(evt: ShardHomeAllocated) -> None:
-                self.state = self.state.updated(evt)
-                self.log.info(
-                    "%s: Shard [%s] allocated at [%s]", self.type_name, evt.shard, evt.region
-                )
-                self.send_host_shard(evt.shard, evt.region)
-                reply_to.tell(ShardHome(evt.shard, self.refs[evt.region]))
-
-            self.update(ShardHomeAllocated(shard, region), allocated)
-        else:
-            self.log.debug(
-                "%s: Allocated region [%s] for shard [%s] is not (any longer) one of the "
-                "registered regions.",
-                self.type_name,
-                region,
-                shard,
-            )
-
-    def send_host_shard(self, shard: str, region: str) -> None:
-        self.refs[region].tell(HostShard(shard, self.ctx.self))
-        self.ctx.timers.start_single_timer(
-            ("host", shard), _ResendShardHost(shard, region), self.settings.shard_start_timeout
-        )
-
-    def region_terminated(self, path: str) -> None:
-        """regionTerminated (1218-1245)."""
-        for worker in self.rebalance_workers.values():
-            worker.tell(_RegionTerminatedForWorker(path))
-        if path not in self.state.regions:
-            return
-        self.log.info("%s: ShardRegion terminated: [%s]", self.type_name, path)
-        self.region_termination_in_progress.add(path)
-        for shard in self.state.regions[path]:
-            self.ctx.self.tell(GetShardHome(shard, self.ctx.system.ignore_ref))
-
-        def terminated(evt: ShardRegionTerminated) -> None:
-            self.state = self.state.updated(evt)
-            self.graceful_shutdown_in_progress.discard(path)
-            self.region_termination_in_progress.discard(path)
-            self.alive_regions.discard(path)
-            self.refs.pop(path, None)
-            if self.waiting_for_local_region_to_terminate and _is_at(
-                path, self.cluster.self_address
-            ):
-                # handoff optimization: the local region completed its hand-off
-                self.terminate()
-
-        self.update(ShardRegionTerminated(path), terminated)
-
-    def terminate(self) -> None:
-        """Pekko's Terminate: stop at once, unless the local region still has shards to hand
-        off."""
-        local = [r for r in self.alive_regions if _is_at(r, self.cluster.self_address)]
-        if local:
-            self.waiting_for_local_region_to_terminate = True
-        else:
-            self.stop_now = True
-
-    def on_member_removed(self, m: Member) -> None:
-        """A removed member's regions are terminated, in place of receiveTerminated (1093-1105)
-        for its address. One still alive, that never said it stopped, may still run its shards on
-        a crashed or partitioned node, so it waits the down-removal margin (Pekko's
-        addressTerminated on a live region); one that stopped after handing off told us so and is
-        already gone. Only a region of that incarnation is terminated (D5)."""
-        margin = self.cluster.settings.effective_down_removal_margin
-        for path in [r for r, n in self.state.region_nodes.items() if n == m.unique_address]:
-            if margin > 0 and path in self.alive_regions:
-                # GetShardHome for its shards waits, as Pekko's
-                self.region_termination_in_progress.add(path)
-                self.ctx.timers.start_single_timer(
-                    ("region-removed", path), _DelayedShardRegionTerminated(path), margin
-                )
-            else:
-                self.region_terminated(path)
-
-    # --- rebalance and hand-off ------------------------------------------------------------------
-
-    def on_rebalance_message(self, msg: Any) -> None:
-        match msg:
-            case _RebalanceTick():
-                if self.state.regions and not self.preparing_for_shutdown:
-                    shards = self.strategy.rebalance(
-                        dict(self.state.regions),
-                        self.members_by_region(self.state.regions),
-                        frozenset(self.rebalance_in_progress),
-                        self.cluster.state,
-                    )
-                    self.continue_rebalance(shards)
-            case _RebalanceDone(shard, ok):
-                self.rebalance_done(shard, ok)
-            case GracefulShutdownReq(region):
-                path = region.path
-                if path not in self.graceful_shutdown_in_progress and path in self.state.regions:
-                    self.log.info(
-                        "%s: Graceful shutdown of region [%s] with shards [%s] started",
-                        self.type_name,
-                        path,
-                        self.state.regions[path],
-                    )
-                    self.graceful_shutdown_in_progress.add(path)
-                    self.shutdown_shards(path, self.state.regions[path])
-            case _:
-                pass
-
-    def continue_rebalance(self, shards: frozenset[str]) -> None:
-        if shards:
-            self.log.info(
-                "%s: Starting rebalance for shards [%s]. In progress: [%s]",
-                self.type_name,
-                sorted(shards),
-                sorted(self.rebalance_in_progress),
-            )
-        for shard in shards:
-            if shard not in self.rebalance_in_progress and shard in self.state.shards:
-                self.start_shard_rebalance(shard, self.state.shards[shard], is_rebalance=True)
-
-    def shutdown_shards(self, region: str, shards: tuple[str, ...]) -> None:
-        for shard in shards:
-            if shard not in self.rebalance_in_progress:
-                self.start_shard_rebalance(shard, region, is_rebalance=False)
-
-    def start_shard_rebalance(self, shard: str, from_region: str, is_rebalance: bool) -> None:
-        if from_region not in self.refs:
-            return
-        self.rebalance_in_progress[shard] = []
-        regions = {r: self.refs[r] for r in self.alive_regions if r in self.refs}
-        worker = self.ctx.spawn_anonymous(
-            _rebalance_worker(
-                self.type_name,
-                shard,
-                self.refs[from_region],
-                regions,
-                self.settings.handoff_timeout,
-                is_rebalance,
-            )
-        )
-        self.rebalance_workers[shard] = worker
-
-    def rebalance_done(self, shard: str, ok: bool) -> None:
-        """active's RebalanceDone (849-890)."""
-        self.rebalance_workers.pop(shard, None)
-        if ok:
-            # The shard could have been removed by ShardRegionTerminated
-            if shard in self.state.shards:
-
-                def deallocated(evt: ShardHomeDeallocated) -> None:
-                    self.state = self.state.updated(evt)
-                    self.clear_rebalance_in_progress(shard)
-                    # reallocate at once
-                    self.ctx.self.tell(GetShardHome(shard, self.ctx.system.ignore_ref))
-
-                self.update(ShardHomeDeallocated(shard), deallocated)
-            else:
-                self.clear_rebalance_in_progress(shard)
-        else:
-            self.log.warning(
-                "%s: Shard [%s] deallocation did not complete within [%s]s",
-                self.type_name,
-                shard,
-                self.settings.handoff_timeout,
-            )
-            region = self.state.shards.get(shard)
-            if region is not None:
-                self.graceful_shutdown_in_progress.discard(region)
-            self.clear_rebalance_in_progress(shard)
-
-    def clear_rebalance_in_progress(self, shard: str) -> None:
-        """clearRebalanceInProgress (1000-1010)."""
-        for asker in self.rebalance_in_progress.pop(shard, []):
-            self.ctx.self.tell(GetShardHome(shard, asker))
-
-
 def coordinator_behavior(
     type_name: str,
     settings: ClusterShardingSettings,
     replicator: ActorRef[Replicator.Command],
 ) -> Behavior[Any]:
-    return Behaviors.with_stash(
-        _STASH_CAPACITY,
-        lambda stash: Behaviors.setup(
-            lambda ctx: _Coordinator(ctx, type_name, settings, replicator, stash).behavior()
-        ),
-    )
+    """ShardCoordinator (ShardCoordinator.scala 600-1385) with DDataShardCoordinator's
+    (1535-1976): the state is the value of an LWWRegister in sharding's Replicator, read by
+    majority when the coordinator starts and written by majority before each change takes effect.
+    Pekko's receive states are the nested functions returning behaviors; a helper that becomes
+    ``waitingForUpdate`` sets ``become``, which the state's handler returns."""
+
+    def coordinator(stash: StashBuffer[Any]) -> Behavior[Any]:
+        @Behaviors.setup
+        def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+            log = ctx.log
+            cluster = Cluster(ctx.system)
+            strategy = LeastShardAllocationStrategy(
+                settings.rebalance_absolute_limit, settings.rebalance_relative_limit
+            )
+            state = CoordinatorState.EMPTY
+            refs: dict[str, ActorRef[Any]] = {}
+            alive_regions: set[str] = set()
+            graceful_shutdown_in_progress: set[str] = set()
+            region_termination_in_progress: set[str] = set()
+            rebalance_in_progress: dict[str, list[ActorRef[Any]]] = {}
+            rebalance_workers: dict[str, ActorRef[Any]] = {}
+            waiting_for_local_region_to_terminate = False
+            stop_now = False
+            preparing_for_shutdown = False
+            # DDataShardCoordinator's
+            adapter = ReplicatorMessageAdapter[Any, _StateRegister](
+                ctx,
+                replicator,
+                # past both the Get's and the Update's own timeout, by which the Replicator
+                # answers
+                max(settings.waiting_for_state_timeout, settings.updating_state_timeout) + 1,
+            )
+            key = LWWRegisterKey[CoordinatorState](f"{type_name}CoordinatorState")
+            self_unique_address = SelfUniqueAddress(cluster.self_unique_address)
+            read_consistency = settings.state_read_consistency()
+            write_consistency = settings.state_write_consistency()
+            terminating = False
+            get_shard_home_requests: deque[GetShardHome] = deque()
+            initial_state_retries = 0
+            update_state_retries = 0
+            # The waitingForUpdate a helper's update started, for the state's handler to return.
+            become: Behavior[Any] | None = None
+            # Pekko's update does context.become(waitingForUpdate, discardOld = false) (1912) and
+            # unbecomeAfterUpdate does context.unbecome() (1839): the state underneath the update,
+            # set where Pekko does a plain context.become of a base state. Assigned below, once
+            # the states are defined.
+            unbecome_to: Callable[[], Behavior[Any]]
+            queued_updates: deque[tuple[DomainEvent, Callable[[], None]]] = deque()
+            cluster.subscriptions.tell(ClusterSubscribe(ctx.self, ClusterDomainEvent))
+            ctx.timers.start_timer_with_fixed_delay(
+                "rebalance", _RebalanceTick(), settings.rebalance_interval
+            )
+
+            def take_become(otherwise: Behavior[Any]) -> Behavior[Any]:
+                """The waitingForUpdate a helper became during this message, else
+                ``otherwise``."""
+                nonlocal become
+                pending, become = become, None
+                return otherwise if pending is None else pending
+
+            # --- membership views ----------------------------------------------------------------
+
+            def member_for(ref_or_path: ActorRef[Any] | str) -> Member | None:
+                return next(
+                    (m for m in cluster.state.members if _is_at(ref_or_path, m.address)), None
+                )
+
+            def members_by_region(regions: Iterable[str]) -> dict[str, Member]:
+                out: dict[str, Member] = {}
+                for r in regions:
+                    m = member_for(r)
+                    if m is not None:
+                        out[r] = m
+                return out
+
+            def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
+                if sig is PostStop or sig is PreRestart:
+                    # what their DeathWatch of the coordinator would tell them: they register again
+                    for path in alive_regions:
+                        if path in refs:
+                            refs[path].tell(CoordinatorStopped(ctx.self))
+                return Behaviors.same
+
+            # --- DDataShardCoordinator: the initial state (ShardCoordinator.scala 1592-1700) -----
+
+            def get_coordinator_state() -> None:
+                """getCoordinatorState (1916-1918)."""
+                adapter.ask_get(
+                    lambda reply_to: Replicator.Get(key, read_consistency, reply_to), _GetResult
+                )
+
+            def waiting_for_initial_state() -> Behavior[Any]:
+                """waitingForInitialState (1592-1647): every other message is dropped, since the
+                regions retry."""
+
+                def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    nonlocal initial_state_retries
+                    match msg:
+                        case _GetResult(Replicator.GetSuccess() as success):
+                            loaded = success.get(key).value
+                            log.debug(
+                                "%s: Received initial coordinator state with [%d] shards",
+                                type_name,
+                                len(loaded.shards),
+                            )
+                            return take_become(on_initial_state(loaded))
+                        case _GetResult(Replicator.GetFailure()):
+                            initial_state_retries += 1
+                            if initial_state_retries == 1:
+                                log_at = log.info
+                            elif initial_state_retries < 5:
+                                log_at = log.warning
+                            else:
+                                log_at = log.error
+                            log_at(
+                                "%s: The ShardCoordinator was unable to get an initial state "
+                                "within 'waiting-for-state-timeout': %d millis (retrying). Has "
+                                "ClusterSharding been started on all nodes?",
+                                type_name,
+                                int(settings.waiting_for_state_timeout * 1000),
+                            )
+                            # repeat until GetSuccess
+                            get_coordinator_state()
+                        case _GetResult(Replicator.NotFound()):
+                            log.debug("%s: Initial coordinator is empty.", type_name)
+                            # this.state is empty initially
+                            return take_become(on_initial_state(state))
+                        case _Terminate():
+                            log.debug(
+                                "%s: Received termination message while waiting for state",
+                                type_name,
+                            )
+                            return Behaviors.stopped()
+                        case Register(region):
+                            log.debug(
+                                "%s: ShardRegion tried to register but ShardCoordinator not "
+                                "initialized yet: [%s]",
+                                type_name,
+                                region.path,
+                            )
+                        case _:
+                            pass
+                    return Behaviors.same
+
+                return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def on_initial_state(loaded: CoordinatorState) -> Behavior[Any]:
+                """onInitialState (1649-1665), without remembered entities: the next state. An
+                update watchStateActors starts is in ``become``, over this state."""
+                nonlocal state, unbecome_to
+                state = loaded
+                if not loaded.shards and not loaded.regions:
+                    # empty state, activate immediately
+                    return activate()
+                unbecome_to = waiting_for_state_initialized
+                # note that watchStateActors may call update
+                watch_state_actors()
+                return waiting_for_state_initialized()
+
+            def waiting_for_state_initialized() -> Behavior[Any]:
+                """waitingForStateInitialized (1667-1700): stash everything until
+                StateInitialized, which watchStateActors scheduled."""
+
+                def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    match msg:
+                        case _StateInitialized():
+                            unstash_one_get_shard_home_request()
+                            state_initialized()
+                            return stash.unstash_all(activate())
+                        case GetShardHome():
+                            stash_get_shard_home_request(msg)
+                        case _Terminate():
+                            log.debug(
+                                "%s: Received termination message while waiting for state "
+                                "initialized",
+                                type_name,
+                            )
+                            return Behaviors.stopped()
+                        case _:
+                            stash.stash(msg)
+                    return Behaviors.same
+
+                return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def activate() -> Behavior[Any]:
+                """activate (1868-1873): the active state."""
+                nonlocal unbecome_to
+                unbecome_to = active
+                log.info(
+                    "%s: ShardCoordinator was moved to the active state with [%d] shards",
+                    type_name,
+                    len(state.shards),
+                )
+                return active()
+
+            def watch_state_actors() -> None:
+                """watchStateActors (1174-1202). A region whose node incarnation is not a member
+                is terminated: paths carry no uid here, so its node is recorded in the state (D5).
+                The rest are alive; a local one is watched, a remote one through membership
+                (MemberRemoved)."""
+                members = {m.unique_address for m in cluster.state.members}
+                for path in list(state.regions):
+                    if state.region_nodes.get(path) not in members:
+                        region_terminated(path)  # not part of cluster
+                        continue
+                    try:
+                        region = ctx.system.resolve(path)
+                    # a local region that is gone: Pekko's watch tells it at once
+                    except LookupError:
+                        region_terminated(path)
+                        continue
+                    refs[path] = region
+                    alive_regions.add(path)
+                    if is_local_actor(region):
+                        ctx.watch_with(region, RegionStopped(path))
+                # Let the quick Terminated messages be processed before starting to reply to
+                # GetShardHome
+                ctx.timers.start_single_timer("state-initialized", _StateInitialized(), 0.5)
+
+            def state_initialized() -> None:
+                """stateInitialized (1204-1207)."""
+                for shard, region in state.shards.items():
+                    if region in refs:
+                        send_host_shard(shard, region)
+
+            # --- DDataShardCoordinator: update (1702-1866, 1891-1940) ----------------------------
+
+            def update[E: DomainEvent](evt: E, f: Callable[[E], None]) -> None:
+                """update (1891-1914), without remembered entities: write the state with ``evt``,
+                and run ``f`` once the write succeeds, in waitingForUpdate meanwhile, which
+                ``become`` holds for the state's handler."""
+                nonlocal become
+
+                def after() -> None:
+                    f(evt)
+
+                if become is not None:
+                    # a second update from the same message waits for the first; Pekko stacks
+                    # both, and the second write can then miss the first's change
+                    queued_updates.append((evt, after))
+                    return
+                become = waiting_for_update(evt, after)
+                send_coordinator_state_update(evt)
+
+            def send_coordinator_state_update(evt: DomainEvent) -> None:
+                """sendCoordinatorStateUpdate (1928-1940): Pekko's ``Some(evt)`` request is the
+                response adapter's ``evt``."""
+                s = state.updated(evt)
+                adapter.ask_update(
+                    lambda reply_to: Replicator.Update(
+                        key,
+                        LWWRegister.create(self_unique_address, CoordinatorState.EMPTY),
+                        write_consistency,
+                        reply_to,
+                        lambda reg: reg.with_value(self_unique_address, s),
+                    ),
+                    lambda rsp: _UpdateResult(evt, rsp),
+                )
+
+            def waiting_for_update(evt: DomainEvent, after: Callable[[], None]) -> Behavior[Any]:
+                """waitingForUpdate (1702-1837), without remembered entities."""
+
+                def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    nonlocal update_state_retries, terminating
+                    match msg:
+                        case _UpdateResult(e, Replicator.UpdateSuccess()) if e == evt:
+                            update_state_retries = 0
+                            log.debug(
+                                "%s: The coordinator state was successfully updated with %s",
+                                type_name,
+                                evt,
+                            )
+                            return unbecome_after_update(after)
+                        case _UpdateResult(e, Replicator.UpdateTimeout()) if e == evt:
+                            update_state_retries += 1
+                            log_at = log.warning if update_state_retries < 5 else log.error
+                            log_at(
+                                "%s: The ShardCoordinator was unable to update a distributed "
+                                "state within 'updating-state-timeout': %d millis (%s). Attempt "
+                                "%d. Perhaps the ShardRegion has not started on all active nodes "
+                                "yet? event=%s",
+                                type_name,
+                                int(settings.updating_state_timeout * 1000),
+                                "terminating" if terminating else "retrying",
+                                update_state_retries,
+                                evt,
+                            )
+                            if terminating:
+                                return Behaviors.stopped()
+                            # repeat until UpdateSuccess
+                            send_coordinator_state_update(evt)
+                        case _UpdateResult(_, Replicator.ModifyFailure(failed_key, error, cause)):
+                            log.error(
+                                "%s: The ShardCoordinator was unable to update a distributed "
+                                "state %s with error %s and event %s. %s",
+                                type_name,
+                                failed_key,
+                                error,
+                                evt,
+                                "Coordinator will be terminated due to Terminate message received"
+                                if terminating
+                                else "Coordinator will be restarted",
+                                exc_info=cause,
+                            )
+                            if terminating:
+                                return Behaviors.stopped()
+                            raise cause
+                        case GetShardHome(shard, reply_to):
+                            if not handle_get_shard_home(shard, reply_to):
+                                # must wait for update that is in progress
+                                stash_get_shard_home_request(msg)
+                        case _Terminate():
+                            log.debug(
+                                "%s: The ShardCoordinator received termination message while "
+                                "waiting for update",
+                                type_name,
+                            )
+                            terminating = True
+                            stash.stash(msg)
+                        case _:
+                            stash.stash(msg)
+                    return Behaviors.same
+
+                return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def unbecome_after_update(after: Callable[[], None]) -> Behavior[Any]:
+                """unbecomeAfterUpdate (1839-1846): back to ``unbecome_to``, or on to the queued
+                update, with the stash replayed into it."""
+                nonlocal become
+                after()
+                if stop_now:  # after completed a deferred Terminate: nothing is processed after it
+                    return Behaviors.stopped()
+                if become is None and queued_updates:
+                    evt, queued_after = queued_updates.popleft()
+                    become = waiting_for_update(evt, queued_after)
+                    send_coordinator_state_update(evt)
+                unstash_one_get_shard_home_request()
+                return stash.unstash_all(take_become(unbecome_to()))
+
+            def stash_get_shard_home_request(request: GetShardHome) -> None:
+                """stashGetShardHomeRequest (1848-1856): Pekko's set, kept in arrival order."""
+                log.debug(
+                    "%s: GetShardHome [%s] request from [%s] stashed, because waiting for initial "
+                    "state or update of state. It will be handled afterwards.",
+                    type_name,
+                    request.shard,
+                    request.reply_to.path,
+                )
+                if request not in get_shard_home_requests:
+                    get_shard_home_requests.append(request)
+
+            def unstash_one_get_shard_home_request() -> None:
+                """unstashOneGetShardHomeRequest (1858-1866): unstash one, the next follows when
+                it is handled or the update completes."""
+                if get_shard_home_requests:
+                    ctx.self.tell(get_shard_home_requests.popleft())
+
+            # --- ShardCoordinator: active (740-967) ----------------------------------------------
+
+            def active() -> Behavior[Any]:
+                """active (740-967). ``StopShards`` (1118) has no ohra counterpart."""
+
+                def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    nonlocal preparing_for_shutdown
+                    match msg:
+                        case Register(region):
+                            register(region)
+                        case GetShardHome(shard, reply_to):
+                            get_shard_home(shard, reply_to)
+                        case ShardStarted(shard):
+                            ctx.timers.cancel(("host", shard))
+                        case _ResendShardHost(shard, region):
+                            if state.shards.get(shard) == region and region in refs:
+                                send_host_shard(shard, region)
+                        case MemberRemoved(member=m):
+                            on_member_removed(m)
+                        case MemberPreparingForShutdown() | MemberReadyForShutdown():
+                            # 949-956
+                            if not preparing_for_shutdown:
+                                log.info(
+                                    "%s: Shard coordinator detected prepare for full cluster "
+                                    "shutdown. No new rebalances will take place.",
+                                    type_name,
+                                )
+                                ctx.timers.cancel("rebalance")
+                                preparing_for_shutdown = True
+                        case ClusterDomainEvent():
+                            pass
+                        case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
+                            on_rebalance_message(msg)
+                        case RegionStopped(path):
+                            region_terminated(path)
+                        case _DelayedShardRegionTerminated(path):
+                            region_terminated(path)
+                        case _Terminate():
+                            terminate()
+                        case GetClusterShardingStats(timeout, reply_to):
+                            cluster_sharding_stats(timeout, reply_to)
+                        case _:
+                            pass
+                    if stop_now:
+                        return Behaviors.stopped()
+                    return take_become(Behaviors.same)
+
+                return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def cluster_sharding_stats(
+                timeout: float, reply_to: ActorRef[ClusterShardingStats]
+            ) -> None:
+                """active's GetClusterShardingStats (917-940): a child asks every alive region for
+                its stats within ``timeout``, and replies them by the address of each region's
+                node, or nothing when a region did not answer, as Pekko's ``recover`` of the
+                failed ``Future.sequence``. Pekko maps a local region's address to the cluster's
+                self address; an ohra path always carries its node's address."""
+
+                def done(responses: dict[str, ShardRegionStats], failed: frozenset[str]) -> None:
+                    if failed:
+                        reply_to.tell(ClusterShardingStats({}))
+                    else:
+                        regions = {_address_of(path): stats for path, stats in responses.items()}
+                        reply_to.tell(ClusterShardingStats(regions))
+
+                regions = {p: refs[p] for p in alive_regions if p in refs}
+                ctx.spawn_anonymous(_ask_all(regions, GetShardRegionStats, timeout, done))
+
+            # --- registration and shard homes ----------------------------------------------------
+
+            def register(region: ActorRef[Any]) -> None:
+                """active's Register (742-766)."""
+                path = region.path
+                member = member_for(region)
+                if member is None or member.status not in _OF_INTEREST:
+                    log.debug(
+                        "%s: ShardRegion [%s] was not registered since the coordinator currently "
+                        "does not know about a node of that region",
+                        type_name,
+                        path,
+                    )
+                    return
+                node = member.unique_address
+                known = state.region_nodes.get(path)
+                if known is not None and known != node:
+                    # A new incarnation at the address of one in the state (D5): the old process
+                    # is gone for certain, so its shards are released now and the registration
+                    # follows. Pekko's refs carry the uid, so there the new incarnation is simply
+                    # another region.
+                    ctx.timers.cancel(("region-removed", path))
+                    region_terminated(path)
+                    ctx.self.tell(Register(region))
+                    return
+                log.debug("%s: ShardRegion registered: [%s]", type_name, path)
+                refs[path] = region
+                alive_regions.add(path)
+                if path in state.regions:
+                    region.tell(RegisterAck(ctx.self))
+                    inform_about_current_shards(region)
+                else:
+                    graceful_shutdown_in_progress.discard(path)
+                    # we don't have to wait for updated state for this
+                    inform_about_current_shards(region)
+
+                    def registered(evt: ShardRegionRegistered) -> None:
+                        nonlocal state
+                        state = state.updated(evt)
+                        # Pekko's RegionStopped: the local region's end is what Terminate waits
+                        # for
+                        if is_local_actor(region):
+                            ctx.watch_with(region, RegionStopped(path))
+                        region.tell(RegisterAck(ctx.self))
+
+                    update(ShardRegionRegistered(path, node), registered)
+
+            def inform_about_current_shards(ref: ActorRef[Any]) -> None:
+                homes = tuple(
+                    (refs[r], tuple(s for s in shards if s not in rebalance_in_progress))
+                    for r, shards in state.regions.items()
+                    if shards and r in refs
+                )
+                if homes:
+                    ref.tell(ShardHomes(homes))
+
+            def handle_get_shard_home(shard: str, reply_to: ActorRef[Any]) -> bool:
+                """handleGetShardHome (1061-1091): True when answered without a state update,
+                that is known, deferred or ignored."""
+                if shard in rebalance_in_progress:
+                    # deferred until the hand-off completes
+                    rebalance_in_progress[shard].append(reply_to)
+                    unstash_one_get_shard_home_request()  # continue unstashing
+                    return True
+                known = state.shards.get(shard)
+                if known is None:
+                    return False  # location not known, yet, caller will handle allocation
+                if known in region_termination_in_progress:
+                    log.debug(
+                        "%s: GetShardHome [%s] request ignored, due to region [%s] termination "
+                        "in progress.",
+                        type_name,
+                        shard,
+                        known,
+                    )
+                else:
+                    reply_to.tell(ShardHome(shard, refs[known]))
+                unstash_one_get_shard_home_request()  # continue unstashing
+                return True
+
+            def get_shard_home(shard: str, reply_to: ActorRef[Any]) -> None:
+                """active's GetShardHome (788-811)."""
+                if handle_get_shard_home(shard, reply_to):
+                    return
+                candidates = [
+                    r
+                    for r in state.regions
+                    if r not in graceful_shutdown_in_progress
+                    and r not in region_termination_in_progress
+                ]
+                if not candidates:
+                    return
+                region = strategy.allocate_shard(
+                    shard,
+                    {r: state.regions[r] for r in candidates},
+                    members_by_region(candidates),
+                )
+                if region is not None:
+                    continue_get_shard_home(shard, region, reply_to)
+
+            def continue_get_shard_home(shard: str, region: str, reply_to: ActorRef[Any]) -> None:
+                """continueGetShardHome (1276-1314)."""
+                if shard in rebalance_in_progress:
+                    rebalance_in_progress[shard].append(reply_to)
+                    return
+                known = state.shards.get(shard)
+                if known is not None:
+                    reply_to.tell(ShardHome(shard, refs[known]))
+                    return
+                if (
+                    region in state.regions
+                    and region not in graceful_shutdown_in_progress
+                    and region not in region_termination_in_progress
+                ):
+
+                    def allocated(evt: ShardHomeAllocated) -> None:
+                        nonlocal state
+                        state = state.updated(evt)
+                        log.info(
+                            "%s: Shard [%s] allocated at [%s]", type_name, evt.shard, evt.region
+                        )
+                        send_host_shard(evt.shard, evt.region)
+                        reply_to.tell(ShardHome(evt.shard, refs[evt.region]))
+
+                    update(ShardHomeAllocated(shard, region), allocated)
+                else:
+                    log.debug(
+                        "%s: Allocated region [%s] for shard [%s] is not (any longer) one of the "
+                        "registered regions.",
+                        type_name,
+                        region,
+                        shard,
+                    )
+
+            def send_host_shard(shard: str, region: str) -> None:
+                refs[region].tell(HostShard(shard, ctx.self))
+                ctx.timers.start_single_timer(
+                    ("host", shard), _ResendShardHost(shard, region), settings.shard_start_timeout
+                )
+
+            def region_terminated(path: str) -> None:
+                """regionTerminated (1218-1245)."""
+                for worker in rebalance_workers.values():
+                    worker.tell(_RegionTerminatedForWorker(path))
+                if path not in state.regions:
+                    return
+                log.info("%s: ShardRegion terminated: [%s]", type_name, path)
+                region_termination_in_progress.add(path)
+                for shard in state.regions[path]:
+                    ctx.self.tell(GetShardHome(shard, ctx.system.ignore_ref))
+
+                def terminated(evt: ShardRegionTerminated) -> None:
+                    nonlocal state
+                    state = state.updated(evt)
+                    graceful_shutdown_in_progress.discard(path)
+                    region_termination_in_progress.discard(path)
+                    alive_regions.discard(path)
+                    refs.pop(path, None)
+                    if waiting_for_local_region_to_terminate and _is_at(
+                        path, cluster.self_address
+                    ):
+                        # handoff optimization: the local region completed its hand-off
+                        terminate()
+
+                update(ShardRegionTerminated(path), terminated)
+
+            def terminate() -> None:
+                """Pekko's Terminate: stop at once, unless the local region still has shards to
+                hand off."""
+                nonlocal waiting_for_local_region_to_terminate, stop_now
+                local = [r for r in alive_regions if _is_at(r, cluster.self_address)]
+                if local:
+                    waiting_for_local_region_to_terminate = True
+                else:
+                    stop_now = True
+
+            def on_member_removed(m: Member) -> None:
+                """A removed member's regions are terminated, in place of receiveTerminated
+                (1093-1105) for its address. One still alive, that never said it stopped, may
+                still run its shards on a crashed or partitioned node, so it waits the
+                down-removal margin (Pekko's addressTerminated on a live region); one that stopped
+                after handing off told us so and is already gone. Only a region of that
+                incarnation is terminated (D5)."""
+                margin = cluster.settings.effective_down_removal_margin
+                for path in [r for r, n in state.region_nodes.items() if n == m.unique_address]:
+                    if margin > 0 and path in alive_regions:
+                        # GetShardHome for its shards waits, as Pekko's
+                        region_termination_in_progress.add(path)
+                        ctx.timers.start_single_timer(
+                            ("region-removed", path), _DelayedShardRegionTerminated(path), margin
+                        )
+                    else:
+                        region_terminated(path)
+
+            # --- rebalance and hand-off ----------------------------------------------------------
+
+            def on_rebalance_message(msg: Any) -> None:
+                match msg:
+                    case _RebalanceTick():
+                        if state.regions and not preparing_for_shutdown:
+                            shards = strategy.rebalance(
+                                dict(state.regions),
+                                members_by_region(state.regions),
+                                frozenset(rebalance_in_progress),
+                                cluster.state,
+                            )
+                            continue_rebalance(shards)
+                    case _RebalanceDone(shard, ok):
+                        rebalance_done(shard, ok)
+                    case GracefulShutdownReq(region):
+                        path = region.path
+                        if path not in graceful_shutdown_in_progress and path in state.regions:
+                            log.info(
+                                "%s: Graceful shutdown of region [%s] with shards [%s] started",
+                                type_name,
+                                path,
+                                state.regions[path],
+                            )
+                            graceful_shutdown_in_progress.add(path)
+                            shutdown_shards(path, state.regions[path])
+                    case _:
+                        pass
+
+            def continue_rebalance(shards: frozenset[str]) -> None:
+                if shards:
+                    log.info(
+                        "%s: Starting rebalance for shards [%s]. In progress: [%s]",
+                        type_name,
+                        sorted(shards),
+                        sorted(rebalance_in_progress),
+                    )
+                for shard in shards:
+                    if shard not in rebalance_in_progress and shard in state.shards:
+                        start_shard_rebalance(shard, state.shards[shard], is_rebalance=True)
+
+            def shutdown_shards(region: str, shards: tuple[str, ...]) -> None:
+                for shard in shards:
+                    if shard not in rebalance_in_progress:
+                        start_shard_rebalance(shard, region, is_rebalance=False)
+
+            def start_shard_rebalance(shard: str, from_region: str, is_rebalance: bool) -> None:
+                if from_region not in refs:
+                    return
+                rebalance_in_progress[shard] = []
+                regions = {r: refs[r] for r in alive_regions if r in refs}
+                worker = ctx.spawn_anonymous(
+                    _rebalance_worker(
+                        type_name,
+                        shard,
+                        refs[from_region],
+                        regions,
+                        settings.handoff_timeout,
+                        is_rebalance,
+                    )
+                )
+                rebalance_workers[shard] = worker
+
+            def rebalance_done(shard: str, ok: bool) -> None:
+                """active's RebalanceDone (849-890)."""
+                rebalance_workers.pop(shard, None)
+                if ok:
+                    # The shard could have been removed by ShardRegionTerminated
+                    if shard in state.shards:
+
+                        def deallocated(evt: ShardHomeDeallocated) -> None:
+                            nonlocal state
+                            state = state.updated(evt)
+                            clear_rebalance_in_progress(shard)
+                            # reallocate at once
+                            ctx.self.tell(GetShardHome(shard, ctx.system.ignore_ref))
+
+                        update(ShardHomeDeallocated(shard), deallocated)
+                    else:
+                        clear_rebalance_in_progress(shard)
+                else:
+                    log.warning(
+                        "%s: Shard [%s] deallocation did not complete within [%s]s",
+                        type_name,
+                        shard,
+                        settings.handoff_timeout,
+                    )
+                    region = state.shards.get(shard)
+                    if region is not None:
+                        graceful_shutdown_in_progress.discard(region)
+                    clear_rebalance_in_progress(shard)
+
+            def clear_rebalance_in_progress(shard: str) -> None:
+                """clearRebalanceInProgress (1000-1010)."""
+                for asker in rebalance_in_progress.pop(shard, []):
+                    ctx.self.tell(GetShardHome(shard, asker))
+
+            unbecome_to = waiting_for_initial_state
+            # get state from ddata replicator, repeat until GetSuccess
+            get_coordinator_state()
+            return waiting_for_initial_state()
+
+        return setup
+
+    return Behaviors.with_stash(_STASH_CAPACITY, coordinator)
 
 
 # --- the region (ShardRegion) --------------------------------------------------------------------

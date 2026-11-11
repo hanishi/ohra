@@ -25,6 +25,7 @@ from .coordinator import (
     _Terminate,  # pyright: ignore[reportPrivateUsage]
 )
 from .region import _ExitingProgress, region_behavior  # pyright: ignore[reportPrivateUsage]
+from .passivation_settings import PassivationStrategySettings
 from .shard import (
     ClusterShardingSettings,
     CurrentShardRegionState,
@@ -60,6 +61,7 @@ __all__ = [
     "HandOff",
     "LeastShardAllocationStrategy",
     "Passivate",
+    "PassivationStrategySettings",
     "ShardCommand",
     "ShardHomeAllocated",
     "ShardHomeDeallocated",

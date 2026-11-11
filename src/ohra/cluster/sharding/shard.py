@@ -25,6 +25,11 @@ from ...remote.serialization import remotable
 from ...signals import PostStop, Signal, Terminated
 from ..ddata.replicator import Replicator
 from ..ddata.settings import ReplicatorSettings
+from .passivation_settings import (
+    PassivationStrategy,
+    PassivationStrategySettings,
+    passivation_strategy,
+)
 
 if TYPE_CHECKING:
     from ..core import ClusterSettings
@@ -47,7 +52,8 @@ def shard_id_of(entity_id: str, number_of_shards: int) -> str:
 class ClusterShardingSettings:
     """Pekko's cluster sharding settings with their defaults, in seconds. The single-node region
     uses ``number_of_shards``, ``buffer_size``, ``passivate_after``, ``handoff_timeout`` and
-    ``shard_region_query_timeout`` too."""
+    ``shard_region_query_timeout`` too. The shard passivates by ``passivate_after``; it does not
+    read ``passivation_strategy_settings`` yet."""
 
     number_of_shards: int = 1000
     retry_interval: float = 2.0
@@ -80,6 +86,11 @@ class ClusterShardingSettings:
     distributed_data: ReplicatorSettings | None = None
     """Sharding's own Replicator (ClusterSharding.scala 730-815); None takes the cluster's
     distributed_data with prefer_oldest=True and max_delta_elements=5. Never durable."""
+
+    passivation_strategy_settings: PassivationStrategySettings = (
+        PassivationStrategySettings.default_idle_strategy
+    )
+    """Pekko's passivationStrategySettings; the default passivates idle entities after 120 s."""
 
     def __post_init__(self) -> None:
         for name in (
@@ -136,6 +147,21 @@ class ClusterShardingSettings:
         else:
             base = self.distributed_data
         return replace(base, durable_keys=frozenset())
+
+    @property
+    def passivation_strategy(self) -> PassivationStrategy:
+        """Classic 941-942: what the settings resolve to."""
+        return passivation_strategy(self.passivation_strategy_settings)
+
+    def with_passivation_strategy(
+        self, settings: PassivationStrategySettings
+    ) -> ClusterShardingSettings:
+        """Typed 833-834."""
+        return replace(self, passivation_strategy_settings=settings)
+
+    def with_no_passivation_strategy(self) -> ClusterShardingSettings:
+        """Typed 836-837."""
+        return replace(self, passivation_strategy_settings=PassivationStrategySettings.disabled)
 
     @property
     def entity_hand_off_timeout(self) -> float:

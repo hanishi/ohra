@@ -9,6 +9,7 @@ without idle passivation gives its list no clock.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -30,7 +31,9 @@ from .passivation_settings import (
 from .passivation_settings import (
     PassivationStrategySettings as PassivationStrategySettings,  # public, re-exported
 )
-from .shard import ClusterShardingSettings
+
+if TYPE_CHECKING:  # shard.py will import this module, so no runtime import back
+    from .shard import ClusterShardingSettings
 
 type PassivateEntities = list[str]
 """Scala 34-38; Pekko's ``PassivateEntities.none`` is ``[]``."""
@@ -182,12 +185,12 @@ class LimitBasedEntityPassivationStrategy(EntityPassivationStrategy):
 
     def limit_updated(self, new_limit: int) -> PassivateEntities:
         self._per_region_limit = new_limit
-        self._per_shard_limit = self._per_region_limit // self._active_shards
+        self._per_shard_limit = _int_div(self._per_region_limit, self._active_shards)
         return self._passivate_entities_on_limit_update()
 
     def shards_updated(self, active_shards: int) -> PassivateEntities:
         self._active_shards = active_shards
-        self._per_shard_limit = self._per_region_limit // self._active_shards
+        self._per_shard_limit = _int_div(self._per_region_limit, self._active_shards)
         return self._passivate_entities_on_limit_update()
 
     @abstractmethod
@@ -902,3 +905,9 @@ class FastFrequencySketchAdmissionFilter(AdmissionFilter):
     def admit(self, candidate: str, selected: str) -> bool:
         sketch = self._frequency_sketch
         return sketch.frequency(candidate) > sketch.frequency(selected)
+
+
+def _int_div(a: int, b: int) -> int:
+    """Scala's Int ``/``, which truncates toward zero where ``//`` floors (a negative limit)."""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q

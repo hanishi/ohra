@@ -7,8 +7,7 @@ The arithmetic is the JVM's, bit for bit: a Scala ``Int`` wraps at signed 32 bit
 bits ``oddMask`` and ``resetMask`` already hold, so the mask (which drops them) gives the same
 masks. Ids hash over their UTF-16 code units, as Java strings do. Only ``String`` values are
 hashed: Pekko's ``Hasher[A]`` has only ``StringHasher``. ``toDebugString`` is not ported.
-``size`` and the row sizes do not wrap: Pekko's would only after 2**31 updates with no reset,
-which takes a reset size of 0 or less.
+``size`` and the row sizes wrap at 32 bits, as Pekko's Java Ints do.
 """
 
 from __future__ import annotations

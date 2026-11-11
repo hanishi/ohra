@@ -2,8 +2,11 @@
 
 Pekko's ``DoubleLinkedList`` has no port. The values with one priority are an ``OrderedDict``
 (least recent first) in ``_buckets``, and the priorities in use are a sorted ``list`` kept with
-``bisect``. Priorities are unique and only rise, so a sorted map gives the same order as Pekko's
-``getFirstOrElsePrepend``, ``getNextOrElseInsert`` and ``findNextOrElseInsert``. Per value:
+``bisect``. Without ``skip`` the age only rises, so a sorted map gives the same order as Pekko's
+``getFirstOrElsePrepend``, ``getNextOrElseInsert`` and ``findNextOrElseInsert``. Under dynamic
+aging, ``remove_least_frequent`` with a ``skip`` can lower the age, and Pekko then inserts a
+lower priority after the current bucket, out of order, where this list keeps it sorted. No
+strategy passes ``skip`` there (the LFU policy never does), so no passivation differs. Per value:
 its accesses and priority; overall recency (with a clock) is an ``OrderedDict`` from value to
 timestamp. Pekko removes while it iterates; here the victims are collected first, which gives
 the same result. Under dynamic aging, only ``remove_least_frequent`` sets the age (Scala 262-265).

@@ -196,7 +196,7 @@ Each setting has a Pekko key in a strategy's section under `pekko.cluster.shardi
 | Pekko key | ohra | Default |
 |---|---|---|
 | `idle-entity.timeout` | `with_idle_entity_passivation(timeout)`, or an `IdleSettings` | none (120.0 in `default_idle_strategy`) |
-| `idle-entity.interval` | `IdleSettings.interval` | `None`: half the timeout |
+| `idle-entity.interval` | `with_idle_entity_passivation(timeout, interval)`, or `IdleSettings.interval` | `None`: half the timeout |
 | `active-entity-limit` | `with_active_entity_limit(limit)` | none (100_000 in `default_strategy`) |
 | `replacement.policy` | `with_least_recently_used_replacement()`, `with_most_recently_used_replacement()`, `with_least_frequently_used_replacement()` | none |
 | `replacement.least-recently-used.segmented.levels`, `proportions` | `LeastRecentlyUsedSettings.with_segmented(levels)` or `with_segmented(proportions)` | none |

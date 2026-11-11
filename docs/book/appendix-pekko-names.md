@@ -34,6 +34,9 @@
 | `Cluster(system).selfMember / state / selfUniqueAddress / isTerminated` | `self_member`, `state`, `self_unique_address`, `is_terminated` |
 | `MemberEvent`, `ReachabilityEvent`, `LeaderChanged`, `SelfUp`, `SelfRemoved`, `CurrentClusterState` | same; `MemberRemoved(member, previous_status)` |
 | `MemberStatus.Joining / WeaklyUp / Up / Leaving / Exiting / Down / Removed` | `member.status` is the string `"joining"`, `"weakly_up"`, ... |
+| `MemberStatus.PreparingForShutdown / ReadyForShutdown` | `"preparing_for_shutdown"`, `"ready_for_shutdown"` |
+| `MemberPreparingForShutdown`, `MemberReadyForShutdown` | same names |
+| `Cluster(system).prepareForFullClusterShutdown()` / typed `PrepareForFullClusterShutdown` | `prepare_for_full_cluster_shutdown()` / `manager.tell(PrepareForFullClusterShutdown())` |
 | `Receptionist(system).ref ! Register(key, ref)`, `Deregister`, `Find(key, replyTo)` | `Receptionist(system).ref.tell(Register(key, ref))`, same names; `Registered` / `Deregistered` replies when `reply_to` is given |
 | `ServiceKey[T]("id")` | `ServiceKey[T]("id")` |
 | `ClusterReceptionist`, `LocalReceptionist` | `/system/clusterReceptionist` on a cluster node and `/system/localReceptionist` on any other system; `Receptionist(system).ref` reaches the one that runs |

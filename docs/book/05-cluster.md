@@ -113,6 +113,9 @@ stateDiagram-v2
   Joining --> WeaklyUp: leader, no convergence after 7 s
   WeaklyUp --> Up: leader, on convergence
   Up --> Leaving: Leave from the node
+  Up --> PreparingForShutdown: prepare_for_full_cluster_shutdown
+  PreparingForShutdown --> ReadyForShutdown: leader, on convergence
+  ReadyForShutdown --> Leaving: Leave from the node
   Leaving --> Exiting: leader
   Exiting --> Removed: leader, once exiting is confirmed
   Up --> Down: split-brain resolver or Down
@@ -155,7 +158,34 @@ async def main() -> None:
         await second.when_terminated()
 ```
 
-`listener` is any `Behavior[MemberEvent]`; it receives `MemberJoined`, `MemberUp`, `MemberLeft`, `MemberExited`, `MemberRemoved(member, previous_status)` and, under `ReachabilityEvent`, `UnreachableMember` / `ReachableMember`; `LeaderChanged`, `SelfUp`, `SelfRemoved` and `ClusterShuttingDown` (published once, when the cluster extension stops, before the final removal events) arrive when subscribing to `ClusterDomainEvent`, as do the internal `SeenChanged` and `ReachabilityChanged`, which fire on most gossip rounds, so a listener for every event should match what it wants and ignore the rest. The first seed node forms the cluster alone once the other seeds have not answered within `seed_node_timeout`; any other node asks every seed and joins the first to answer, and a node with no seed nodes waits for a `Join(address)` or `JoinSeedNodes(...)` command. All settings are `ClusterSettings` fields with Pekko's defaults in seconds (`gossip_interval`, `heartbeat_interval`, `acceptable_heartbeat_pause`, `failure_detector_threshold`, `monitored_by_nr_of_members`, `allow_weakly_up_members`, ...). A member that rejoins from a restarted process is a new incarnation: the old one is marked terminated and removed before the new one is let in. `terminate()`, or leaving the `async with`, stops a node gracefully through the [coordinated shutdown](02-actor-system.md#coordinated-shutdown): it leaves, hands over, and only then stops. Actors on different nodes find each other through the [Receptionist](02-actor-system.md#receptionist).
+`listener` is any `Behavior[MemberEvent]`; it receives `MemberJoined`, `MemberUp`, `MemberLeft`, `MemberExited`, `MemberPreparingForShutdown`, `MemberReadyForShutdown`, `MemberRemoved(member, previous_status)` and, under `ReachabilityEvent`, `UnreachableMember` / `ReachableMember`; `LeaderChanged`, `SelfUp`, `SelfRemoved` and `ClusterShuttingDown` (published once, when the cluster extension stops, before the final removal events) arrive when subscribing to `ClusterDomainEvent`, as do the internal `SeenChanged` and `ReachabilityChanged`, which fire on most gossip rounds, so a listener for every event should match what it wants and ignore the rest. The first seed node forms the cluster alone once the other seeds have not answered within `seed_node_timeout`; any other node asks every seed and joins the first to answer, and a node with no seed nodes waits for a `Join(address)` or `JoinSeedNodes(...)` command. All settings are `ClusterSettings` fields with Pekko's defaults in seconds (`gossip_interval`, `heartbeat_interval`, `acceptable_heartbeat_pause`, `failure_detector_threshold`, `monitored_by_nr_of_members`, `allow_weakly_up_members`, ...). A member that rejoins from a restarted process is a new incarnation: the old one is marked terminated and removed before the new one is let in. `terminate()`, or leaving the `async with`, stops a node gracefully through the [coordinated shutdown](02-actor-system.md#coordinated-shutdown): it leaves, hands over, and only then stops. Actors on different nodes find each other through the [Receptionist](02-actor-system.md#receptionist).
+
+### Full cluster shutdown
+
+Sometimes a rolling deploy is the wrong tool and the whole cluster has to stop and start again, for example when a protocol change is simpler to roll out by a restart than to make backward compatible. Tell the cluster first, and the expensive moves, such as handing the [singleton](06-singleton.md) over to another node, do not happen on the way down. If the cluster is not restarting right away there is no need to prepare it.
+
+```python
+async def full_shutdown() -> None:
+    async with node(2551) as first, node(2552), node(2553):
+        await members_up(first, 3)  # from the first example
+        Cluster(first).prepare_for_full_cluster_shutdown()
+        while any(m.status != "ready_for_shutdown" for m in Cluster(first).state.members):
+            await asyncio.sleep(0.1)
+        print(sorted((m.address.port, m.status) for m in Cluster(first).state.members))
+```
+
+It prints:
+
+```
+[(2551, 'ready_for_shutdown'), (2552, 'ready_for_shutdown'), (2553, 'ready_for_shutdown')]
+```
+
+- **`prepare_for_full_cluster_shutdown()`** tells the local core daemon. `Cluster(system).manager.tell(PrepareForFullClusterShutdown())` does the same. Call it on one node.
+- **Every Up member** moves to `preparing_for_shutdown`: any Up node that sees a preparing member prepares itself. Then the leader, on convergence, moves each of them to `ready_for_shutdown`. Subscribers get `MemberPreparingForShutdown` and `MemberReadyForShutdown`.
+- **Members that are not Up yet** stay Joining or WeaklyUp. Members that are Leaving or Exiting leave by the normal path.
+- **The node that prepared ignores new joins** and logs it.
+- **It does not stop the nodes.** Wait until every Up member is ready, then stop them and start the new version. Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
+- **The singleton** stops handing over while any member is preparing or ready, see [chapter 6](06-singleton.md).
 
 ### Split-brain resolver
 

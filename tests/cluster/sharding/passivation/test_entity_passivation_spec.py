@@ -1,0 +1,200 @@
+"""Ported from Apache Pekko's EntityPassivationSpec (cluster-sharding/src/test/scala/org/apache/
+pekko/cluster/sharding/passivation/EntityPassivationSpec.scala). The case:
+
+- DisabledEntityPassivationSpec: not passivate when passivation is disabled (152)
+
+Then tests of ohra's own: the scheduler's clock driving idle passivation, ``entity_terminated``
+for an id a strategy does not track, a per-shard limit of 0, and Pekko's composite with an MRU or
+LFU main area at that limit, which stops tracking entities.
+
+Porting rules, shared by the passivation spec ports:
+
+- Each Scala config becomes a ``PassivationStrategySettings`` expression; the disabled spec's
+  ``strategy = none`` is ``PassivationStrategySettings.disabled``.
+- The specs drive the strategies through ``harness.Region``, not real shards and entities.
+  ``region ! Envelope(shard, id, _)`` is ``region.tell(shard, id)``,
+  ``ShardRegion.SetActiveEntityLimit(n)`` is ``set_active_entity_limit(n)`` and
+  ``ManuallyPassivate`` is ``manually_passivate``. Each ``expectReceived(id, Stop)`` asserts the
+  id is in what that step passivated, and each step (a ``tell``, a limit update or a ``passes``)
+  asserts exactly what it passivated, empty where Scala expects no ``Stop``: Scala's per-entity
+  probes fail on a stray ``Stop``. A module's docstring names any step Scala leaves unchecked.
+  Each ``expectState`` asserts ``region.state()``.
+- A ``Thread.sleep(timeout / 2)`` is ``region.passes(0.5)`` on a ``TestClock``. Each idle
+  expectation asserts the entity is passivated by the first ``passes`` after which more than the
+  1.0 s timeout has gone since its last touch, and not by an earlier one: Scala's
+  ``> configuredIdleTimeout`` bound, at Pekko's interval granularity. The harness ticks once per
+  ``passes``, so each step is the strategy's 0.5 s interval.
+
+Differences from the Scala: the disabled case asserts that a touch passivates nothing and that
+no interval is scheduled, where Pekko waits a second for no ``Stop``.
+"""
+
+import pytest
+
+from ohra.cluster.sharding.passivation import (
+    CompositeEntityPassivationStrategy,
+    EntityPassivationStrategy,
+)
+from ohra.cluster.sharding.passivation_settings import (
+    NoPassivationStrategy,
+    PassivationStrategySettings,
+)
+from ohra.cluster.sharding.shard import ClusterShardingSettings
+from ohra.testkit import ActorTestKit, ManualTime
+
+from ....util import TestClock
+from .harness import Region
+from .test_composite_spec import ADMISSION_FILTER_NO_WINDOW_CONFIG as _NO_WINDOW
+
+P = PassivationStrategySettings
+
+
+def test_disabled_entity_passivation_not_passivate_when_passivation_is_disabled() -> None:
+    settings = ClusterShardingSettings().with_passivation_strategy(P.disabled)
+    assert settings.passivation_strategy == NoPassivationStrategy()
+    region = Region(P.disabled, TestClock())
+    assert region.tell(1, 1) == set()
+    assert region.state() == {1: {1}}
+    assert EntityPassivationStrategy.create(settings, TestClock()).scheduled_interval is None
+
+
+async def test_the_scheduler_clock_drives_idle_passivation() -> None:
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual_time = ManualTime(testkit.system)
+        settings = ClusterShardingSettings().with_passivation_strategy(
+            P.defaults.with_idle_entity_passivation(1.0)
+        )
+        strategy = EntityPassivationStrategy.create(
+            settings, lambda: testkit.system.scheduler.current_time
+        )
+        assert strategy.entity_touched("1") == []
+        await manual_time.time_passes(1.0)
+        assert strategy.interval_passed() == []
+        await manual_time.time_passes(0.5)
+        assert strategy.interval_passed() == ["1"]
+
+
+_IDLE = P.defaults.with_idle_entity_passivation(1.0)
+_LIMIT_1 = P.defaults.with_active_entity_limit(1)
+_LRU = _LIMIT_1.with_least_recently_used_replacement()
+_SLRU = _LIMIT_1.with_replacement_policy(
+    P.LeastRecentlyUsedSettings.defaults.with_segmented([0.2, 0.8])
+)
+_MRU = _LIMIT_1.with_most_recently_used_replacement()
+_LFU = _LIMIT_1.with_least_frequently_used_replacement()
+# The composites keep their limits, and idle passivation passivates "1", in the untracked test:
+# at a limit of 1 the filter rejects "2" instead. The per-shard limit of 0 sets the limit to 1.
+_COMPOSITE = P.default_strategy
+
+
+def _idle(s: PassivationStrategySettings) -> PassivationStrategySettings:
+    return s.with_idle_entity_passivation(1.0)
+
+
+@pytest.mark.parametrize(
+    "passivation",
+    [
+        _IDLE,
+        _LRU,
+        _idle(_LRU),
+        _SLRU,
+        _idle(_SLRU),
+        _MRU,
+        _idle(_MRU),
+        _LFU,
+        _idle(_LFU),
+        _idle(_COMPOSITE),
+        _idle(_NO_WINDOW),
+    ],
+    ids=[
+        "idle",
+        "lru",
+        "lru-idle",
+        "slru",
+        "slru-idle",
+        "mru",
+        "mru-idle",
+        "lfu",
+        "lfu-idle",
+        "composite-idle",
+        "no-window-idle",
+    ],
+)
+def test_terminating_an_untracked_entity_is_a_no_op(
+    passivation: PassivationStrategySettings,
+) -> None:
+    settings = ClusterShardingSettings().with_passivation_strategy(passivation)
+    clock = TestClock()
+    control = EntityPassivationStrategy.create(settings, clock)
+    strategy = EntityPassivationStrategy.create(settings, clock)
+    strategy.entity_terminated("never-seen")
+
+    def passivate_the_first(s: EntityPassivationStrategy) -> list[str]:
+        clock.now = 0.0
+        passivated = s.entity_touched("1")
+        clock.now = 2.0
+        passivated += s.entity_touched("2") + s.interval_passed()
+        for entity_id in passivated:
+            s.entity_terminated(entity_id)  # the shard, on the entity's Terminated
+        return passivated
+
+    assert passivate_the_first(control) == ["1"]
+    assert passivate_the_first(strategy) == ["1"]
+    strategy.entity_terminated("1")
+    strategy.entity_terminated("never-seen")
+
+    for entity_id in ["1", "3", "2", "4"]:
+        clock.now += 0.5
+        assert strategy.entity_touched(entity_id) == control.entity_touched(entity_id)
+        assert strategy.interval_passed() == control.interval_passed()
+
+
+@pytest.mark.parametrize(
+    ("passivation", "first", "second"),
+    [
+        (_LRU, ["1"], ["2"]),
+        (_SLRU, ["1"], ["2"]),
+        (_MRU, [], ["1"]),
+        (_LFU, [], ["1"]),
+        (_COMPOSITE.with_active_entity_limit(1), ["1"], ["2"]),
+        (_NO_WINDOW.with_active_entity_limit(1), ["1"], ["2"]),
+    ],
+    ids=["lru", "slru", "mru", "lfu", "composite", "no-window"],
+)
+def test_a_per_shard_limit_of_zero(
+    passivation: PassivationStrategySettings, first: list[str], second: list[str]
+) -> None:
+    settings = ClusterShardingSettings().with_passivation_strategy(passivation)
+    strategy = EntityPassivationStrategy.create(settings, TestClock())
+    assert strategy.shards_updated(2) == []
+    assert strategy.entity_touched("1") == first
+    for entity_id in first:
+        strategy.entity_terminated(entity_id)  # the shard, on the entity's Terminated
+    assert strategy.entity_touched("2") == second
+
+
+@pytest.mark.parametrize(
+    "main",
+    [P.MostRecentlyUsedSettings.defaults, P.LeastFrequentlyUsedSettings.defaults],
+    ids=["mru", "lfu"],
+)
+def test_a_composite_with_an_mru_or_lfu_main_area_at_a_per_shard_limit_of_0_tracks_nothing(
+    main: P.PolicySettings,
+) -> None:
+    """Pekko's behavior, kept as it is (checked on the JVM against Pekko 1.4.0). The window
+    (limit 0) drops the touched entity and the main area (limit 0) keeps it, as MRU skips the
+    touched entity (Scala 566) and LFU removes its excess before the update (616-624). Hill
+    climbing then adjusts on every access (an adjust size of 0) and shrinks the window, and
+    ``adaptWindow``'s ``main.updateLimit(mainLimit)`` drops the entity from the main area with
+    its result discarded (Scala 754-755). The entity stays active, untracked: each touch
+    passivates nothing and both areas end empty."""
+    settings = ClusterShardingSettings().with_passivation_strategy(
+        P.default_strategy.with_active_entity_limit(1).with_replacement_policy(main)
+    )
+    strategy = EntityPassivationStrategy.create(settings, TestClock())
+    assert isinstance(strategy, CompositeEntityPassivationStrategy)
+    assert strategy.shards_updated(2) == []
+    for entity_id in ["1", "2", "3", "4"]:
+        assert strategy.entity_touched(entity_id) == []
+    assert strategy._window.size == 0  # pyright: ignore[reportPrivateUsage]
+    assert strategy._main.size == 0  # pyright: ignore[reportPrivateUsage]

@@ -239,6 +239,44 @@ async def test_stashed_messages_replay_in_order_before_new_ones():
         assert await system.ask(Get, timeout=2) == [*range(1000), -1]
 
 
+async def test_a_replayed_message_that_unstashes_again_delivers_each_message_once():
+    """Pekko's unstash takes from the live buffer: a nested unstashAll drains what is left,
+    and the outer replay then stops."""
+    seen: list[int] = []
+
+    def with_stash(buffer: StashBuffer[StashCmd]) -> Behavior[StashCmd]:
+        @Behaviors.receive_message
+        def waiting(msg: StashCmd) -> Behavior[StashCmd]:
+            match msg:
+                case Authed():
+                    return buffer.unstash_all(active)
+                case _:
+                    buffer.stash(msg)
+                    return Behaviors.same
+
+        @Behaviors.receive_message
+        def active(msg: StashCmd) -> Behavior[StashCmd]:
+            match msg:
+                case Add(n):
+                    seen.append(n)
+                case Get(reply_to):
+                    reply_to.tell(list(seen))
+                case Authed():
+                    return buffer.unstash_all(Behaviors.same)  # empties the buffer mid-replay
+            return Behaviors.same
+
+        buffer.stash(Add(0))
+        buffer.stash(Authed())
+        return waiting
+
+    async with ActorSystem(Behaviors.with_stash(10, with_stash), "t") as system:
+        for i in range(1, 4):
+            system.tell(Add(i))
+        system.tell(Authed())
+        system.tell(Add(4))
+        assert await system.ask(Get, timeout=1) == [0, 1, 2, 3, 4]
+
+
 async def test_stash_overflow_fails_the_actor():
     seen: list[int] = []
     system = ActorSystem(gate(2, seen), "t")

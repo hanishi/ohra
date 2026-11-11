@@ -38,6 +38,7 @@ from ohra.cluster.sharding.coordinator import (
     ShardHomeAllocated,
     ShardHomes,
     ShardRegionRegistered,
+    ShardStarted,
     _Terminate,  # pyright: ignore[reportPrivateUsage]
     coordinator_behavior,
 )
@@ -393,6 +394,43 @@ async def test_state_initialized_sends_host_shard_for_every_allocated_shard():
         await node.manual.time_passes(0.5)
         homes = await region.receive_messages(2)
         assert set(homes) == {HostShard("1", coordinator), HostShard("2", coordinator)}
+
+
+async def test_state_initialized_stashed_behind_an_update_unstashes_without_a_restart():
+    """_StateInitialized is replayed from the stash and unstashes again: the outer replay must
+    not fail on the emptied stash, which would restart the coordinator."""
+    async with manual_node() as node:
+        replicator, region, home = node.probe(), node.probe(), node.probe()
+        me = node.unique_address
+        gone = UniqueAddress(me.host, me.port, me.uid + 1, me.name)
+        gone_path = f"ohra://c@127.0.0.1:{me.port}/system/sharding/Gone"
+        live = region.ref.path
+        state = (
+            CoordinatorState.EMPTY.updated(ShardRegionRegistered(gone_path, gone))
+            .updated(ShardRegionRegistered(live, me))
+            .updated(ShardHomeAllocated("1", live))
+        )
+        coordinator = node.coordinator(replicator, supervised=True)
+        get = await expect_get(replicator)
+        get.reply_to.tell(Replicator.GetSuccess(get.key, node.loaded(state)))
+        update = await expect_update(replicator)  # the gone region's termination
+        assert node.manual is not None
+        await node.manual.time_passes(0.6)  # _StateInitialized is stashed behind the update
+        coordinator.tell(ShardStarted("1"))
+        coordinator.tell(Register(region.ref))
+        await settle(node)
+        update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+        await region.fish_for_message(
+            3,
+            lambda m: (
+                FishingOutcomes.complete()
+                if isinstance(m, RegisterAck)
+                else FishingOutcomes.continue_and_ignore()
+            ),
+        )
+        coordinator.tell(GetShardHome("1", home.ref))
+        assert await home.receive_message(1) == ShardHome("1", region.ref)
+        await replicator.expect_no_message(0.1)  # no restart, so no second Get
 
 
 # --- the review focus, on real nodes -------------------------------------------------------------

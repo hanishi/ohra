@@ -579,10 +579,13 @@ class ActorCell[T]:
         return _STOPPED
 
     async def _replay(self, b: Behavior[T], msgs: deque[Any]) -> Behavior[T]:
-        """Deliver the messages queued now, in order. Messages added meanwhile stay queued.
-        If the actor stops midway, the rest become dead letters."""
+        """Deliver as many messages as are queued now, in order, so messages added meanwhile
+        stay queued. If the actor stops midway, the rest become dead letters.
+
+        Each is taken from the live buffer, as in Pekko's StashBufferImpl.unstash: a replayed
+        message that unstashes again drains what is left, and this replay then stops."""
         for _ in range(len(msgs)):
-            if isinstance(b, Stopped):
+            if isinstance(b, Stopped) or not msgs:
                 break
             msg = msgs.popleft()
             if msg is _POISON:

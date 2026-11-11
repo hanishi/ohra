@@ -16,8 +16,8 @@ rather than stop themselves.
 from __future__ import annotations
 
 import asyncio
-import sys
 import logging
+import sys
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace

@@ -119,7 +119,7 @@ sequenceDiagram
 
 **Rebalance and hand-off.** Every 10 seconds the coordinator compares shard counts and may move a few shards from the busiest region to the least busy. A move is a hand-off. The coordinator tells every region `BeginHandOff`, so they start buffering for that shard. Once all have acknowledged, it sends `HandOff` to the owner, whose shard stops its entities and reports `ShardStopped`. Then the shard is allocated afresh and the buffers drain to the new home. A leaving node does the same for all of its shards, in the `cluster-sharding-shutdown-region` phase.
 
-**After a crash.** The coordinator keeps its shard map in [Distributed Data](14-distributed-data.md), in an `LWWRegister` on sharding's own Replicator at `/system/sharding/replicator`. A new coordinator reads the map from a majority of the nodes before it answers anyone, and each change is written to a majority before it takes effect. A crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md).
+**After a crash.** The coordinator keeps its shard map in [Distributed Data](14-distributed-data.md), in an `LWWRegister` on sharding's own Replicator at `/system/sharding/replicator`. A new coordinator reads the map from a majority of the nodes before it answers anyone, and each change is written to a majority before it takes effect. In a small cluster that majority is every node, so while a crashed node has not yet been removed, a new shard's allocation waits for it and is retried. A crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md).
 
 ### Sharding in one process
 
@@ -157,7 +157,7 @@ Entities are in memory: a moved or handed-off entity starts fresh on its new nod
 
 The coordinator's reads and writes of its state are tuned with six more fields. Their defaults are Pekko's.
 
-| Field | Pekko key | Default |
+| Field | Pekko key | Default and meaning |
 |---|---|---|
 | `waiting_for_state_timeout` | `waiting-for-state-timeout` | 2.0 s: how long the read of the state may take before it is retried |
 | `updating_state_timeout` | `updating-state-timeout` | 5.0 s: how long a write may take before it is retried |
@@ -166,7 +166,7 @@ The coordinator's reads and writes of its state are tuned with six more fields. 
 | `majority_min_cap` | `distributed-data.majority-min-cap` | 5: the fewest nodes a majority-plus read or write reaches |
 | `distributed_data` | `distributed-data` | `None`: the cluster's `ReplicatorSettings` with `prefer_oldest=True` and `max_delta_elements=5`, never durable |
 
-A cluster of three to five nodes can trade some safety margin for speed, or ask for every node:
+With the defaults, a cluster of up to five nodes reads and writes on every node, since `majority_min_cap` is 5. A larger cluster that wants every write on every node asks for it:
 
 ```python
 from cart import CartCmd, cart

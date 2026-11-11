@@ -17,6 +17,7 @@ from .conductor import (
     TestConductor,
     WrongBarrier,
 )
+from .lease import TestLease, TestLeaseExt
 from .manual_time import ExplicitlyTriggeredScheduler, ManualTime
 from .multi_node_spec import MultiNodeConfig, MultiNodeSpec, multi_node_spec
 from .probe import FishingOutcome, FishingOutcomes, TestProbe
@@ -40,6 +41,8 @@ __all__ = [
     "RoleName",
     "TestConductor",
     "TestKitSettings",
+    "TestLease",
+    "TestLeaseExt",
     "TestProbe",
     "WrongBarrier",
     "multi_node_spec",

@@ -8,6 +8,14 @@ from typing import Any
 from ohra import (
     ActorContext,
     ActorRef,
+    ClusterSharding,
+    ClusterShardingStats,
+    Entity,
+    EntityTypeKey,
+    GetClusterShardingStats,
+    GetShardRegionStats,
+    SetActiveEntityLimit,
+    ShardRegionStats,
     RemoteRef,
     ShardingEnvelope,
     ActorSystem,
@@ -138,6 +146,21 @@ def sharding_is_typed(region: ActorRef[ShardingEnvelope[Ping]]) -> None:
     ref.tell("not a ping")  # type: ignore[arg-type]
     wrong: EntityRef[str] = Sharding.entity_ref_for(region, "a")  # type: ignore[assignment]
     del ref, wrong
+
+
+def cluster_sharding_region_takes_the_region_messages(
+    system: ActorSystem[Any],
+    stats: ActorRef[ShardRegionStats],
+    cluster: ActorRef[ClusterShardingStats],
+) -> None:
+    key = EntityTypeKey[Ping]("Ping")
+    region = ClusterSharding(system).init(Entity(key, lambda _e: _b))
+    envelopes: ActorRef[ShardingEnvelope[Ping]] = region
+    region.tell(GetShardRegionStats(stats))
+    region.tell(GetClusterShardingStats(3.0, cluster))
+    region.tell(SetActiveEntityLimit(10))
+    region.tell(ShardingEnvelope("a", "not a ping"))  # type: ignore[arg-type]
+    del envelopes
 
 
 def persistence_is_typed() -> None:

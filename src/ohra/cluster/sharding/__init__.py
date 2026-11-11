@@ -115,7 +115,18 @@ class ClusterSharding:
             system.cluster_sharding = self
         return system.cluster_sharding
 
-    def init[M](self, entity: Entity[M]) -> ActorRef[ShardingEnvelope[M]]:
+    def init[M](
+        self, entity: Entity[M]
+    ) -> ActorRef[
+        ShardingEnvelope[M]
+        | GetShardRegionState
+        | GetShardRegionStats
+        | GetClusterShardingStats
+        | SetActiveEntityLimit
+    ]:
+        """The region of the entity type on this node, as Pekko Typed's ``init``. It takes the
+        envelopes, and the region queries and ``SetActiveEntityLimit`` that Pekko's region takes
+        as its own messages."""
         name = entity.type_key.name
         if name == "replicator":
             raise ValueError(

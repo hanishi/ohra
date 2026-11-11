@@ -191,7 +191,7 @@ Passivation stops an entity that is not needed, to free its memory. Pekko decide
 - **Segmented least recently used**: least recently used with several levels. An entity enters the lowest and moves up a level each time it is touched again, so entities touched only once go first.
 - **The composite strategy**: a main policy behind an admission window. A new entity first enters a small window with its own policy, and the window's evictee competes for a place in the main area against the main area's own candidate, decided by a frequency sketch filter that counts how often each id is touched. A hill-climbing optimizer adjusts the window's size from the hit rate it sees.
 
-Each setting has a Pekko key under `pekko.cluster.sharding.passivation`, and a builder on `PassivationStrategySettings`. Durations are in seconds.
+Each setting has a Pekko key in a strategy's section under `pekko.cluster.sharding.passivation` (the table leaves the section out), and a builder on `PassivationStrategySettings`. `WindowSettings`, `HillClimbingSettings` and `FrequencySketchSettings` are nested in `PassivationStrategySettings.AdmissionSettings`. Durations are in seconds.
 
 | Pekko key | ohra | Default |
 |---|---|---|
@@ -208,9 +208,9 @@ Each setting has a Pekko key under `pekko.cluster.sharding.passivation`, and a b
 | `admission.filter` | `AdmissionSettings.with_filter(FrequencySketchSettings)` | none |
 | `admission.frequency-sketch.depth`, `counter-bits`, `width-multiplier`, `reset-multiplier` | `FrequencySketchSettings` fields of the same names | 4, 4, 4, 10.0 |
 
-Pekko's `passivation.strategy` names one of three. They are constants here: `PassivationStrategySettings.default_idle_strategy` is idle passivation after 120 s, `default_strategy` is the composite with a limit of 100_000, a least recently used window with the hill-climbing optimizer, the frequency sketch filter and a two-level segmented main area of proportions 0.2 and 0.8, and `disabled` passivates nothing. `ClusterShardingSettings()` uses `default_idle_strategy`. `with_no_passivation_strategy()` is `disabled`.
+Pekko's `passivation.strategy` names a strategy section. The three Pekko ships are constants here, and any other is built with the builders: `PassivationStrategySettings.default_idle_strategy` is idle passivation after 120 s, `default_strategy` is the composite with a limit of 100_000, a least recently used window with the hill-climbing optimizer, the frequency sketch filter and a two-level segmented main area of proportions 0.2 and 0.8, and `disabled` passivates nothing. `ClusterShardingSettings()` carries `default_idle_strategy`, though for now nothing passivates by it: see below. `with_no_passivation_strategy()` is `disabled`.
 
-For now the shards still passivate by `passivate_after`, and `passivation_strategy_settings` is not read yet. The settings and the strategies they resolve to exist, and the next change makes the shard run them.
+For now the shards still passivate by `passivate_after`, which is off by default, and `passivation_strategy_settings` is not read yet. The settings and the strategies they resolve to exist, and the shard does not run them yet.
 
 ```python
 from ohra.cluster.sharding import ClusterShardingSettings, PassivationStrategySettings

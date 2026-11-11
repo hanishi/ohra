@@ -38,6 +38,7 @@ fewer than two segment levels resolve as Pekko's, and the settings are exported.
 
 import ohra
 import ohra.cluster.sharding as sharding
+import ohra.cluster.sharding.passivation
 from ohra.cluster.sharding import ClusterShardingSettings
 from ohra.cluster.sharding.passivation_settings import (
     CompositePassivationStrategy as Composite,
@@ -441,3 +442,6 @@ def test_one_segment_level_is_plain_lru() -> None:
 
 def test_passivation_strategy_settings_are_exported() -> None:
     assert ohra.PassivationStrategySettings is sharding.PassivationStrategySettings
+    assert ohra.cluster.sharding.passivation.PassivationStrategySettings is (
+        ohra.PassivationStrategySettings
+    )

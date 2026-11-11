@@ -171,6 +171,7 @@ async def test_cluster_sharding_ddata_mode_with_leaving_member():
 
         # initialize shards (132)
         original = {str(n): await ping(first, str(n)) for n in range(1, 11)}
+        assert any(located.port in {ports[0], ports[1]} for located in original.values())
 
         # recover after leaving coordinator node (146)
         leaving = (first, second)

@@ -34,9 +34,10 @@ Differences from the Scala:
 - ``CoordinatedShutdown.unknownReason`` is ``ActorSystemTerminateReason()``.
 - ``runOn(second) { watch(region); expectTerminated(region) }`` is a TestProbe on the
   second system.
-- The "empty region" case sends ``GracefulShutdown`` to the region, ohra's ``_GracefulShutdown``
-  (private: Pekko's ``ShardRegion.GracefulShutdown`` has no public ohra counterpart; the region's
-  own coordinated-shutdown task sends it).
+- The "empty region" case starts type "EntityEmpty" on a third node and runs
+  CoordinatedShutdown on it, whose ``cluster-sharding-shutdown-region`` task sends the region
+  ``GracefulShutdown``, instead of sending ``GracefulShutdown`` to a region on the first node (no
+  public message for it in ohra).
 - Range 1 to 200 in the second case is as in the Scala; the ``within(30.seconds)`` bounds are the
   ``await_assert`` and ``eventually`` timeouts below.
 """
@@ -45,7 +46,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ohra import (
@@ -61,14 +62,13 @@ from ohra import (
     remotable,
 )
 from ohra.cluster.core import Cluster, Join
-from ohra.cluster.sharding.region import _GracefulShutdown  # pyright: ignore[reportPrivateUsage]
 from ohra.coordinated_shutdown import ActorSystemTerminateReason, CoordinatedShutdown
 from ohra.testkit import TestProbe
-from ohra.testkit.settings import TestKitSettings
 
 from ...util import eventually, free_port
 from ..test_cluster import all_up
 from ..test_cluster_sharding import FAST_SHARDING, node
+from .test_cluster_sharding_leaving_spec import Host
 
 NUMBER_OF_SHARDS = 100
 SETTINGS = replace(
@@ -97,14 +97,6 @@ class GsStop: ...
 
 
 type EntityMessage = GsPing | GsStop
-
-
-@dataclass
-class Host:
-    """What a TestProbe needs of a test kit."""
-
-    system: ActorSystem[Any]
-    settings: TestKitSettings = field(default_factory=TestKitSettings)
 
 
 def start_sharding(
@@ -179,6 +171,14 @@ async def test_cluster_sharding_ddata_mode_graceful_shutdown():
         await shutdown
 
         # gracefully shutdown empty region (150)
-        _, region_empty = start_sharding(first, "EntityEmpty")
-        region_empty.tell(_GracefulShutdown())
-        await probe.expect_terminated(region_empty, max=5.0)
+        # a node whose region holds nothing: its region's own coordinated-shutdown task sends
+        # GracefulShutdown
+        third = await stack.enter_async_context(node(free_port(), [], exiting_timeout=8.0))
+        Cluster(third).manager.tell(Join(Cluster(first).self_address))
+        await eventually(lambda: all_up(first, 2) and all_up(third, 2), timeout=5)
+        _, region_empty = start_sharding(third, "EntityEmpty")
+        terminated = asyncio.create_task(
+            TestProbe[Any](Host(third)).expect_terminated(region_empty, max=5.0)
+        )
+        await CoordinatedShutdown(third).run(ActorSystemTerminateReason())
+        await terminated

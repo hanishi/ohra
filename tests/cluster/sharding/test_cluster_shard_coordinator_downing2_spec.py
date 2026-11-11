@@ -68,6 +68,7 @@ async def test_cluster_sharding_ddata_mode_with_down_member_scenario_2():
 
         # initialize shards
         original = await locate(first, range(1, 5))
+        assert any(located.port == p2 for located in original.values())  # something moves
 
         # recover after downing other node (not coordinator)
         partition(first, port_of(second))

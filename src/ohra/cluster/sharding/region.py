@@ -113,9 +113,12 @@ class _Region:
         self.members_by_age: list[Member] = []
         self.coordinator: ActorRef[Any] | None = None
         self.shards: dict[str, ActorRef[Any]] = {}
+        # shards spawned that have not sent ShardInitialized yet (ShardRegion.scala 652)
+        self.starting_shards: set[str] = set()
         self.region_by_shard: dict[str, ActorRef[Any]] = {}
         self.shard_buffers: dict[str, deque[ShardingEnvelope[Any]]] = {}
         self.buffered = 0
+        self.logged_full_buffer_warning = False
         self.next_registration_delay = max(0.1, settings.retry_interval / 8)
         self.graceful_shutdown_in_progress = False
         self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
@@ -169,15 +172,33 @@ class _Region:
 
     # --- delivery --------------------------------------------------------------------------------
 
-    def shard_for(self, shard: str) -> ActorRef[Any]:
+    def get_shard(self, shard: str) -> ActorRef[Any] | None:
+        """ShardRegion.scala 1331-1370: the shard once it is initialized. On first use it is
+        spawned and starting, and None is returned until its ``ShardInitialized``. A region
+        always hosts shards here, never a proxy."""
+        if shard in self.starting_shards:
+            return None
         ref = self.shards.get(shard)
-        if ref is None:
-            ref = self.ctx.spawn(shard_behavior(self.entity, shard, self.ctx.self), shard)
-            self.ctx.watch_with(ref, _ShardTerminated(shard))
-            self.shards[shard] = ref
-        return ref
+        if ref is not None:
+            return ref
+        self.log.debug("%s: Starting shard [%s] in region", self.type_name, shard)
+        ref = self.ctx.spawn(shard_behavior(self.entity, shard, self.ctx.self), shard)
+        self.ctx.watch_with(ref, _ShardTerminated(shard))
+        self.shards[shard] = ref
+        self.starting_shards.add(shard)
+        return None
+
+    def initialize_shard(self, shard: str) -> None:
+        """ShardRegion.scala 1210-1214. Pekko delivers to the sender; here it is the shard
+        the region holds under that id."""
+        self.log.debug("%s: Shard was initialized [%s]", self.type_name, shard)
+        self.starting_shards.discard(shard)
+        ref = self.shards.get(shard)
+        if ref is not None:
+            self.deliver_buffered(shard, ref)
 
     def deliver(self, envelope: ShardingEnvelope[Any]) -> None:
+        """ShardRegion.scala 1281-1329, for an envelope."""
         shard = shard_id_of(envelope.entity_id, self.settings.number_of_shards)
         home = self.region_by_shard.get(shard)
         if home is None:
@@ -187,24 +208,43 @@ class _Region:
                 self.coordinator.tell(GetShardHome(shard, self.ctx.self))
             self.buffer(shard, envelope)
         elif home.path == self.ctx.self.path:
-            self.shard_for(shard).tell(envelope)
+            ref = self.get_shard(shard)
+            if ref is None:
+                self.buffer(shard, envelope)
+            elif shard in self.shard_buffers:
+                # Since now messages to a shard is buffered then those messages must be in
+                # right order
+                self.buffer(shard, envelope)
+                self.deliver_buffered(shard, ref)
+            else:
+                ref.tell(envelope)
         else:
             home.tell(envelope)
 
     def buffer(self, shard: str, envelope: ShardingEnvelope[Any]) -> None:
+        """ShardRegion.scala 1216-1240, without the fill-level logs: the full-buffer warning
+        is logged once until the next delivery of a buffer."""
         if self.buffered >= self.settings.buffer_size:
-            self.log.warning(
-                "%s: buffer is full, dropping message for shard [%s]", self.type_name, shard
-            )
+            if self.logged_full_buffer_warning:
+                self.log.debug(
+                    "%s: buffer is full, dropping message for shard [%s]", self.type_name, shard
+                )
+            else:
+                self.log.warning(
+                    "%s: buffer is full, dropping message for shard [%s]", self.type_name, shard
+                )
+                self.logged_full_buffer_warning = True
             self.ctx.system.dead_letter(envelope, self.ctx.self)
             return
         self.shard_buffers.setdefault(shard, deque()).append(envelope)
         self.buffered += 1
 
     def deliver_buffered(self, shard: str, receiver: ActorRef[Any]) -> None:
+        """ShardRegion.scala 1242-1260."""
         for envelope in self.shard_buffers.pop(shard, ()):
             self.buffered -= 1
             receiver.tell(envelope)
+        self.logged_full_buffer_warning = False
 
     def receive_shard_home(self, shard: str, region: ActorRef[Any]) -> None:
         current = self.region_by_shard.get(shard)
@@ -229,7 +269,9 @@ class _Region:
                 self.ctx.system.dead_letter(envelope, self.ctx.self)
         self.region_by_shard[shard] = region
         if region.path == self.ctx.self.path:
-            self.deliver_buffered(shard, self.shard_for(shard))
+            ref = self.get_shard(shard)
+            if ref is not None:
+                self.deliver_buffered(shard, ref)
         else:
             self.deliver_buffered(shard, region)
 
@@ -310,9 +352,10 @@ class _Region:
                         self.send_graceful_shutdown_to_coordinator()
                     else:
                         self.region_by_shard[shard] = self.ctx.self
-                        self.shard_for(shard)
+                        # Start the shard, if already started this does nothing; its buffer
+                        # goes out on ShardInitialized (ShardRegion.scala 819-836)
+                        self.get_shard(shard)
                         reply_to.tell(ShardStarted(shard))
-                        self.deliver_buffered(shard, self.shards[shard])
                 case ShardHome(shard, region):
                     self.receive_shard_home(shard, region)
                 case ShardHomes(homes):
@@ -328,6 +371,7 @@ class _Region:
                         self.buffered -= len(dropped)
                         for envelope in dropped:
                             self.ctx.system.dead_letter(envelope, self.ctx.self)
+                        self.logged_full_buffer_warning = False
                     local = self.shards.get(shard)
                     if local is not None:
                         local.tell(msg)
@@ -335,6 +379,7 @@ class _Region:
                         reply_to.tell(ShardStopped(shard))
                 case _ShardTerminated(shard):
                     self.shards.pop(shard, None)
+                    self.starting_shards.discard(shard)
                     if (
                         self.region_by_shard.get(shard) is not None
                         and self.region_by_shard[shard].path == self.ctx.self.path
@@ -354,8 +399,8 @@ class _Region:
                 case _GracefulShutdown():
                     self.graceful_shutdown_in_progress = True
                     self.send_graceful_shutdown_to_coordinator()
-                case ShardInitialized():
-                    pass  # the region starts using it with the shard's lease (Task 4)
+                case ShardInitialized(shard):
+                    self.initialize_shard(shard)
                 case _:
                     pass
             return Behaviors.stopped() if self.try_complete_graceful_shutdown() else Behaviors.same

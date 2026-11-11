@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import pytest
 
+from ohra.remote import UniqueAddress
+
 from ohra.cluster.core import CurrentClusterState
 from ohra.cluster.gossip import Member, MemberStatus
 from ohra.cluster.sharding import (
@@ -123,7 +125,9 @@ def test_rebalance_is_skipped_while_in_progress_or_not_a_good_time():
 
 
 def test_coordinator_state_events():
-    s = CoordinatorState().updated(ShardRegionRegistered(RA)).updated(ShardRegionRegistered(RB))
+    node = UniqueAddress("h", 1, 1, "sys")
+    s = CoordinatorState.EMPTY.updated(ShardRegionRegistered(RA, node))
+    s = s.updated(ShardRegionRegistered(RB, node))
     s = s.updated(ShardHomeAllocated("1", RA)).updated(ShardHomeAllocated("2", RB))
     assert s.shards == {"1": RA, "2": RB} and s.regions == {RA: ("1",), RB: ("2",)}
     s = s.updated(ShardHomeDeallocated("1"))
@@ -131,7 +135,7 @@ def test_coordinator_state_events():
     s = s.updated(ShardRegionTerminated(RB))
     assert s.shards == {} and RB not in s.regions
     with pytest.raises(ValueError):
-        s.updated(ShardRegionRegistered(RA))  # already registered
+        s.updated(ShardRegionRegistered(RA, node))  # already registered
     with pytest.raises(ValueError):
         s.updated(ShardHomeAllocated("3", RC))  # unknown region
     with pytest.raises(ValueError):

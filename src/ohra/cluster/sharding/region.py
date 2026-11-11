@@ -164,7 +164,7 @@ class _Region:
             # the local singleton instance is not up yet: the next retry asks again
             except LookupError:
                 continue
-            coordinator.tell(Register(self.ctx.self, tuple(self.shards)))
+            coordinator.tell(Register(self.ctx.self))
 
     # --- delivery --------------------------------------------------------------------------------
 
@@ -212,9 +212,8 @@ class _Region:
             and current.path == self.ctx.self.path
             and region.path != self.ctx.self.path
         ):
-            # Pekko throws here because distributed data makes it impossible; without it a
-            # registration that arrives after the coordinator's gate opened can lose a shard it
-            # hosts: hand the local copy off
+            # Pekko throws here, since its coordinator never moves a shard off a region that
+            # hosts it; ohra hands the local copy off instead
             self.log.error(
                 "%s: shard [%s] moved from self to [%s]; stopping the local copy",
                 self.type_name,

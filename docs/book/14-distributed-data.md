@@ -567,7 +567,7 @@ CRDTs hold state, not commands. A value that has to be decided once, such as whi
 
 ### Not here yet
 
-Later parts are planned to move the sharding coordinator's state ([chapter 7](07-sharding.md)) onto Distributed Data, as Pekko keeps it. The receptionist ([chapter 2](02-actor-system.md#receptionist)) already runs on it, with a Replicator of its own.
+The sharding coordinator ([chapter 7](07-sharding.md#sharding-across-nodes)) and the receptionist ([chapter 2](02-actor-system.md#receptionist)) already run on Distributed Data, each with a Replicator of its own. Remembered entities, which Pekko also keeps there, are next.
 
 ---
 

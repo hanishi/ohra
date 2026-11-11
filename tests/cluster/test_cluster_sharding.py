@@ -1,5 +1,5 @@
 """Cluster sharding: entities addressable from any node, a coordinator singleton allocating shards
-to regions and rebuilding its map from their registrations, as ShardCoordinator.scala and
+to regions and keeping its map in Distributed Data, as ShardCoordinator.scala and
 ShardRegion.scala."""
 
 from __future__ import annotations
@@ -40,8 +40,11 @@ from ohra.cluster.sharding.coordinator import (
     HostShard,
     Register,
     RegisterAck,
-    _Coordinator,  # pyright: ignore[reportPrivateUsage]
+    GetShardHome,
+    ShardStarted,
+    coordinator_behavior,
 )
+from ohra.cluster.ddata import Replicator, ReplicatorSettings
 from ohra.cluster.sharding.shard import HandOff
 from ohra.remote import Address
 from ohra.remote.serialization import Json
@@ -151,6 +154,15 @@ async def test_the_coordinator_runs_without_a_singleton_proxy():
         a.resolve(f"{a.path.removesuffix('/user')}/system/singletonManagerCounterCoordinator")
         with pytest.raises(LookupError):
             a.resolve(f"{a.path.removesuffix('/user')}/system/singletonProxyCounterCoordinator")
+
+
+async def test_an_entity_type_named_replicator_is_refused():
+    """Sharding's Replicator is the child /system/sharding/replicator, beside the regions: init
+    says so, rather than failing on the duplicate child name."""
+    p1 = free_port()
+    async with node(p1, [p1]) as a:
+        with pytest.raises(ValueError, match="reserved for sharding's Replicator"):
+            start(a, EntityTypeKey[Count]("replicator"))
 
 
 async def test_entity_ref_for_before_registration_buffers_and_delivers():
@@ -291,7 +303,7 @@ async def test_coordinator_crash_is_recovered_after_removal():
         await eventually(lambda: all_up(nodes[1], 2) and all_up(nodes[2], 2), timeout=5)
         on_c = [e for e, i in where.items() if i == 2]
         assert on_c
-        # b never saw these homes: it must ask the new coordinator, which rebuilt them from c
+        # b never saw these homes: it must ask the new coordinator, which read them from ddata
         for e in on_c:
             assert await ask(ref(nodes[1], e), lambda r: Count(0, r), timeout=5) == 1
         for e in elsewhere:
@@ -543,38 +555,29 @@ async def test_coordinator_host_leave_hands_its_shards_off():
         assert on_a <= (await shards_on(regions[1])) | (await shards_on(regions[2]))
 
 
-async def test_late_registration_after_a_coordinator_move_is_resolved():
-    """b's new coordinator opens its gate before c manages to register (c's Register frames are
-    dropped), so a shard c hosts is allocated on b too; when c's registration lands, the conflict
-    is resolved to one host, c's region stays alive, and every node sees the same entity
-    afterwards."""
+async def test_a_coordinator_move_keeps_the_shard_map_while_a_registration_is_late():
+    """B1: b's new coordinator reads the shard map from Distributed Data, so while c's Register
+    frames are dropped the shards c hosts are still c's. Every entity stays on its node and no
+    shard is in two regions."""
     p1, p2, p3 = free_port(), free_port(), free_port()
     async with AsyncExitStack() as stack:
         nodes = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2, p3)]
         await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
         regions = [start(n) for n in nodes]
         where = await ids_hosted_by(regions, nodes, 12)
-        on_c = next(e for e, i in where.items() if i == 2)
+        kept = {e: i for e, i in where.items() if i != 0}
+        assert 2 in kept.values()
         deliver = _drop(nodes[1], ("Sharding.Register",))  # the next coordinator never hears c
         Cluster(nodes[1]).manager.tell(Leave(Address("c", "127.0.0.1", p1)))
         await asyncio.wait_for(nodes[0].when_terminated(), timeout=8)
         await eventually(lambda: all_up(nodes[1], 2) and all_up(nodes[2], 2), timeout=5)
-        await asyncio.sleep(0.3)
-        # possibly a second entity on b
-        await ask(ref(nodes[1], on_c), lambda r: Count(1, r), timeout=5)
+        for e in kept:
+            # the same entity, its total kept
+            assert await ask(ref(nodes[1], e), lambda r: Count(1, r), timeout=5) == 2
         nodes[1].remoting._handle = deliver  # pyright: ignore[reportPrivateUsage]
-        await asyncio.sleep(0.5)  # c registers and reports what it hosts; the conflict is resolved
-        totals = {await ask(ref(n, on_c), lambda r: Count(0, r), timeout=5) for n in nodes[1:]}
-        assert len(totals) == 1  # one entity, seen from both nodes
-        shard = shard_id_of(on_c, 10)
-        # one host
-        assert not (
-            {shard} <= await shards_on(regions[1]) and {shard} <= await shards_on(regions[2])
-        )
-        # c's region lives
-        assert isinstance(
-            await ask(regions[2], GetShardRegionState, timeout=2), CurrentShardRegionState
-        )
+        for e, i in kept.items():
+            assert e in await hosted(regions[i])
+        assert not (await shards_on(regions[1])) & (await shards_on(regions[2]))
 
 
 async def test_a_failed_region_restarts_and_recovers():
@@ -669,27 +672,24 @@ async def test_a_failed_coordinator_restarts():
         coordinator = a.resolve(
             f"ohra://c@127.0.0.1:{p}/system/singletonManagerCounterCoordinator/singleton"
         )
-        coordinator.tell(Register(cast(Any, "not a region"), ()))  # fails the coordinator
+        coordinator.tell(Register(cast(Any, "not a region")))  # fails the coordinator
         [fresh] = ids_on_new_shards(1, {shard_id_of("warm", FAST_SHARDING.number_of_shards)})
         assert await ask(ref(a, fresh), lambda r: Count(1, r), timeout=5) == 1
 
 
-async def test_a_shard_whose_region_terminated_during_hand_off_is_not_reallocated():
+async def test_a_shard_whose_region_terminated_during_hand_off_is_allocated_again():
     """ShardCoordinator's RebalanceDone: the shard could have been removed by
-    ShardRegionTerminated, and then nobody asked for it, so it is allocated only on demand."""
+    ShardRegionTerminated, so it is not deallocated twice. regionTerminated asked for its home,
+    deferred until the hand-off is done, so it then goes to the region that is left."""
     settings = replace(FAST_SHARDING, rebalance_interval=60.0)
-    coordinators: list[_Coordinator] = []
-
-    @Behaviors.setup
-    def coordinator(ctx: ActorContext[Any]) -> Behavior[Any]:
-        coordinators.append(_Coordinator(ctx, "T", settings))
-        return coordinators[0].behavior()
 
     def region(log: list[object], stop_on_hand_off: bool) -> Behavior[Any]:
         @Behaviors.receive
         def on_message(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             log.append(msg)
             match msg:
+                case HostShard(shard, reply_to):
+                    reply_to.tell(ShardStarted(shard))
                 case BeginHandOff(shard, reply_to):
                     reply_to.tell(BeginHandOffAck(shard, ctx.self))
                 case HandOff() if stop_on_hand_off:
@@ -704,18 +704,30 @@ async def test_a_shard_whose_region_terminated_during_hand_off_is_not_reallocate
     async with node(p1, [p1]) as a:
         await eventually(lambda: all_up(a, 1), timeout=3)
         root = a._system_root  # pyright: ignore[reportPrivateUsage]
-        coord = root.spawn_child(coordinator, "coordinator", None).ref
+        replicator = root.spawn_child(
+            Replicator.behavior(ReplicatorSettings()), "replicator", None
+        ).ref
+        coord = root.spawn_child(
+            coordinator_behavior("T", settings, replicator), "coordinator", None
+        ).ref
         log1: list[object] = []
         log2: list[object] = []
         r1 = root.spawn_child(region(log1, True), "r1", None).ref
         r2 = root.spawn_child(region(log2, False), "r2", None).ref
-        coord.tell(Register(r1, ("s1",)))
-        coord.tell(Register(r2, ()))
-        await eventually(lambda: any(isinstance(m, RegisterAck) for m in log2))
+
+        def registered(region: ActorRef[Any], log: list[object]) -> bool:
+            """A region retries its Register until acked: the coordinator drops it before it has
+            read its state."""
+            if any(isinstance(m, RegisterAck) for m in log):
+                return True
+            coord.tell(Register(region))
+            return False
+
+        await eventually(lambda: registered(r1, log1))
+        coord.tell(GetShardHome("s1", r1))
+        await eventually(lambda: HostShard("s1", coord) in log1)
+        await eventually(lambda: registered(r2, log2))
         coord.tell(GracefulShutdownReq(r1))
         await eventually(lambda: any(isinstance(m, HandOff) for m in log1))
-        c = coordinators[0]
-        # r1 is gone and the worker has reported: rebalance_done has run
-        await eventually(lambda: r1.path not in c.refs and not c.rebalance_workers)
-        assert "s1" not in c.state.shards
-        assert not [m for m in log2 if isinstance(m, HostShard)]
+        await eventually(lambda: HostShard("s1", coord) in log2)
+        assert [m for m in log2 if isinstance(m, HostShard)] == [HostShard("s1", coord)]

@@ -77,6 +77,18 @@ _SLRU = _LIMIT_1.with_replacement_policy(
 )
 _MRU = _LIMIT_1.with_most_recently_used_replacement()
 _LFU = _LIMIT_1.with_least_frequently_used_replacement()
+# The composites keep their limits, and idle passivation passivates "1", in the untracked test:
+# at a limit of 1 the filter rejects "2" instead. The per-shard limit of 0 sets the limit to 1.
+_COMPOSITE = P.default_strategy
+_NO_WINDOW = (  # CompositeSpec's admissionFilterNoWindowConfig
+    P.defaults.with_active_entity_limit(10)
+    .with_admission(
+        P.AdmissionSettings.defaults.with_filter(
+            P.AdmissionSettings.FrequencySketchSettings.defaults
+        )
+    )
+    .with_least_recently_used_replacement()
+)
 
 
 def _idle(s: PassivationStrategySettings) -> PassivationStrategySettings:
@@ -85,8 +97,32 @@ def _idle(s: PassivationStrategySettings) -> PassivationStrategySettings:
 
 @pytest.mark.parametrize(
     "passivation",
-    [_IDLE, _LRU, _idle(_LRU), _SLRU, _idle(_SLRU), _MRU, _idle(_MRU), _LFU, _idle(_LFU)],
-    ids=["idle", "lru", "lru-idle", "slru", "slru-idle", "mru", "mru-idle", "lfu", "lfu-idle"],
+    [
+        _IDLE,
+        _LRU,
+        _idle(_LRU),
+        _SLRU,
+        _idle(_SLRU),
+        _MRU,
+        _idle(_MRU),
+        _LFU,
+        _idle(_LFU),
+        _idle(_COMPOSITE),
+        _idle(_NO_WINDOW),
+    ],
+    ids=[
+        "idle",
+        "lru",
+        "lru-idle",
+        "slru",
+        "slru-idle",
+        "mru",
+        "mru-idle",
+        "lfu",
+        "lfu-idle",
+        "composite-idle",
+        "no-window-idle",
+    ],
 )
 def test_terminating_an_untracked_entity_is_a_no_op(
     passivation: PassivationStrategySettings,
@@ -119,8 +155,15 @@ def test_terminating_an_untracked_entity_is_a_no_op(
 
 @pytest.mark.parametrize(
     ("passivation", "first", "second"),
-    [(_LRU, ["1"], ["2"]), (_SLRU, ["1"], ["2"]), (_MRU, [], ["1"]), (_LFU, [], ["1"])],
-    ids=["lru", "slru", "mru", "lfu"],
+    [
+        (_LRU, ["1"], ["2"]),
+        (_SLRU, ["1"], ["2"]),
+        (_MRU, [], ["1"]),
+        (_LFU, [], ["1"]),
+        (_COMPOSITE.with_active_entity_limit(1), ["1"], ["2"]),
+        (_NO_WINDOW.with_active_entity_limit(1), ["1"], ["2"]),
+    ],
+    ids=["lru", "slru", "mru", "lfu", "composite", "no-window"],
 )
 def test_a_per_shard_limit_of_zero(
     passivation: PassivationStrategySettings, first: list[str], second: list[str]

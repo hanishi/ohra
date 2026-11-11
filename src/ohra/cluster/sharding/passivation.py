@@ -14,10 +14,12 @@ from dataclasses import dataclass
 
 from ohra.util import Clock
 from ohra.util.frequency_list import FrequencyList
+from ohra.util.frequency_sketch import FastFrequencySketch, FrequencySketch
 from ohra.util.recency_list import RecencyList
 from ohra.util.segmented_recency_list import SegmentedRecencyList
 
 from .passivation_settings import (
+    CompositePassivationStrategy,
     IdlePassivationStrategy,
     LeastFrequentlyUsedPassivationStrategy,
     LeastRecentlyUsedPassivationStrategy,
@@ -42,8 +44,7 @@ class EntityPassivationStrategy(ABC):
 
     @staticmethod
     def create(settings: ClusterShardingSettings, clock: Clock) -> EntityPassivationStrategy:
-        """Scala 40-81 (``EntityPassivationStrategy.apply``). The composite strategy (54-78)
-        gives ``DisabledEntityPassivationStrategy`` until it is ported."""
+        """Scala 40-81 (``EntityPassivationStrategy.apply``)."""
         match settings.passivation_strategy:
             case IdlePassivationStrategy(timeout, interval):
                 return IdleEntityPassivationStrategy(IdleCheck(timeout, interval), clock)
@@ -60,6 +61,26 @@ class EntityPassivationStrategy(ABC):
             case LeastFrequentlyUsedPassivationStrategy(limit, dynamic_aging, idle):
                 return LeastFrequentlyUsedEntityPassivationStrategy(
                     limit, dynamic_aging, _idle_check(idle), clock
+                )
+            case CompositePassivationStrategy() as composite:
+                idle_enabled = composite.idle is not None
+                main = ActiveEntities.create(composite.main_strategy, idle_enabled, clock)
+                if isinstance(main, NoActiveEntities):
+                    return DisabledEntityPassivationStrategy()
+                window = ActiveEntities.create(composite.window_strategy, idle_enabled, clock)
+                no_window = isinstance(window, NoActiveEntities)
+                return CompositeEntityPassivationStrategy(
+                    composite.limit,
+                    window,
+                    0.0 if no_window else composite.initial_window_proportion,
+                    0.0 if no_window else composite.minimum_window_proportion,
+                    0.0 if no_window else composite.maximum_window_proportion,
+                    NoAdmissionOptimizer()
+                    if no_window
+                    else AdmissionOptimizer.create(composite.limit, composite.window_optimizer),
+                    AdmissionFilter.create(composite.limit, composite.admission_filter),
+                    main,
+                    _idle_check(composite.idle),
                 )
             case _:
                 return DisabledEntityPassivationStrategy()
@@ -536,3 +557,345 @@ class LeastFrequentlyUsedReplacementPolicy(ActiveEntities):
     def _remove_excess(self, adjustment: int = 0) -> PassivateEntities:
         excess = self._frequency_list.size - self._limit + adjustment
         return self._frequency_list.remove_least_frequent(excess) if excess > 0 else []
+
+
+class CompositeEntityPassivationStrategy(LimitBasedEntityPassivationStrategy):
+    """Scala 639-760: an admission window in front of the main area, an admission filter for
+    entering the main area, and an optimizer for the window's proportion (TinyLFU, and the
+    adaptive W-TinyLFU of "Adaptive Software Cache Management")."""
+
+    def __init__(
+        self,
+        initial_limit: int,
+        window: ActiveEntities,
+        initial_window_proportion: float,
+        minimum_window_proportion: float,
+        maximum_window_proportion: float,
+        window_optimizer: AdmissionOptimizer,
+        admission_filter: AdmissionFilter,
+        main: ActiveEntities,
+        idle_check: IdleCheck | None,
+    ) -> None:
+        super().__init__(initial_limit)
+        self._window = window
+        self._minimum_window_proportion = minimum_window_proportion
+        self._maximum_window_proportion = maximum_window_proportion
+        self._window_optimizer = window_optimizer
+        self._admission_filter = admission_filter
+        self._main = main
+        self._idle_check = idle_check
+        self._window_proportion = initial_window_proportion
+        self._window_limit = 0
+        self._main_limit = 0
+        # set initial limits based on initial window proportion
+        self._calculate_limits()
+        self._window.update_limit(self._window_limit)
+        self._main.update_limit(self._main_limit)
+
+    def _calculate_limits(self) -> None:
+        """Scala 682-685."""
+        self._window_limit = int(self._window_proportion * self._per_shard_limit)
+        self._main_limit = self._per_shard_limit - self._window_limit
+
+    def entity_touched(self, entity_id: str) -> PassivateEntities:
+        self._admission_filter.update(entity_id)
+        if self._window.is_active(entity_id):
+            self._window_optimizer.record_active()
+            passivated = self._window.update(entity_id)
+        elif self._main.is_active(entity_id):
+            self._window_optimizer.record_active()
+            passivated = self._main.update(entity_id)
+        else:
+            self._window_optimizer.record_passive()
+            passivated = self._maybe_admit_to_main(self._window.update(entity_id))
+        self._adapt_window()
+        return passivated
+
+    def entity_terminated(self, entity_id: str) -> None:
+        self._window.remove(entity_id)
+        self._main.remove(entity_id)
+
+    def _passivate_entities_on_limit_update(self) -> PassivateEntities:
+        self._calculate_limits()
+        self._window_optimizer.update_limit(self._per_shard_limit)
+        self._admission_filter.update_capacity(self._per_shard_limit)
+        admitted = self._maybe_admit_to_main(self._window.update_limit(self._window_limit))
+        return admitted + self._main.update_limit(self._main_limit)
+
+    @property
+    def scheduled_interval(self) -> float | None:
+        return None if self._idle_check is None else self._idle_check.interval
+
+    def interval_passed(self) -> PassivateEntities:
+        if self._idle_check is None:
+            return []
+        timeout = self._idle_check.timeout
+        return self._window.remove_idle(timeout) + self._main.remove_idle(timeout)
+
+    def _maybe_admit_to_main(self, candidates: PassivateEntities) -> PassivateEntities:
+        """Scala 726-742: each candidate the window drops enters the main area if the filter
+        admits it over the entity the main area would drop, and is passivated otherwise."""
+        passivated: PassivateEntities = []
+        for candidate in candidates:
+            if self._main.size >= self._main_limit:
+                selected = self._main.select()
+                if selected is not None and not self._admission_filter.admit(candidate, selected):
+                    passivated.append(candidate)
+                else:
+                    passivated += self._main.update(candidate)
+            else:
+                passivated += self._main.update(candidate)
+        return passivated
+
+    def _adapt_window(self) -> None:
+        """Scala 744-759: entities move between the window and the main area, and the updates
+        that move them passivate nothing, so what they return is ignored."""
+        adjustment = self._window_optimizer.calculate_adjustment()
+        if adjustment != 0.0:
+            self._window_proportion = max(
+                self._minimum_window_proportion,
+                min(self._maximum_window_proportion, self._window_proportion + adjustment),
+            )
+            self._calculate_limits()
+            if adjustment > 0.0:  # increase window limit
+                self._window.update_limit(self._window_limit)
+                for entity_id in self._main.update_limit(self._main_limit):
+                    self._window.update(entity_id)
+            else:  # decrease window limit
+                self._main.update_limit(self._main_limit)
+                for entity_id in self._window.update_limit(self._window_limit):
+                    self._main.update(entity_id)
+
+
+class AdmissionOptimizer(ABC):
+    """Scala 787-812: an optimizer for the size of the composite strategy's admission
+    window."""
+
+    @staticmethod
+    def create(
+        initial_limit: int,
+        optimizer: CompositePassivationStrategy.HillClimbingAdmissionOptimizer
+        | CompositePassivationStrategy.NoAdmissionOptimizer,
+    ) -> AdmissionOptimizer:
+        """Scala 766-779 (``AdmissionOptimizer.apply``)."""
+        match optimizer:
+            case CompositePassivationStrategy.HillClimbingAdmissionOptimizer(
+                adjust_multiplier, initial_step, restart_threshold, step_decay
+            ):
+                return HillClimbingAdmissionOptimizer(
+                    initial_limit, adjust_multiplier, initial_step, restart_threshold, step_decay
+                )
+            case _:
+                return NoAdmissionOptimizer()
+
+    @abstractmethod
+    def record_active(self) -> None:
+        """Scala 792: an entity was accessed that is already active."""
+
+    @abstractmethod
+    def record_passive(self) -> None:
+        """Scala 797: an entity was accessed that was passive (needed to be activated)."""
+
+    @abstractmethod
+    def update_limit(self, new_limit: int) -> None:
+        """Scala 803: the per-shard limit has been updated."""
+
+    @abstractmethod
+    def calculate_adjustment(self) -> float:
+        """Scala 811: the adjustment to the window's proportion, positive to grow it, negative
+        to shrink it, and 0.0 for none."""
+
+
+class NoAdmissionOptimizer(AdmissionOptimizer):
+    """Scala 820-825: the window's proportion is not optimized."""
+
+    def record_active(self) -> None:
+        pass
+
+    def record_passive(self) -> None:
+        pass
+
+    def update_limit(self, new_limit: int) -> None:
+        pass
+
+    def calculate_adjustment(self) -> float:
+        return 0.0
+
+
+class HillClimbingAdmissionOptimizer(AdmissionOptimizer):
+    """Scala 833-870: optimizes the window with a simple hill-climbing algorithm."""
+
+    def __init__(
+        self,
+        initial_limit: int,
+        adjust_multiplier: float,
+        initial_step: float,
+        restart_threshold: float,
+        step_decay: float,
+    ) -> None:
+        self._adjust_multiplier = adjust_multiplier
+        self._initial_step = initial_step
+        self._restart_threshold = restart_threshold
+        self._step_decay = step_decay
+        self._adjust_size = adjust_multiplier * initial_limit
+        self._accesses = 0
+        self._active_accesses = 0
+        self._previous_active_rate = 0.0
+        self._next_step = -initial_step  # start in decreasing direction
+
+    def record_active(self) -> None:
+        self._accesses += 1
+        self._active_accesses += 1
+
+    def record_passive(self) -> None:
+        self._accesses += 1
+
+    def update_limit(self, new_limit: int) -> None:
+        self._adjust_size = self._adjust_multiplier * new_limit
+
+    def calculate_adjustment(self) -> float:
+        if self._accesses < self._adjust_size:
+            return 0.0
+        active_rate = self._active_accesses / self._accesses
+        delta = active_rate - self._previous_active_rate
+        adjustment = self._next_step if delta >= 0 else -self._next_step
+        direction = 1 if adjustment >= 0 else -1
+        restart = abs(delta) >= self._restart_threshold
+        self._next_step = (
+            self._initial_step * direction if restart else adjustment * self._step_decay
+        )
+        self._previous_active_rate = active_rate
+        self._accesses = 0
+        self._active_accesses = 0
+        return adjustment
+
+
+class AdmissionFilter(ABC):
+    """Scala 893-917: the filter for admitting entities to the composite strategy's main
+    area."""
+
+    @staticmethod
+    def create(
+        initial_capacity: int,
+        filter: CompositePassivationStrategy.FrequencySketchAdmissionFilter
+        | CompositePassivationStrategy.AlwaysAdmissionFilter,
+    ) -> AdmissionFilter:
+        """Scala 876-885 (``AdmissionFilter.apply``)."""
+        match filter:
+            case CompositePassivationStrategy.FrequencySketchAdmissionFilter(
+                width_multiplier, reset_multiplier, depth, counter_bits
+            ):
+                return FrequencySketchAdmissionFilter.create(
+                    initial_capacity, width_multiplier, reset_multiplier, depth, counter_bits
+                )
+            case _:
+                return AlwaysAdmissionFilter()
+
+    @abstractmethod
+    def update_capacity(self, new_capacity: int) -> None:
+        """Scala 899: the capacity, the per-shard limit, has been updated."""
+
+    @abstractmethod
+    def update(self, entity_id: str) -> None:
+        """Scala 905: an entity has been accessed."""
+
+    @abstractmethod
+    def admit(self, candidate: str, selected: str) -> bool:
+        """Scala 916: whether the candidate the window dropped enters the main area in place of
+        the entity the main area selected. Whichever is not admitted or retained is
+        passivated."""
+
+
+class AlwaysAdmissionFilter(AdmissionFilter):
+    """Scala 925-929: every candidate is admitted to the main area."""
+
+    def update_capacity(self, new_capacity: int) -> None:
+        pass
+
+    def update(self, entity_id: str) -> None:
+        pass
+
+    def admit(self, candidate: str, selected: str) -> bool:
+        return True
+
+
+class FrequencySketchAdmissionFilter(AdmissionFilter):
+    """Scala 957-976: admits a candidate more frequent than the selected entity. The sketch is
+    recreated, so its counts reset, whenever the capacity changes."""
+
+    @staticmethod
+    def create(  # pyright: ignore[reportIncompatibleMethodOverride]
+        initial_capacity: int,
+        width_multiplier: int,
+        reset_multiplier: float,
+        depth: int,
+        counter_bits: int,
+    ) -> AdmissionFilter:
+        """Scala 937-949 (``FrequencySketchAdmissionFilter.apply``): the fast sketch for a depth
+        and counter size of 4. Scala's companion objects are unrelated, so this ``create``
+        does not override ``AdmissionFilter.create``."""
+        if depth == 4 and counter_bits == 4:
+            return FastFrequencySketchAdmissionFilter(
+                initial_capacity, width_multiplier, reset_multiplier
+            )
+        return FrequencySketchAdmissionFilter(
+            initial_capacity, width_multiplier, reset_multiplier, depth, counter_bits
+        )
+
+    def __init__(
+        self,
+        initial_capacity: int,
+        width_multiplier: int,
+        reset_multiplier: float,
+        depth: int,
+        counter_bits: int,
+    ) -> None:
+        self._width_multiplier = width_multiplier
+        self._reset_multiplier = reset_multiplier
+        self._depth = depth
+        self._counter_bits = counter_bits
+        self._frequency_sketch = self._create_sketch(initial_capacity)
+
+    def _create_sketch(self, capacity: int) -> FrequencySketch:
+        return FrequencySketch.create(
+            capacity,
+            self._width_multiplier,
+            self._reset_multiplier,
+            self._depth,
+            self._counter_bits,
+        )
+
+    def update_capacity(self, new_capacity: int) -> None:
+        self._frequency_sketch = self._create_sketch(new_capacity)
+
+    def update(self, entity_id: str) -> None:
+        self._frequency_sketch.increment(entity_id)
+
+    def admit(self, candidate: str, selected: str) -> bool:
+        sketch = self._frequency_sketch
+        return sketch.frequency(candidate) > sketch.frequency(selected)
+
+
+class FastFrequencySketchAdmissionFilter(AdmissionFilter):
+    """Scala 984-1001: ``FrequencySketchAdmissionFilter`` over the fast sketch (a depth of 4
+    and 4-bit counters)."""
+
+    def __init__(
+        self, initial_capacity: int, width_multiplier: int, reset_multiplier: float
+    ) -> None:
+        self._width_multiplier = width_multiplier
+        self._reset_multiplier = reset_multiplier
+        self._frequency_sketch = self._create_sketch(initial_capacity)
+
+    def _create_sketch(self, capacity: int) -> FastFrequencySketch:
+        return FastFrequencySketch.create(capacity, self._width_multiplier, self._reset_multiplier)
+
+    def update_capacity(self, new_capacity: int) -> None:
+        self._frequency_sketch = self._create_sketch(new_capacity)
+
+    def update(self, entity_id: str) -> None:
+        self._frequency_sketch.increment(entity_id)
+
+    def admit(self, candidate: str, selected: str) -> bool:
+        sketch = self._frequency_sketch
+        return sketch.frequency(candidate) > sketch.frequency(selected)

@@ -184,6 +184,14 @@ class MemberDowned(MemberEvent): ...
 
 
 @dataclass(frozen=True)
+class MemberPreparingForShutdown(MemberEvent): ...
+
+
+@dataclass(frozen=True)
+class MemberReadyForShutdown(MemberEvent): ...
+
+
+@dataclass(frozen=True)
 class MemberRemoved(MemberEvent):
     previous_status: MemberStatus
 
@@ -605,6 +613,10 @@ def diff_member_events(old: MembershipState, new: MembershipState) -> list[Membe
                 events.append(MemberExited(m))
             case "down":
                 events.append(MemberDowned(m))
+            case "preparing_for_shutdown":
+                events.append(MemberPreparingForShutdown(m))
+            case "ready_for_shutdown":
+                events.append(MemberReadyForShutdown(m))
             case "removed":
                 pass
     return events

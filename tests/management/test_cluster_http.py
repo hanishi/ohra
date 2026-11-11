@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from contextlib import AsyncExitStack
 
 from ohra import Management
 from ohra.cluster.core import Cluster
+from ohra.cluster.gossip import Member
 from ohra.cluster.sharding import shard_id_of
+from ohra.management.cluster_http import member_json
 from ohra.management.http import get
 from ohra.patterns import ask
+from ohra.remote import UniqueAddress
 
 from ..cluster.test_cluster import all_up, cluster_node, crash, unreachable_ports
 from ..cluster.test_cluster_sharding import Count, ref
@@ -106,3 +110,9 @@ async def test_mutating_routes_are_405():
             assert (await reader.readline()).startswith(b"HTTP/1.1 405")
             writer.close()
             await writer.wait_closed()
+
+
+def test_member_json_names_the_shutdown_statuses_as_pekko():
+    a = Member(UniqueAddress("127.0.0.1", 1, 11, "s"), 1, "preparing_for_shutdown")
+    assert member_json(a)["status"] == "PreparingForShutdown"
+    assert member_json(replace(a, status="ready_for_shutdown"))["status"] == "ReadyForShutdown"

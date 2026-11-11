@@ -141,7 +141,7 @@
 | `LeaseSettings`, `TimeoutSettings` (`heartbeat-timeout`, `heartbeat-interval`, `lease-operation-timeout`), `TimeoutSettings(config)` | same, snake_case: `heartbeat_timeout`, `heartbeat_interval`, `operation_timeout`; `TimeoutSettings.create(...)` |
 | `LeaseUsageSettings` | same |
 | `LeaseException`, `LeaseTimeoutException` | `LeaseError`, `LeaseTimeoutError` |
-| `TestLease`, `TestLeaseExt`, `TestLeaseActor`, `TestLeaseActorClient`, `TestLeaseActorClientExt` | same, from `ohra.testkit` |
+| `TestLease`, `TestLeaseExt`, `TestLeaseActor`, `TestLeaseActorClient`, `TestLeaseActorClientExt` | same, from `ohra.testkit`; `TestLease.config` is `TestLease.register(system)` and `getCurrentCallback()` is `current_callback()` |
 
 ---
 

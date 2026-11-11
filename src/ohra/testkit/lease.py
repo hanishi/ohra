@@ -118,8 +118,10 @@ class TestLease(Lease):
         self, lease_lost_callback: Callable[[BaseException | None], None] | None = None
     ) -> bool:
         """``acquire()`` and ``acquire(callback)`` (``TestLease.scala`` 92-96 and 108-111). The
-        result is awaited through ``asyncio.shield``: ``pipe_to_self`` cancels the awaitable
-        when the actor stops, and that must not cancel the test's promise."""
+        callback is set and ``AcquireReq`` sent when the coroutine first runs, not when
+        ``acquire(cb)`` is called. The result is awaited through ``asyncio.shield``:
+        ``pipe_to_self`` cancels the awaitable when the actor stops, and that must not cancel the
+        test's promise."""
         if lease_lost_callback is not None:
             self._current_callback = lease_lost_callback
         log.info("acquire, current response %s", self._next_acquire_result)

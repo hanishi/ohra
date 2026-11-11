@@ -5,7 +5,7 @@ instance for the same name, config path and owner (105), different instance for 
 name (111) and owner (117), missing lease-class (123), unknown lease-class (129).
 
 Differences:
-- registration replaces the config blocks (D7);
+- registration replaces the config blocks (see appendix B);
 - ``LeaseB``'s ``ActorSystem`` constructor parameter is a closure;
 - "missing lease-class" becomes "not registered", and raises ``ValueError``;
 - "unknown lease-class" becomes "the factory raises";

@@ -1,7 +1,7 @@
 """Pekko's ``coordination`` module: the lease API (``org.apache.pekko.coordination.lease``).
 
 Implementations are registered with ``LeaseProvider(system).register``, not loaded by class
-name from the config (deviation D7).
+name from the config (see appendix B).
 """
 
 from __future__ import annotations
@@ -121,7 +121,7 @@ class Lease(ABC):
 class LeaseProvider:
     """Pekko's ``scaladsl.LeaseProvider`` extension (``LeaseProvider.scala`` 34-124):
     ``LeaseProvider(system)`` is the one instance per system, on any system. Implementations are
-    registered, not loaded by class name from the config (D7)."""
+    registered, not loaded by class name from the config (see appendix B)."""
 
     _registered: dict[
         str, tuple[Callable[[LeaseSettings], Lease], TimeoutSettings, Mapping[str, object]]

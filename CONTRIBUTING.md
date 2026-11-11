@@ -81,7 +81,7 @@ npx --yes -p typescript@7.0.2 tsc --noEmit --strict --target es2022 --lib es2022
 - `ext/`: `fastapi.py`, `postgres.py` (`PostgresStore`, durable state for clusters) and `shm.py`, integrations outside the core.
 - `testkit/`: Pekko's actor-testkit-typed: `actor_testkit.py`, `probe.py` (`TestProbe`, `FishingOutcomes`), `manual_time.py` (`ManualTime`, `ExplicitlyTriggeredScheduler`), `settings.py`, `conductor.py` (`TestConductor`, the barriers), `multi_node_spec.py` (`MultiNodeConfig`, `MultiNodeSpec`, `multi_node_spec`), `lease.py` (`TestLease`, `TestLeaseExt`), `lease_actor.py` (`TestLeaseActor` and its client), and `pytest_plugin.py`, the only module that imports pytest.
 - `docs/book/`: the documentation, one chapter per layer with Mermaid diagrams; README.md is only the front page.
-- Public names are importable from `ohra`, and also from the subpackage they belong to (`ohra.cluster`, `ohra.cluster.sharding`, `ohra.remote`). The exception is the test kit, importable only from `ohra.testkit`, as Pekko ships it as a module of its own.
+- Public names are importable from `ohra`, and also from the subpackage they belong to (`ohra.cluster`, `ohra.cluster.sharding`, `ohra.coordination`, `ohra.remote`). The exception is the test kit, importable only from `ohra.testkit`, as Pekko ships it as a module of its own.
 
 ## Style
 

@@ -123,10 +123,17 @@ sequenceDiagram
 
 ### Sharding in one process
 
-`Sharding.init(Entity(key, create))` is a shard region: one entity actor per id, created by its first message, passivated when idle or when it asks, with messages that arrive while it is passivating buffered for the next incarnation. An entity that stops on its own, by returning `Behaviors.stopped()`, loses what is queued behind it, as in Pekko, so an entity should passivate rather than stop itself. This is the region layer of Apache Pekko's `ClusterSharding` inside one process, which is what most single-node apps use it for: address by id, create on demand, and keep only hot entities in memory.
+`Sharding.init(Entity(key, create))` is a shard region: one entity actor per id, created by its first message, passivated by the [passivation strategy](#passivation-strategies) (idle for 120 s unless set otherwise) or when it asks, with messages that arrive while it is passivating buffered for the next incarnation. An entity that stops on its own, by returning `Behaviors.stopped()`, loses what is queued behind it, as in Pekko, so an entity should passivate rather than stop itself. This is the region layer of Apache Pekko's `ClusterSharding` inside one process, which is what most single-node apps use it for: address by id, create on demand, and keep only hot entities in memory.
 
 ```python
-from ohra import Entity, EntityContext, EntityTypeKey, Sharding
+from ohra import (
+    ClusterShardingSettings,
+    Entity,
+    EntityContext,
+    EntityTypeKey,
+    PassivationStrategySettings,
+    Sharding,
+)
 
 Cart = EntityTypeKey[Command]("Cart")
 
@@ -136,7 +143,11 @@ def cart(entity: EntityContext[Command]) -> Behavior[Command]:
     return counter()
 
 
-region = Sharding.init(Entity(Cart, cart).with_passivate_after(30.0))
+lru = PassivationStrategySettings.defaults.with_active_entity_limit(10_000)
+settings = ClusterShardingSettings().with_passivation_strategy(
+    lru.with_least_recently_used_replacement()
+)
+region = Sharding.init(Entity(Cart, cart).with_settings(settings))
 ```
 
 Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "cart-42")` gives an `EntityRef`, an `ActorRef` that `tell`s and `ask`s the entity whether or not it exists yet. `GetShardRegionState` asks the region which entities are live. Under the region, as in Pekko, a Shard actor per shard id hosts its entities; the same Shards serve the cluster-wide regions of the "Sharding across nodes" section. `GetShardRegionState` is answered through a child that asks every Shard, so the reply arrives once all have answered or after `shard_region_query_timeout`.
@@ -153,7 +164,7 @@ region = ClusterSharding(system).init(Entity(COUNTER, lambda entity: counter()))
 print(await ask(ClusterSharding(system).entity_ref_for(COUNTER, "alice"), CountUp, timeout=3))
 ```
 
-Entities are in memory: a moved or handed-off entity starts fresh on its new node, and `Behaviors.persisted` is how state outlives that. A rebalance can drop messages that reach the old host in its hand-off window, as Pekko's does; they are dead letters, never silent. `ClusterShardingSettings` carries Pekko's `number_of_shards`, `retry_interval`, `rebalance_interval`, `handoff_timeout`, `shard_start_timeout`, `buffer_size`, `rebalance_absolute_limit`, `rebalance_relative_limit` and `coordinator_singleton_settings` (the coordinator's `ClusterSingletonSettings`), plus `passivate_after` and `shard_region_query_timeout`. A coordinator that fails on a message restarts at once, as Pekko's does, and the regions register with the new one. A region whose buffer is full drops a message for a shard with no known home into dead letters, and still asks for that shard's home.
+Entities are in memory: a moved or handed-off entity starts fresh on its new node, and `Behaviors.persisted` is how state outlives that. A rebalance can drop messages that reach the old host in its hand-off window, as Pekko's does; a message that reaches a shard handing off is unhandled, and a message buffered for a passivating entity is dropped when its shard stops or hands off. `ClusterShardingSettings` carries Pekko's `number_of_shards`, `retry_interval`, `rebalance_interval`, `handoff_timeout`, `shard_start_timeout`, `buffer_size`, `rebalance_absolute_limit`, `rebalance_relative_limit` and `coordinator_singleton_settings` (the coordinator's `ClusterSingletonSettings`), plus `shard_region_query_timeout`, `passivation_strategy_settings`, `lease_settings`, `verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff` and `shard_failure_backoff`. The last two are unused until remembered entities arrive. A coordinator that fails on a message restarts at once, as Pekko's does, and the regions register with the new one. A region whose buffer is full drops a message for a shard with no known home into dead letters, and still asks for that shard's home.
 
 The coordinator's reads and writes of its state are tuned with six more fields. Their defaults are Pekko's.
 
@@ -208,9 +219,7 @@ Each setting has a Pekko key in a strategy's section under `pekko.cluster.shardi
 | `admission.filter` | `AdmissionSettings.with_filter(FrequencySketchSettings)` | none |
 | `admission.frequency-sketch.depth`, `counter-bits`, `width-multiplier`, `reset-multiplier` | `FrequencySketchSettings` fields of the same names | 4, 4, 4, 10.0 |
 
-Pekko's `passivation.strategy` names a strategy section. The three Pekko ships are constants here, and any other is built with the builders: `PassivationStrategySettings.default_idle_strategy` is idle passivation after 120 s, `default_strategy` is the composite with a limit of 100_000, a least recently used window with the hill-climbing optimizer, the frequency sketch filter and a two-level segmented main area of proportions 0.2 and 0.8, and `disabled` passivates nothing. `ClusterShardingSettings()` carries `default_idle_strategy`, though for now nothing passivates by it: see below. `with_no_passivation_strategy()` is `disabled`.
-
-For now the shards still passivate by `passivate_after`, which is off by default, and `passivation_strategy_settings` is not read yet. The settings and the strategies they resolve to exist, and the shard does not run them yet.
+Pekko's `passivation.strategy` names a strategy section. The three Pekko ships are constants here, and any other is built with the builders: `PassivationStrategySettings.default_idle_strategy` is idle passivation after 120 s, `default_strategy` is the composite with a limit of 100_000, a least recently used window with the hill-climbing optimizer, the frequency sketch filter and a two-level segmented main area of proportions 0.2 and 0.8, and `disabled` passivates nothing. `ClusterShardingSettings()` carries `default_idle_strategy`; the shard passivates by it. `with_no_passivation_strategy()` is `disabled`.
 
 ```python
 from ohra.cluster.sharding import ClusterShardingSettings, PassivationStrategySettings
@@ -226,6 +235,86 @@ print(settings.passivation_strategy_settings.idle_entity_settings)
 ```
 PassivationStrategySettings.IdleSettings(timeout=600.0, interval=None)
 ```
+
+### The shard
+
+A shard hosts the entities of one shard id. Both `Sharding.init` and the cluster regions run it. It follows Pekko's `Shard` with remembered entities off.
+
+- **Entity states.** An entity is `NoState`, `Active` or `Passivating`. The first message makes it `Active`. `Passivate` makes it `Passivating`, and its termination makes it `NoState` again. The remember-entity states (`RememberingStart`, `RememberingStop`, `RememberedButNotCreated`, `WaitingForRestart`) are the ones remembered entities will use.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoState
+    NoState --> Active: first message
+    Active --> Passivating: Passivate
+    Passivating --> NoState: entity stopped
+    Passivating --> Passivating: message buffered
+```
+
+- **Buffering.** Messages for a `Passivating` entity wait in a buffer and go to its next incarnation. `buffer_size` caps them in total across the shard's entities. Past the cap a message is dropped and published as `Dropped` on the event stream.
+- **Idle passivation.** `ClusterShardingSettings()` passivates an entity after 120 s without a message.
+- **The active-entity limit.** A limit of the region is divided among the shards the region has, so a shard's share changes when a shard starts or is handed off. The region tells its shards the count with `ShardsUpdated`, and `SetActiveEntityLimit(limit)` sent to a region sets the limit of its shards at run time.
+- **Hand-off.** On `HandOff`, the shard starts a `HandOffStopper` that sends the entities the stop message (`Entity.with_stop_message`) or, with none, stops each after its pending messages. It warns after 5 s if entities are left, and stops them at `max(handoff_timeout - 5, 1)` seconds. The shard replies `ShardStopped` once all have terminated. Messages that reach the shard meanwhile are unhandled.
+- **The lease.** `ClusterShardingSettings.with_lease_settings(LeaseUsageSettings("my-lease"))` makes every shard acquire a [lease](05-cluster.md#leases) before it starts its entities. Its name is `<system>-shard-<type>-<shard id>` and its owner is `system@host:port`. A failed acquire is retried after `lease_retry_interval`, 5 s by default. Messages that arrive meanwhile are stashed. A lease that is lost stops the shard and its entities at once, and the region starts it again with the next message for it.
+- **Full cluster shutdown.** Once a member is preparing for shutdown, the coordinator stops rebalancing, the regions ignore `BeginHandOff` and skip their graceful shutdown, and a shard that gets `HandOff` stops its entities and itself at once, without a `HandOffStopper`. [Chapter 5](05-cluster.md#full-cluster-shutdown) has the sequence.
+- **Stats.** `GetShardRegionStats(reply_to)` sent to a region answers `ShardRegionStats(stats, failed)`: the entity count of each shard, and the shards that did not answer within `shard_region_query_timeout`. `GetClusterShardingStats(timeout, reply_to)` sent to a cluster region gathers every region's stats through the coordinator and answers `ClusterShardingStats`, keyed by node address.
+
+```python
+import asyncio
+from dataclasses import dataclass
+
+from ohra import (
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    ClusterShardingSettings,
+    Entity,
+    EntityContext,
+    EntityTypeKey,
+    GetShardRegionStats,
+    PassivationStrategySettings,
+    Sharding,
+    ask,
+)
+
+
+@dataclass(frozen=True)
+class Ping:
+    reply_to: ActorRef[str]
+
+
+PINGED = EntityTypeKey[Ping]("Pinged")
+
+
+def pinged(entity: EntityContext[Ping]) -> Behavior[Ping]:
+    def on_ping(_ctx: object, msg: Ping) -> Behavior[Ping]:
+        msg.reply_to.tell(entity.entity_id)
+        return Behaviors.same
+
+    return Behaviors.receive(on_ping)
+
+
+async def main() -> None:
+    lru = PassivationStrategySettings.defaults.with_active_entity_limit(2)
+    settings = ClusterShardingSettings(number_of_shards=1).with_passivation_strategy(
+        lru.with_least_recently_used_replacement()
+    )
+    entity = Entity(PINGED, pinged).with_settings(settings)
+    async with ActorSystem(Sharding.init(entity), "shop") as system:
+        for name in ("a", "b", "c"):
+            await ask(Sharding.entity_ref_for(system, name), Ping, timeout=1)
+        print(await ask(system, GetShardRegionStats, timeout=1))
+
+
+asyncio.run(main())
+```
+
+```
+ShardRegionStats(stats={'0': 2}, failed=frozenset())
+```
+
+The limit is 2 and one shard holds all three entities, so touching `c` passivated `a`, the least recently used.
 
 ---
 

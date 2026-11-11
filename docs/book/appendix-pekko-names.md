@@ -74,6 +74,15 @@
 | `PassivationStrategySettings.AdmissionSettings` (`withFilter`, `withWindow`), `FrequencySketchSettings`, `HillClimbingSettings`, `WindowSettings` (`withInitialProportion`, `withMinimumProportion`, `withMaximumProportion`, `withOptimizer`, `withPolicy`) | the same nested names on `PassivationStrategySettings.AdmissionSettings`, with snake_case builders |
 | `ClusterShardingSettings.withPassivationStrategy(settings)`, `withNoPassivationStrategy` | `ClusterShardingSettings.with_passivation_strategy(settings)`, `with_no_passivation_strategy()` |
 | `pekko.cluster.sharding.passivation.strategy = default-idle-strategy / default-strategy / none` | `PassivationStrategySettings.default_idle_strategy / default_strategy / disabled` |
+| `Shard` (internal), `Shard.EntityState` and its states, `Shard.Entities` | `_Shard` in `shard.py` (internal); the states and `Entities` in `entities.py` |
+| `util.MessageBufferMap` | `ohra.util.message_buffer.MessageBufferMap` |
+| `ShardRegion.HandOffStopper`, `ShardInitialized`, `ShardsUpdated` | internal, in `shard.py`: `hand_off_stopper`, `ShardInitialized`, `ShardsUpdated` |
+| `ShardRegion.SetActiveEntityLimit` | `SetActiveEntityLimit` |
+| `ShardRegion.GetShardRegionStats`, `ShardRegionStats` | `GetShardRegionStats(reply_to)`, `ShardRegionStats(stats, failed)` |
+| `ShardRegion.GetClusterShardingStats(timeout)`, `ClusterShardingStats`; typed `GetClusterShardingStats(entityTypeKey, timeout, replyTo)` | `GetClusterShardingStats(timeout, reply_to)`, `ClusterShardingStats`; `region.tell(GetClusterShardingStats(timeout, reply_to))` |
+| `Shard.GetShardStats`, `ShardStats` | `GetShardStats(reply_to)`, `ShardStats(shard_id, entity_count)` |
+| `pekko.cluster.sharding.use-lease`, `lease-retry-interval`; `ClusterShardingSettings.withLeaseSettings` | `ClusterShardingSettings.lease_settings`, a `LeaseUsageSettings`; `with_lease_settings(...)` |
+| `verbose-debug-logging`, `fail-on-invalid-entity-state-transition`, `entity-restart-backoff`, `shard-failure-backoff` | `ClusterShardingSettings.verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff`, `shard_failure_backoff` |
 | `DistributedData(system).replicator`, `selfUniqueAddress` | `DistributedData(system).replicator`, `self_unique_address`; raises `RuntimeError` on a system without `cluster=` |
 | `DistributedData.withReplicatorMessageAdapter[Command, A](factory)` | `DistributedData.with_replicator_message_adapter(factory, unexpected_ask_timeout=20.0)` |
 | `ReplicatorMessageAdapter.askUpdate / askGet / askDelete / askReplicaCount / subscribe / unsubscribe` | `ReplicatorMessageAdapter[M, A].ask_update / ask_get / ask_delete / ask_replica_count / subscribe / unsubscribe` |

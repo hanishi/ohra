@@ -195,7 +195,7 @@ It prints:
 - **It does not stop the nodes.** Wait until every member that was Up sees itself `ready_for_shutdown`, then stop them and start the new version. A graceful leave from a ready node can be lost: ReadyForShutdown outranks Leaving when two views of a member merge, as in Pekko, so a leave that is concurrent with any other change to the membership, such as a move by the leader or another node's leave, is overwritten, and that node's shutdown waits out the `cluster-exiting` timeout (10 s) with a warning. The example therefore stops the nodes one at a time and waits until the others no longer list the one that left.
 - Every node must run an ohra version that knows the two statuses, because an earlier version cannot merge gossip that holds them.
 - **The singleton** stops handing over while any member is preparing or ready, see [chapter 6](06-singleton.md).
-- **Cluster sharding** does not take part yet: its coordinator moves no more, as a singleton, but its regions still hand shards off on the way down, so stopping a sharded cluster this way can wait out `cluster-sharding-shutdown-region` on the nodes that stop last.
+- **Cluster sharding** takes part, see [chapter 7](07-sharding.md#the-shard). Its coordinator stops rebalancing, its regions stop handing off, and a shard told to hand off stops at once, without waiting for its entities.
 
 ### Split-brain resolver
 
@@ -222,7 +222,7 @@ All four detect indirectly connected nodes, which are marked unreachable over so
 
 ### Leases
 
-A lease lets one owner at a time hold a named resource. The owner holds it in a store outside the cluster, such as a Kubernetes custom resource or a database row, so a node on the wrong side of a partition cannot go on acting as if it still owned the resource. Apache Pekko's singleton, sharding and split-brain resolver can each take a lease for this. In ohra nothing acquires a lease yet; this section covers the API they will use.
+A lease lets one owner at a time hold a named resource. The owner holds it in a store outside the cluster, such as a Kubernetes custom resource or a database row, so a node on the wrong side of a partition cannot go on acting as if it still owned the resource. Apache Pekko's singleton, sharding and split-brain resolver can each take a lease for this. In ohra, sharding's shards acquire one, with `lease_settings` ([chapter 7](07-sharding.md#the-shard)); this section covers the API.
 
 ohra ships no store-backed implementation. You subclass `Lease`, which has three methods:
 

@@ -38,6 +38,7 @@ from ohra import (  # noqa: E402
     ClusterBootstrapSettings,
     ClusterSettings,
     ClusterSharding,
+    ClusterShardingSettings,
     Entity,
     EntityContext,
     EntityRef,
@@ -45,6 +46,7 @@ from ohra import (  # noqa: E402
     KubernetesApiServiceDiscovery,
     KubernetesApiSettings,
     Passivate,
+    PassivationStrategySettings,
     Management,
     ManagementSettings,
     SplitBrainResolverSettings,
@@ -127,7 +129,13 @@ def cart_entity(entity: EntityContext[CartCmd]) -> Behavior[CartCmd]:
 @Behaviors.setup
 def guardian(ctx: ActorContext[None]) -> Behavior[None]:
     # the same on every pod
-    ClusterSharding(ctx.system).init(Entity(CART, cart_entity).with_passivate_after(IDLE_TIMEOUT))
+    ClusterSharding(ctx.system).init(
+        Entity(CART, cart_entity).with_settings(
+            ClusterShardingSettings().with_passivation_strategy(
+                PassivationStrategySettings.defaults.with_idle_entity_passivation(IDLE_TIMEOUT)
+            )
+        )
+    )
     return Behaviors.empty
 
 

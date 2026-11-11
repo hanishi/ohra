@@ -28,17 +28,22 @@ from .region import _ExitingProgress, region_behavior  # pyright: ignore[reportP
 from .passivation_settings import PassivationStrategySettings
 from .shard import (
     ClusterShardingSettings,
+    ClusterShardingStats,
     CurrentShardRegionState,
     Entity,
     EntityContext,
     EntityRef,
     EntityTypeKey,
+    GetClusterShardingStats,
     GetShardRegionState,
+    GetShardRegionStats,
     HandOff,
     Passivate,
+    SetActiveEntityLimit,
     ShardCommand,
     Sharding,
     ShardingEnvelope,
+    ShardRegionStats,
     ShardStopped,
     shard_id_of,
 )
@@ -51,21 +56,26 @@ if TYPE_CHECKING:
 __all__ = [
     "ClusterSharding",
     "ClusterShardingSettings",
+    "ClusterShardingStats",
     "CoordinatorState",
     "CurrentShardRegionState",
     "Entity",
     "EntityContext",
     "EntityRef",
     "EntityTypeKey",
+    "GetClusterShardingStats",
     "GetShardRegionState",
+    "GetShardRegionStats",
     "HandOff",
     "LeastShardAllocationStrategy",
     "Passivate",
     "PassivationStrategySettings",
+    "SetActiveEntityLimit",
     "ShardCommand",
     "ShardHomeAllocated",
     "ShardHomeDeallocated",
     "ShardRegionRegistered",
+    "ShardRegionStats",
     "ShardRegionTerminated",
     "ShardStopped",
     "Sharding",
@@ -105,7 +115,18 @@ class ClusterSharding:
             system.cluster_sharding = self
         return system.cluster_sharding
 
-    def init[M](self, entity: Entity[M]) -> ActorRef[ShardingEnvelope[M]]:
+    def init[M](
+        self, entity: Entity[M]
+    ) -> ActorRef[
+        ShardingEnvelope[M]
+        | GetShardRegionState
+        | GetShardRegionStats
+        | GetClusterShardingStats
+        | SetActiveEntityLimit
+    ]:
+        """The region of the entity type on this node, as Pekko Typed's ``init``. It takes the
+        envelopes, and the region queries and ``SetActiveEntityLimit`` that Pekko's region takes
+        as its own messages."""
         name = entity.type_key.name
         if name == "replicator":
             raise ValueError(

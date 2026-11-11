@@ -19,8 +19,13 @@ from ...cell import is_local_actor
 from ...signals import PostStop, PreRestart, Signal
 from .shard import (
     ClusterShardingSettings,
+    ClusterShardingStats,
+    GetClusterShardingStats,
+    GetShardRegionStats,
     HandOff,
+    ShardRegionStats,
     ShardStopped,
+    _ask_all,  # pyright: ignore[reportPrivateUsage]
 )
 from ..ddata import SelfUniqueAddress
 from ..ddata.distributed_data import ReplicatorMessageAdapter
@@ -30,6 +35,8 @@ from ..core import (
     Cluster,
     ClusterDomainEvent,
     CurrentClusterState,
+    MemberPreparingForShutdown,
+    MemberReadyForShutdown,
     MemberRemoved,
 )
 from ..core import Subscribe as ClusterSubscribe
@@ -384,13 +391,22 @@ class _DelayedShardRegionTerminated:
     region: str
 
 
-# Pekko's memberStatusOfInterest for coordinator placement
-_OF_INTEREST = frozenset({"up", "leaving", "exiting"})
+# The member statuses whose region may register. Pekko's isMember (734-738) takes self or Up only;
+# here a region may also register while its member is Leaving or Exiting, or prepares for a full
+# cluster shutdown, so the regions register again after a coordinator restart meanwhile.
+_OF_INTEREST = frozenset(
+    {"up", "leaving", "exiting", "preparing_for_shutdown", "ready_for_shutdown"}
+)
 
 
 def _is_at(ref_or_path: ActorRef[Any] | str, address: Address) -> bool:
     path = ref_or_path if isinstance(ref_or_path, str) else ref_or_path.path
     return path.startswith(address.root + "/")
+
+
+def _address_of(path: str) -> Address:
+    """The address of the node an actor path is on."""
+    return Address.parse(path[: path.index("/", len("ohra://"))])
 
 
 def by_age(members: Iterable[Member]) -> list[Member]:
@@ -513,6 +529,7 @@ class _Coordinator:
         self.rebalance_workers: dict[str, ActorRef[Any]] = {}
         self.waiting_for_local_region_to_terminate = False
         self.stop_now = False
+        self.preparing_for_shutdown = False
         # DDataShardCoordinator's
         self.replicator = ReplicatorMessageAdapter[Any, _StateRegister](
             ctx,
@@ -826,6 +843,7 @@ class _Coordinator:
     # --- ShardCoordinator: active (740-967) ------------------------------------------------------
 
     def active(self, msg: Any) -> Behavior[Any]:
+        """active (740-967). ``StopShards`` (1118) has no ohra counterpart."""
         match msg:
             case Register(region):
                 self.register(region)
@@ -838,6 +856,16 @@ class _Coordinator:
                     self.send_host_shard(shard, region)
             case MemberRemoved(member=m):
                 self.on_member_removed(m)
+            case MemberPreparingForShutdown() | MemberReadyForShutdown():
+                # 949-956
+                if not self.preparing_for_shutdown:
+                    self.log.info(
+                        "%s: Shard coordinator detected prepare for full cluster shutdown. No new "
+                        "rebalances will take place.",
+                        self.type_name,
+                    )
+                    self.ctx.timers.cancel("rebalance")
+                    self.preparing_for_shutdown = True
             case ClusterDomainEvent():
                 pass
             case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
@@ -848,9 +876,30 @@ class _Coordinator:
                 self.region_terminated(path)
             case _Terminate():
                 self.terminate()
+            case GetClusterShardingStats(timeout, reply_to):
+                self.cluster_sharding_stats(timeout, reply_to)
             case _:
                 pass
         return Behaviors.same
+
+    def cluster_sharding_stats(
+        self, timeout: float, reply_to: ActorRef[ClusterShardingStats]
+    ) -> None:
+        """active's GetClusterShardingStats (917-940): a child asks every alive region for its
+        stats within ``timeout``, and replies them by the address of each region's node, or
+        nothing when a region did not answer, as Pekko's ``recover`` of the failed
+        ``Future.sequence``. Pekko maps a local region's address to the cluster's self address;
+        an ohra path always carries its node's address."""
+
+        def done(responses: dict[str, ShardRegionStats], failed: frozenset[str]) -> None:
+            if failed:
+                reply_to.tell(ClusterShardingStats({}))
+            else:
+                regions = {_address_of(path): stats for path, stats in responses.items()}
+                reply_to.tell(ClusterShardingStats(regions))
+
+        regions = {p: self.refs[p] for p in self.alive_regions if p in self.refs}
+        self.ctx.spawn_anonymous(_ask_all(regions, GetShardRegionStats, timeout, done))
 
     # --- registration and shard homes ------------------------------------------------------------
 
@@ -1042,7 +1091,7 @@ class _Coordinator:
     def on_rebalance_message(self, msg: Any) -> None:
         match msg:
             case _RebalanceTick():
-                if self.state.regions:
+                if self.state.regions and not self.preparing_for_shutdown:
                     shards = self.strategy.rebalance(
                         dict(self.state.regions),
                         self.members_by_region(self.state.regions),

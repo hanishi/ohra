@@ -32,6 +32,7 @@ from ohra.cluster.sharding.coordinator import (
     CoordinatorState,
     GetShardHome,
     HostShard,
+    RegionStopped,
     Register,
     RegisterAck,
     ShardHome,
@@ -431,6 +432,50 @@ async def test_state_initialized_stashed_behind_an_update_unstashes_without_a_re
         coordinator.tell(GetShardHome("1", home.ref))
         assert await home.receive_message(1) == ShardHome("1", region.ref)
         await replicator.expect_no_message(0.1)  # no restart, so no second Get
+
+
+async def test_after_a_slow_first_write_the_stash_replays_in_arrival_order():
+    """Pekko's unbecomeAfterUpdate unstashAll()s, which prepends the classic stash to the mailbox:
+    what a replayed Register's own update stashes again keeps its place ahead of later messages."""
+    async with manual_node() as node:
+        replicator = node.probe()
+        a, b, c, d = (node.probe() for _ in range(4))
+        names = {a.ref.path: "A", b.ref.path: "B", c.ref.path: "C", d.ref.path: "D"}
+        coordinator = await active(node, replicator)
+        coordinator.tell(Register(a.ref))
+        update = await expect_update(replicator)  # held
+        coordinator.tell(Register(b.ref))
+        coordinator.tell(RegionStopped(b.ref.path))
+        coordinator.tell(Register(c.ref))
+        await settle(node)
+        updates = [update]
+        update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+        update = await expect_update(replicator)  # the replayed Register(B)'s, held
+        updates.append(update)
+        coordinator.tell(Register(d.ref))
+        await settle(node)
+        for _ in range(3):
+            update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+            update = await expect_update(replicator)
+            updates.append(update)
+        update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+        await replicator.expect_no_message(0.1)
+
+        events: list[str] = []
+        register = updates[0].initial
+        for u in updates:
+            before = set(register.value.regions)
+            register = u.modify(register)
+            after = set(register.value.regions)
+            events += [f"{names[p]} registered" for p in after - before]
+            events += [f"{names[p]} terminated" for p in before - after]
+        assert events == [
+            "A registered",
+            "B registered",
+            "B terminated",
+            "C registered",
+            "D registered",
+        ]
 
 
 # --- the review focus, on real nodes -------------------------------------------------------------

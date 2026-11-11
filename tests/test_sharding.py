@@ -16,6 +16,7 @@ from ohra import (
     ActorSystem,
     Behavior,
     Behaviors,
+    ClusterShardingSettings,
     CoordinatedShutdownSettings,
     CurrentShardRegionState,
     Entity,
@@ -23,6 +24,7 @@ from ohra import (
     EntityTypeKey,
     GetShardRegionState,
     Passivate,
+    PassivationStrategySettings,
     ShardCommand,
     Sharding,
     ShardingEnvelope,
@@ -137,15 +139,19 @@ def region(
     log: list[str],
     gate: asyncio.Event | None = None,
     stop_message: CounterCmd | None = None,
-    passivate_after: float | None = None,
+    idle_timeout: float | None = None,
     refs: list[tuple[ActorRef[ShardCommand], ActorRef[CounterCmd]]] | None = None,
     fail_ids: frozenset[str] = frozenset(),
 ) -> Behavior[ShardingEnvelope[CounterCmd] | GetShardRegionState]:
     entity = Entity(Counter, counter(log, gate, refs, fail_ids))
     if stop_message is not None:
         entity = entity.with_stop_message(stop_message)
-    if passivate_after is not None:
-        entity = entity.with_passivate_after(passivate_after)
+    if idle_timeout is not None:
+        entity = entity.with_settings(
+            ClusterShardingSettings().with_passivation_strategy(
+                PassivationStrategySettings.defaults.with_idle_entity_passivation(idle_timeout)
+            )
+        )
     return Sharding.init(entity)
 
 
@@ -285,9 +291,9 @@ async def test_failed_entity_is_recreated_on_next_message():
 # --- Task 3: idle passivation ----------------------------------------------------------------
 
 
-async def test_idle_entity_passivates_after_the_configured_time():
+async def test_an_idle_entity_is_passivated_by_the_idle_strategy():
     log: list[str] = []
-    async with ActorSystem(region(log, passivate_after=0.02), "s") as system:
+    async with ActorSystem(region(log, idle_timeout=0.02), "s") as system:
         a = Sharding.entity_ref_for(system, "a")
         a.tell(Add(1))
         await eventually(lambda: "stop a" in log)
@@ -295,9 +301,9 @@ async def test_idle_entity_passivates_after_the_configured_time():
         assert await ask(a, Get, timeout=1) == 0
 
 
-async def test_idle_timer_restarts_on_each_message():
+async def test_each_delivery_touches_the_entity_for_the_idle_strategy():
     log: list[str] = []
-    async with ActorSystem(region(log, passivate_after=0.05), "s") as system:
+    async with ActorSystem(region(log, idle_timeout=0.05), "s") as system:
         a = Sharding.entity_ref_for(system, "a")
         for _ in range(8):
             a.tell(Add(1))
@@ -370,7 +376,7 @@ async def test_empty_entity_id_is_rejected():
         assert await ask(a, Get, timeout=1) == 1
 
 
-async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_entity(
+async def test_region_stop_drops_messages_buffered_for_a_passivating_entity(
     caplog: pytest.LogCaptureFixture,
 ):
     caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
@@ -388,7 +394,7 @@ async def test_region_stop_dead_letters_messages_buffered_for_a_passivating_enti
         system.terminate()
         gate.set()
         await system.when_terminated()
-    assert any(
+    assert not any(
         r.getMessage() == "dead letter to ohra://s/user/a: Add(n=1)" for r in caplog.records
     )
 
@@ -416,7 +422,7 @@ async def test_entity_refs_for_the_same_id_are_equal():
         assert len({a1, a2, b}) == 2
 
 
-async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
+async def test_the_shard_buffer_is_bounded_in_total(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG, logger="ohra.dead_letters")
     log: list[str] = []
     gate = asyncio.Event()
@@ -427,15 +433,18 @@ async def test_passivation_buffer_is_bounded(caplog: pytest.LogCaptureFixture):
         await eventually(lambda: "got stop a" in log)
         a.tell(Add(1))
         a.tell(Add(2))
-        a.tell(Add(3))  # beyond the buffer: a dead letter
+        a.tell(Add(3))  # beyond the buffer: dropped
         # the shard has seen all three
-        await eventually(lambda: any("Add(n=3)" in r.getMessage() for r in caplog.records))
+        await eventually(
+            lambda: any("(Buffer for [a] is full)" in r.getMessage() for r in caplog.records)
+        )
         gate.set()
         # until then the full buffer rejects even a Get
         await eventually(lambda: log.count("start a") == 2)
         assert await ask(a, Get, timeout=1) == 3
     assert any(
-        r.getMessage() == "dead letter to ohra://s/user/a: Add(n=3)" for r in caplog.records
+        r.name == "ohra.dead_letters" and "(Buffer for [a] is full)" in r.getMessage()
+        for r in caplog.records
     )
 
 
@@ -523,6 +532,8 @@ def test_cluster_sharding_settings_are_validated():
         dict(buffer_size=0),
         dict(rebalance_relative_limit=0.0),
         dict(handoff_timeout=0.0),
+        dict(entity_restart_backoff=0.0),
+        dict(shard_failure_backoff=0.0),
     ):
         with pytest.raises(ValueError):
             ClusterShardingSettings(**bad)  # pyright: ignore[reportArgumentType]
@@ -533,21 +544,17 @@ def test_fluent_setters_apply_on_top_of_settings():
     entity = (
         Entity(Counter, counter([]))
         .with_settings(ClusterShardingSettings(number_of_shards=5))
-        .with_passivate_after(2.0)
         .with_buffer_size(7)
     )
     assert entity.effective_settings.number_of_shards == 5
-    assert entity.effective_settings.passivate_after == 2.0
     assert entity.effective_settings.buffer_size == 7
 
 
 def test_settings_set_after_the_fluent_setters_keep_them():
     entity = (
         Entity(Counter, counter([]))
-        .with_passivate_after(2.0)
         .with_buffer_size(7)
         .with_settings(ClusterShardingSettings(number_of_shards=5))
     )
     assert entity.effective_settings.number_of_shards == 5
-    assert entity.effective_settings.passivate_after == 2.0
     assert entity.effective_settings.buffer_size == 7

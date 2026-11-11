@@ -422,8 +422,8 @@ class Replies:
 
 def dropped_during(caplog: pytest.LogCaptureFixture) -> int:
     """Messages a hand-off dropped: the hosting region drops what it buffered between BeginHandOff
-    and HandOff, and a Shard already handing off dead-letters what reaches it late, as Pekko's do.
-    Never silent."""
+    and HandOff, and a Shard already handing off leaves what reaches it late unhandled, as Pekko's
+    do; both are logged on ``ohra.dead_letters``. Never silent."""
     return sum(
         1 for r in caplog.records if r.name == "ohra.dead_letters" and ("Count(" in r.getMessage())
     )

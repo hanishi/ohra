@@ -34,6 +34,7 @@ from ...remote.serialization import remotable
 from ...result import Failure, Success, Try
 from ...signals import PostStop, Signal, Terminated
 from ...util.message_buffer import MessageBufferMap
+from ..core import MemberEvent, MemberPreparingForShutdown, MemberReadyForShutdown, Subscribe
 from ..ddata.replicator import Replicator
 from ..ddata.settings import ReplicatorSettings
 from .entities import (
@@ -447,6 +448,7 @@ type _ShardCmd[T] = (
     | ShardsUpdated
     | _EntityTerminated
     | _PassivateIntervalTick
+    | MemberEvent
 )
 
 
@@ -454,7 +456,7 @@ class _Shard[T]:
     """Pekko's ``Shard`` actor (Shard.scala 424-1200), for one shard id of one entity type.
     Remembered entities wait for sub-project 10, so the shard is never remembering: it starts
     in ``awaiting_lease`` or ``idle``, and each method below leaves out its remember-store
-    branches. The member events of a full cluster shutdown (Task 6) are not ported yet.
+    branches.
 
     ``self.receive`` is Pekko's ``context.become``. Pekko's ``context.parent`` is ``region``,
     ``context.stop(self)`` is returning ``Behaviors.stopped()``, and a typed message has no
@@ -469,7 +471,8 @@ class _Shard[T]:
         stash: StashBuffer[Any],
     ) -> None:
         """Shard.scala 449-506. Pekko's ``Stash`` is ``stash``, and ``preStart`` is the end of
-        this constructor."""
+        this constructor. A system with no cluster has no member events, so a single-node
+        ``Sharding`` never prepares for shutdown."""
         self.ctx = ctx
         self.stash = stash
         self.entity = entity
@@ -488,6 +491,7 @@ class _Shard[T]:
         # Messages are buffered while an entity is passivating
         self.message_buffers = MessageBufferMap[str]()
         self.hand_off_stopper: ActorRef[Any] | None = None
+        self.preparing_for_shutdown = False
         self.passivation_strategy = EntityPassivationStrategy.create(
             self.settings, lambda: ctx.system.scheduler.current_time
         )
@@ -515,6 +519,9 @@ class _Shard[T]:
             lease_settings.lease_retry_interval if lease_settings is not None else 5.0  # not used
         )
         self.receive: Callable[[Any], Behavior[Any]] = self.idle
+        if ctx.system.cluster is not None:
+            for cls in (MemberPreparingForShutdown, MemberReadyForShutdown):
+                ctx.system.cluster.subscriptions.tell(Subscribe(ctx.self, cls))
         self.acquire_lease_if_needed()
 
     def behavior(self) -> Behavior[Any]:
@@ -544,7 +551,7 @@ class _Shard[T]:
         """Shard.scala 518-544. ShardInitialized is not sent back, so the region buffers the
         messages for this shard while it waits for the lease. Once acquired it goes straight
         to ``shard_initialized``: Pekko's ``tryLoadRememberedEntities`` (563-576) without a
-        remember store. The member events come with Task 6."""
+        remember store."""
         match msg:
             case _LeaseAcquireResult(True, _):
                 self.log.debug("%s: Lease acquired", self.type_name)
@@ -575,6 +582,8 @@ class _Shard[T]:
                 self.try_get_lease(self.lease)
             case _LeaseLost():
                 return self.receive_lease_lost(msg)
+            case MemberEvent():
+                self.receive_member_event(msg)
             case _:
                 if self.verbose_debug:
                     self.log.debug(
@@ -584,6 +593,16 @@ class _Shard[T]:
                     )
                 self.stash.stash(msg)
         return Behaviors.same
+
+    def receive_member_event(self, event: MemberEvent) -> None:
+        """Shard.scala 546-553."""
+        match event:
+            case MemberReadyForShutdown() | MemberPreparingForShutdown():
+                if not self.preparing_for_shutdown:
+                    self.log.info("%s: Preparing for shutdown", self.type_name)
+                    self.preparing_for_shutdown = True
+            case _:
+                pass
 
     def try_get_lease(self, lease: Lease) -> None:
         """Shard.scala 555-560."""
@@ -608,9 +627,10 @@ class _Shard[T]:
 
     def idle(self, msg: Any) -> Behavior[Any]:
         """Shard.scala 624-639, without the remember-entity commands, ``StartEntity`` and the
-        store's crash; the member events come with Task 6. ``Terminated`` is a signal, handled
-        in ``behavior``."""
+        store's crash. ``Terminated`` is a signal, handled in ``behavior``."""
         match msg:
+            case MemberEvent():
+                self.receive_member_event(msg)
             case _EntityTerminated(ref):
                 self.entity_terminated(ref)
             case HandOff():
@@ -661,7 +681,8 @@ class _Shard[T]:
                 reply_to.tell(ShardStats(self.shard_id, self.entities.size))
 
     def hand_off(self, reply_to: ActorRef[ShardStopped]) -> Behavior[Any]:
-        """Shard.scala 872-905, without the ``preparingForShutdown`` branch (Task 6)."""
+        """Shard.scala 872-905. While preparing for shutdown, an entity with no stop message is
+        stopped after its pending messages, as Pekko's ``PoisonPill``."""
         if self.hand_off_stopper is not None:
             self.log.warning(
                 "%s: HandOff shard [%s] received during existing handOff",
@@ -672,6 +693,20 @@ class _Shard[T]:
         self.log.debug("%s: HandOff shard [%s]", self.type_name, self.shard_id)
         # does conversion so only do once
         active_entities = self.entities.active_entities()
+        if self.preparing_for_shutdown:
+            self.log.info(
+                "%s: HandOff shard [%s] while preparing for shutdown. Stopping right away.",
+                self.type_name,
+                self.shard_id,
+            )
+            stop_message = self.entity.stop_message
+            for ref in active_entities:
+                if stop_message is None:
+                    self.ctx.stop(ref, after_pending=True)
+                else:
+                    ref.tell(stop_message)
+            reply_to.tell(ShardStopped(self.shard_id))
+            return Behaviors.stopped()
         if active_entities:
             entity_hand_off_timeout = self.settings.entity_hand_off_timeout
             self.log.debug(

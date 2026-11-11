@@ -37,6 +37,8 @@ from ..core import (
     MemberEvent,
     MemberExited,
     MemberLeft,
+    MemberPreparingForShutdown,
+    MemberReadyForShutdown,
     MemberRemoved,
     MemberUp,
 )
@@ -125,6 +127,7 @@ class _Region:
         self.logged_full_buffer_warning = False
         self.next_registration_delay = max(0.1, settings.retry_interval / 8)
         self.graceful_shutdown_in_progress = False
+        self.preparing_for_shutdown = False
         self.passivation_strategy = settings.passivation_strategy
         self.cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
         ctx.timers.start_timer_with_fixed_delay("retry", _Retry(), settings.retry_interval)
@@ -350,6 +353,11 @@ class _Region:
                     self.change_members(
                         [x for x in self.members_by_age if x.unique_address != m.unique_address]
                     )
+                case MemberReadyForShutdown() | MemberPreparingForShutdown():
+                    # ShardRegion.scala 801-805
+                    if not self.preparing_for_shutdown:
+                        self.log.info("%s. preparing for shutdown", self.type_name)
+                    self.preparing_for_shutdown = True
                 case MemberEvent():
                     pass
                 case RegisterAck(coordinator):
@@ -376,8 +384,17 @@ class _Region:
                         for shard in shards:
                             self.receive_shard_home(shard, region)
                 case BeginHandOff(shard, reply_to):
-                    self.region_by_shard.pop(shard, None)
-                    reply_to.tell(BeginHandOffAck(shard, self.ctx.self))
+                    # ShardRegion.scala 855-868
+                    self.log.debug("%s: BeginHandOff shard [%s]", self.type_name, shard)
+                    if not self.preparing_for_shutdown:
+                        self.region_by_shard.pop(shard, None)
+                        reply_to.tell(BeginHandOffAck(shard, self.ctx.self))
+                    else:
+                        self.log.debug(
+                            "%s: Ignoring begin handoff of shard [%s] as preparing to shutdown",
+                            self.type_name,
+                            shard,
+                        )
                 case HandOff(shard, reply_to):
                     dropped = self.shard_buffers.pop(shard, None)
                     if dropped:  # Pekko: avoid reordering buffered messages across a hand-off
@@ -416,6 +433,15 @@ class _Region:
                         self.register()
                         self.schedule_next_registration()
                 case _GracefulShutdown():
+                    # ShardRegion.scala 926-946
+                    if self.preparing_for_shutdown:
+                        self.log.debug(
+                            "%s: Skipping graceful shutdown of region and all its shards as "
+                            "cluster is preparing for shutdown",
+                            self.type_name,
+                        )
+                        self.exiting_done()
+                        return Behaviors.stopped()
                     self.graceful_shutdown_in_progress = True
                     self.send_graceful_shutdown_to_coordinator()
                 case ShardInitialized(shard):

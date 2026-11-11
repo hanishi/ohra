@@ -30,6 +30,8 @@ from ..core import (
     Cluster,
     ClusterDomainEvent,
     CurrentClusterState,
+    MemberPreparingForShutdown,
+    MemberReadyForShutdown,
     MemberRemoved,
 )
 from ..core import Subscribe as ClusterSubscribe
@@ -384,8 +386,12 @@ class _DelayedShardRegionTerminated:
     region: str
 
 
-# Pekko's memberStatusOfInterest for coordinator placement
-_OF_INTEREST = frozenset({"up", "leaving", "exiting"})
+# The member statuses whose region may register. Pekko's isMember (734-738) takes self or Up only;
+# here a region may also register while its member is Leaving or Exiting, or prepares for a full
+# cluster shutdown, so the regions register again after a coordinator restart meanwhile.
+_OF_INTEREST = frozenset(
+    {"up", "leaving", "exiting", "preparing_for_shutdown", "ready_for_shutdown"}
+)
 
 
 def _is_at(ref_or_path: ActorRef[Any] | str, address: Address) -> bool:
@@ -513,6 +519,7 @@ class _Coordinator:
         self.rebalance_workers: dict[str, ActorRef[Any]] = {}
         self.waiting_for_local_region_to_terminate = False
         self.stop_now = False
+        self.preparing_for_shutdown = False
         # DDataShardCoordinator's
         self.replicator = ReplicatorMessageAdapter[Any, _StateRegister](
             ctx,
@@ -826,6 +833,7 @@ class _Coordinator:
     # --- ShardCoordinator: active (740-967) ------------------------------------------------------
 
     def active(self, msg: Any) -> Behavior[Any]:
+        """active (740-967). ``StopShards`` (1118) has no ohra counterpart."""
         match msg:
             case Register(region):
                 self.register(region)
@@ -838,6 +846,16 @@ class _Coordinator:
                     self.send_host_shard(shard, region)
             case MemberRemoved(member=m):
                 self.on_member_removed(m)
+            case MemberPreparingForShutdown() | MemberReadyForShutdown():
+                # 949-956
+                if not self.preparing_for_shutdown:
+                    self.log.info(
+                        "%s: Shard coordinator detected prepare for full cluster shutdown. No new "
+                        "rebalances will take place.",
+                        self.type_name,
+                    )
+                    self.ctx.timers.cancel("rebalance")
+                    self.preparing_for_shutdown = True
             case ClusterDomainEvent():
                 pass
             case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
@@ -1042,7 +1060,7 @@ class _Coordinator:
     def on_rebalance_message(self, msg: Any) -> None:
         match msg:
             case _RebalanceTick():
-                if self.state.regions:
+                if self.state.regions and not self.preparing_for_shutdown:
                     shards = self.strategy.rebalance(
                         dict(self.state.regions),
                         self.members_by_region(self.state.regions),

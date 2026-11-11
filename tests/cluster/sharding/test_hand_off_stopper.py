@@ -163,13 +163,17 @@ async def test_the_warning_is_shorter_while_coordinated_shutdown_runs(
         release = asyncio.Event()
         shutdown.add_task("before-service-unbind", "hold", release.wait)
         running = shutdown.run(TestReason())
-        replies: TestProbe[ShardStopped] = kit.create_test_probe()
-        out: TestProbe[ActorRef[Any]] = kit.create_test_probe()
-        kit.spawn(parent([ignoring_entity()], replies.ref, out.ref, Note("x")))
-        await out.receive_message()
-        await manual.time_passes(5.1)
-        warns = [r.getMessage() for r in caplog.records if "not stopped after" in r.getMessage()]
-        assert len(warns) == 1
-        assert warns[0].endswith("is not handled? ")
-        release.set()
-        await running
+        try:
+            replies: TestProbe[ShardStopped] = kit.create_test_probe()
+            out: TestProbe[ActorRef[Any]] = kit.create_test_probe()
+            kit.spawn(parent([ignoring_entity()], replies.ref, out.ref, Note("x")))
+            await out.receive_message()
+            await manual.time_passes(5.1)
+            warns = [
+                r.getMessage() for r in caplog.records if "not stopped after" in r.getMessage()
+            ]
+            assert len(warns) == 1
+            assert warns[0].endswith("is not handled? ")
+        finally:
+            release.set()
+            await running

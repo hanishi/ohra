@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 from ...behavior import Behavior, Behaviors
 from ...context import ActorContext
+from ...coordinated_shutdown import CoordinatedShutdown
 from ...ref import ActorRef
 from ...remote.serialization import remotable
 from ...signals import PostStop, Signal, Terminated
@@ -646,8 +647,6 @@ def hand_off_stopper(
         def on_message(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             match msg:
                 case _StopTimeoutWarning():
-                    from ...coordinated_shutdown import CoordinatedShutdown
-
                     ctx.log.warning(
                         "%s: [%d] of the entities in shard [%s] not stopped after [%s]. "
                         "Maybe the handOffStopMessage [%s] is not handled? %s",

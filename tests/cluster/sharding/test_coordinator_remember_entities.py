@@ -268,12 +268,16 @@ async def test_an_update_done_for_another_shard_is_warned_and_ignored(
         assert (await asker.expect_message_type(ShardHome, 3)).shard == "1"
 
 
-async def test_terminate_while_the_remember_write_is_pending_stops_on_its_failure():
+@pytest.mark.parametrize("failure", ["update failed", "remember timeout"])
+async def test_terminate_while_the_remember_write_is_pending_stops_on_its_failure(failure: str):
     async with started() as h:
         await active_with_pending_remember_write(h, h.node.probe())
         h.coordinator.tell(_Terminate())
         await settle(h.node)
-        h.coordinator.tell(Coord.UpdateFailed("1"))
+        if failure == "update failed":
+            h.coordinator.tell(Coord.UpdateFailed("1"))
+        else:
+            await h.time_passes(REMEMBER.updating_state_timeout)
         await h.replicator.expect_terminated(h.coordinator, 3)
         await h.store.expect_no_message(0.1)  # no retry
 
@@ -303,6 +307,38 @@ async def test_the_store_stopping_stops_the_coordinator(
         await h.replicator.expect_terminated(h.coordinator, 3)
         text = "Counter: The ShardCoordinator stopping because the remember entities store stopped"
         assert logged(caplog, logging.ERROR, text) == 1
+
+
+async def test_remembered_shards_before_an_empty_state_are_allocated_when_a_region_registers():
+    """waitingForInitialState (ShardCoordinator.scala 1625-1628) keeps the remembered shards that
+    arrive before the state, and onInitialState (1650-1654) makes them unallocated."""
+    async with started() as h:
+        region = h.node.probe()
+        h.coordinator.tell(Coord.RememberedShards(frozenset({"1"})))
+        await settle(h.node)
+        get = await expect_get(h.replicator)
+        get.reply_to.tell(Replicator.NotFound(get.key))
+        await settle(h.node)
+        await registered(h.coordinator, h.replicator, region)
+        update = await expect_update(h.replicator)
+        assert allocated(update) == {"1": region.ref.path}
+        await h.expect_add_shard("1")
+
+
+async def test_remembered_shards_before_a_loaded_state_are_allocated_once_it_is_initialized():
+    async with started() as h:
+        region = h.node.probe()
+        path = region.ref.path
+        h.coordinator.tell(Coord.RememberedShards(frozenset({"7"})))
+        await settle(h.node)
+        state = CoordinatorState.EMPTY.updated(ShardRegionRegistered(path, h.node.unique_address))
+        get = await expect_get(h.replicator)
+        get.reply_to.tell(Replicator.GetSuccess(get.key, h.node.loaded(state)))
+        await settle(h.node)
+        await h.time_passes(0.5)  # _StateInitialized
+        update = await expect_update(h.replicator)
+        assert allocated(update) == {"7": path}
+        await h.expect_add_shard("7")
 
 
 async def test_late_remembered_shards_while_waiting_for_state_initialized_are_allocated():

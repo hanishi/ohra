@@ -5,7 +5,7 @@ Pekko."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from ...behavior import Behavior, Behaviors
 from ...context import ActorContext
@@ -14,9 +14,12 @@ from ...util.frequency_sketch import java_hash_code
 from ..core import Cluster
 from ..ddata import SelfUniqueAddress
 from ..ddata.distributed_data import ReplicatorMessageAdapter
+from ..ddata.gset import GSet, GSetKey
 from ..ddata.orset import ORSet, ORSetKey
 from ..ddata.replicator import Replicator
-from .shard import ClusterShardingSettings
+
+if TYPE_CHECKING:
+    from .shard import ClusterShardingSettings
 
 # --- the protocols (RememberEntitiesStore.scala 54-94) -------------------------------------------
 
@@ -431,3 +434,197 @@ def ddata_shard_store(
         return waiting_for_all_entity_ids(frozenset(), frozenset(), None)
 
     return cast(Behavior[RememberEntitiesShardStore.Command], setup)
+
+
+# --- DDataRememberEntitiesCoordinatorStore -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AllShardsResult:
+    """The Get's response."""
+
+    response: Replicator.GetResponse[GSet[str]]
+
+
+@dataclass(frozen=True)
+class _AddShardResult:
+    """An Update's response with its request context, Pekko's ``Some((sender(), shardId))``."""
+
+    reply_to: ActorRef[
+        RememberEntitiesCoordinatorStore.UpdateDone | RememberEntitiesCoordinatorStore.UpdateFailed
+    ]
+    shard_id: str
+    response: Replicator.UpdateResponse[GSet[str]]
+
+
+type _CoordMsg = RememberEntitiesCoordinatorStore.Command | _AllShardsResult | _AddShardResult
+
+
+def ddata_coordinator_store(
+    type_name: str,
+    replicator: ActorRef[Replicator.Command],
+    settings: ClusterShardingSettings,
+    majority_min_cap: int,
+) -> Behavior[RememberEntitiesCoordinatorStore.Command]:
+    """DDataRememberEntitiesCoordinatorStore (DDataRememberEntitiesCoordinatorStore.scala 45-145):
+    the ids of all started shards in one GSet, loaded when the store starts and handed once to
+    the latest coordinator that asked. ``receive`` (77-129) and ``on_got_all_shards`` (131-143)."""
+
+    @Behaviors.setup
+    def setup(ctx: ActorContext[_CoordMsg]) -> Behavior[_CoordMsg]:
+        log = ctx.log
+        adapter = ReplicatorMessageAdapter[_CoordMsg, GSet[str]](
+            ctx,
+            replicator,
+            max(settings.waiting_for_state_timeout, settings.updating_state_timeout) + 1,
+        )
+        read_consistency = _read_consistency(
+            settings, settings.waiting_for_state_timeout, majority_min_cap
+        )
+        write_consistency = _write_consistency(
+            settings, settings.updating_state_timeout, majority_min_cap
+        )
+        all_shards_key = GSetKey[str](f"shard-{type_name}-all")
+        retry_get_counter = 0
+        all_shards: frozenset[str] | None = None
+        coordinator_waiting_for_shards: (
+            ActorRef[RememberEntitiesCoordinatorStore.RememberedShards] | None
+        ) = None
+
+        def get_all_shards() -> None:
+            """72-75."""
+            adapter.ask_get(
+                lambda reply_to: Replicator.Get(all_shards_key, read_consistency, reply_to),
+                _AllShardsResult,
+            )
+
+        def on_got_all_shards(shard_ids: frozenset[str]) -> None:
+            nonlocal retry_get_counter, all_shards, coordinator_waiting_for_shards
+            retry_get_counter = 0
+            if coordinator_waiting_for_shards is not None:
+                coordinator_waiting_for_shards.tell(
+                    RememberEntitiesCoordinatorStore.RememberedShards(shard_ids)
+                )
+                coordinator_waiting_for_shards = None
+                # clear the shards out now that we have sent them to coordinator, to save some
+                # memory
+                all_shards = None
+            else:
+                # wait for coordinator to ask
+                all_shards = shard_ids
+
+        def add_shard(
+            reply_to: ActorRef[
+                RememberEntitiesCoordinatorStore.UpdateDone
+                | RememberEntitiesCoordinatorStore.UpdateFailed
+            ],
+            shard_id: str,
+        ) -> None:
+            adapter.ask_update(
+                lambda r: Replicator.Update(
+                    all_shards_key,
+                    cast(GSet[str], GSet.empty),
+                    write_consistency,
+                    r,
+                    lambda existing: existing.add(shard_id),
+                ),
+                lambda rsp: _AddShardResult(reply_to, shard_id, rsp),
+            )
+
+        @Behaviors.receive_message
+        def receive(msg: _CoordMsg) -> Behavior[_CoordMsg]:
+            nonlocal retry_get_counter, all_shards, coordinator_waiting_for_shards
+            match msg:
+                case RememberEntitiesCoordinatorStore.GetShards(reply_to):
+                    # reply when we get them, since there is only ever one coordinator
+                    # communicating with us and it may retry we can just keep the latest sender
+                    coordinator_waiting_for_shards = reply_to
+                    if all_shards is not None:
+                        on_got_all_shards(all_shards)
+                    return Behaviors.same
+                case _AllShardsResult(Replicator.GetSuccess(data=data)):
+                    on_got_all_shards(data.elements)
+                    return Behaviors.same
+                case _AllShardsResult(Replicator.NotFound()):
+                    on_got_all_shards(frozenset())
+                    return Behaviors.same
+                case _AllShardsResult(Replicator.GetFailure()):
+                    retry_get_counter += 1
+                    template = (
+                        "Remember entities coordinator store unable to get initial shards within "
+                        "'waiting-for-state-timeout': %d millis (retrying)"
+                    )
+                    millis = int(read_consistency.timeout * 1000)
+                    if retry_get_counter < 5:
+                        log.warning(template, millis)
+                    else:
+                        log.error(template, millis)
+                    # repeat until GetSuccess
+                    get_all_shards()
+                    return Behaviors.same
+                case RememberEntitiesCoordinatorStore.AddShard(shard_id, reply_to):
+                    add_shard(reply_to, shard_id)
+                    return Behaviors.same
+                case _AddShardResult(reply_to, shard_id, Replicator.UpdateSuccess()):
+                    log.debug(
+                        "Remember entities coordinator store shards successfully updated with %s",
+                        shard_id,
+                    )
+                    reply_to.tell(RememberEntitiesCoordinatorStore.UpdateDone(shard_id))
+                    return Behaviors.same
+                case _AddShardResult(reply_to, shard_id, Replicator.UpdateTimeout()):
+                    log.error(
+                        "Remember entities coordinator store unable to update shards state "
+                        "within 'updating-state-timeout': %d millis (retrying), adding shard=%s",
+                        int(write_consistency.timeout * 1000),
+                        shard_id,
+                    )
+                    reply_to.tell(RememberEntitiesCoordinatorStore.UpdateFailed(shard_id))
+                    return Behaviors.same
+                case _AddShardResult(
+                    reply_to, shard_id, Replicator.ModifyFailure(failed_key, error, cause)
+                ):
+                    log.error(
+                        "Remember entities coordinator store was unable to add shard [%s] "
+                        "(key [%s], failed with error: %s)",
+                        shard_id,
+                        failed_key,
+                        error,
+                        exc_info=cause,
+                    )
+                    reply_to.tell(RememberEntitiesCoordinatorStore.UpdateFailed(shard_id))
+                    return Behaviors.same
+                case _:
+                    # GetDataDeleted, StoreFailure and UpdateDataDeleted have no case in Pekko
+                    return Behaviors.unhandled
+
+        # eager load of remembered shard ids
+        get_all_shards()
+        return receive
+
+    return cast(Behavior[RememberEntitiesCoordinatorStore.Command], setup)
+
+
+# --- DDataRememberEntitiesProvider ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DDataRememberEntitiesProvider:
+    """DDataRememberEntitiesProvider (DDataRememberEntitiesProvider.scala 26-39): the stores of one
+    entity type on one Replicator, without Pekko's ``RememberEntitiesProvider`` trait, as the
+    event-sourced and custom providers are not ported."""
+
+    type_name: str
+    settings: ClusterShardingSettings
+    majority_min_cap: int
+    replicator: ActorRef[Replicator.Command]
+
+    def coordinator_store_behavior(self) -> Behavior[RememberEntitiesCoordinatorStore.Command]:
+        return ddata_coordinator_store(
+            self.type_name, self.replicator, self.settings, self.majority_min_cap
+        )
+
+    def shard_store_behavior(self, shard_id: str) -> Behavior[RememberEntitiesShardStore.Command]:
+        return ddata_shard_store(
+            self.type_name, shard_id, self.replicator, self.settings, self.majority_min_cap
+        )

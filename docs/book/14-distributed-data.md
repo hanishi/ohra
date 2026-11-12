@@ -169,7 +169,7 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
     await probe.expect_message(1)
 ```
 
-`pytest examples/distributed_data` prints `5 passed`.
+`pytest examples/distributed_data/test_counter.py examples/distributed_data/test_replicator.py` prints `5 passed`.
 
 > **Coming from Apache Pekko**
 >

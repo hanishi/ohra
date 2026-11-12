@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 from ...behavior import Behavior, Behaviors, StashBuffer
@@ -178,44 +178,66 @@ type DomainEvent = (
 
 @dataclass(frozen=True)
 class CoordinatorState:
-    """ShardCoordinator.State (ShardCoordinator.scala ~455-540): shard -> region path, and region
+    """ShardCoordinator.State (ShardCoordinator.scala 455-521): shard -> region path, and region
     path -> its shards. Regions are keyed by path so a local and a remote ref to the same region
     compare equal. It is the value of the coordinator's LWWRegister, so it travels on the wire.
-    Actor paths carry no uid here, so ``region_nodes`` records each region's node."""
+    Actor paths carry no uid here, so ``region_nodes`` records each region's node.
+    ``unallocated_shards`` is only used if remembered entities is enabled."""
 
     shards: dict[str, str]
     regions: dict[str, tuple[str, ...]]
     region_nodes: dict[str, UniqueAddress]
+    unallocated_shards: frozenset[str] = frozenset()
+    remember_entities: bool = False
     EMPTY: ClassVar[CoordinatorState]
+
+    def with_remember_entities(self, enabled: bool) -> CoordinatorState:
+        """withRememberEntities (474-479)."""
+        if enabled:
+            return replace(self, remember_entities=True)
+        return replace(self, unallocated_shards=frozenset(), remember_entities=False)
+
+    @property
+    def is_empty(self) -> bool:
+        """isEmpty (481-482): ohra has no region proxies here, and unallocated shards do not
+        count."""
+        return not self.shards and not self.regions
 
     def updated(self, event: DomainEvent) -> CoordinatorState:
         match event:
             case ShardRegionRegistered(region, node):
                 if region in self.regions:
                     raise ValueError(f"Region {region} already registered: {self}")
-                return CoordinatorState(
-                    dict(self.shards),
-                    {**self.regions, region: ()},
-                    {**self.region_nodes, region: node},
+                return replace(
+                    self,
+                    regions={**self.regions, region: ()},
+                    region_nodes={**self.region_nodes, region: node},
                 )
             case ShardRegionTerminated(region):
                 if region not in self.regions:
                     raise ValueError(f"Terminated region {region} not registered: {self}")
                 gone = set(self.regions[region])
-                return CoordinatorState(
-                    {s: r for s, r in self.shards.items() if s not in gone},
-                    {r: ids for r, ids in self.regions.items() if r != region},
-                    {r: n for r, n in self.region_nodes.items() if r != region},
+                return replace(
+                    self,
+                    shards={s: r for s, r in self.shards.items() if s not in gone},
+                    regions={r: ids for r, ids in self.regions.items() if r != region},
+                    region_nodes={r: n for r, n in self.region_nodes.items() if r != region},
+                    unallocated_shards=self.unallocated_shards | gone
+                    if self.remember_entities
+                    else self.unallocated_shards,
                 )
             case ShardHomeAllocated(shard, region):
                 if region not in self.regions:
                     raise ValueError(f"Region {region} not registered: {self}")
                 if shard in self.shards:
                     raise ValueError(f"Shard [{shard}] already allocated: {self}")
-                return CoordinatorState(
-                    {**self.shards, shard: region},
-                    {**self.regions, region: (*self.regions[region], shard)},
-                    self.region_nodes,
+                return replace(
+                    self,
+                    shards={**self.shards, shard: region},
+                    regions={**self.regions, region: (*self.regions[region], shard)},
+                    unallocated_shards=self.unallocated_shards - {shard}
+                    if self.remember_entities
+                    else self.unallocated_shards,
                 )
             case ShardHomeDeallocated(shard):
                 if shard not in self.shards:
@@ -223,15 +245,22 @@ class CoordinatorState:
                 region = self.shards[shard]
                 if region not in self.regions:
                     raise ValueError(f"Region {region} for shard [{shard}] not registered: {self}")
-                return CoordinatorState(
-                    {s: r for s, r in self.shards.items() if s != shard},
-                    {**self.regions, region: tuple(s for s in self.regions[region] if s != shard)},
-                    self.region_nodes,
+                return replace(
+                    self,
+                    shards={s: r for s, r in self.shards.items() if s != shard},
+                    regions={
+                        **self.regions,
+                        region: tuple(s for s in self.regions[region] if s != shard),
+                    },
+                    unallocated_shards=self.unallocated_shards | {shard}
+                    if self.remember_entities
+                    else self.unallocated_shards,
                 )
 
     @property
     def all_shards(self) -> frozenset[str]:
-        return frozenset(self.shards)
+        """allShards (484)."""
+        return frozenset(self.shards) | self.unallocated_shards
 
 
 CoordinatorState.EMPTY = CoordinatorState({}, {}, {})

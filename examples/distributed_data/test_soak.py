@@ -2,9 +2,9 @@
 
 Not a port of a Pekko spec. The first test runs ``soak.run`` as the CLI does, briefly; the second
 pins that an actor answering differently from the converged views is a violation, and that a
-failed check does not hang; the third, that a cancellation of ``run`` propagates. The last three
-pin the lag store: its run statistics stay bounded, and only a view a node had to wait for is a
-lag.
+failed check does not hang; the third, that an answer which heals before the check's deadline
+passes; the fourth, that a cancellation of ``run`` propagates. The last three pin the lag store:
+its run statistics stay bounded, and only a view a node had to wait for is a lag.
 """
 
 import asyncio
@@ -56,13 +56,35 @@ async def test_a_disagreeing_actor_is_a_violation(monkeypatch: pytest.MonkeyPatc
             rate=20,
             duration=3,
             check_every=2,
-            check_timeout=2,
+            check_timeout=1,  # a check fails only at its deadline: two of them fit the bound
             seed=1,
             out=lines.append,
         )
     assert loop.time() - start < 10
     assert result.checks_failed >= 1
     assert any(line.startswith("VIOLATION check #") for line in lines)
+
+
+async def test_an_answer_that_heals_within_the_timeout_passes(monkeypatch: pytest.MonkeyPatch):
+    # each actor's first answer is from before a command still in flight landed, as a cart's
+    # RemoveItem (a read, then a write) can be when the views have already converged
+    cache = soak.WORKLOADS["cache"]
+    asked: set[ActorRef[Any]] = set()
+
+    async def query(ref: ActorRef[Any], state: soak.SoakState) -> object:
+        answer = await cache.query(ref, state)
+        if ref not in asked:
+            asked.add(ref)
+            return "stale"
+        return answer
+
+    monkeypatch.setitem(soak.WORKLOADS, "healing", replace(cache, query=query))
+    lines: list[str] = []
+    result = await soak.run(
+        "healing", nodes=2, rate=20, duration=3, check_every=2, seed=1, out=lines.append
+    )
+    assert result.checks_failed == 0, [line for line in lines if "VIOLATION" in line]
+    assert result.checks_passed >= 2
 
 
 async def test_a_cancellation_propagates():

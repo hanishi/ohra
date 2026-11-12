@@ -21,7 +21,10 @@ guardian subscribes to the sample's keys, so the soak holds every node's view of
 - **Check.** Every ``--check-every`` seconds the load stops (the metrics' measure freezes at its
   last values), the soak waits until every node's view is equal, asks every node's actor through
   the sample's own query, and compares the answers with each other and with what the converged
-  views imply.
+  views imply. It passes only if they agree and the views held still while it asked; otherwise it
+  tries again, every 10 ms, and reports a VIOLATION from its last try at ``--check-timeout``. A
+  command still in flight when the load stopped, such as a cart's remove (a read, then a write),
+  can land after the views converged, so an answer may be ahead of the views for a moment.
 
 Ctrl-C (SIGINT or SIGTERM), or the end of ``--duration``, runs one last check, prints a summary
 and terminates every system: ``main`` turns the signal into ``run``'s ``stop`` event. During
@@ -331,8 +334,8 @@ def _spawn_metrics(ctx: ActorContext[Any], state: SoakState) -> ActorRef[Any]:
 
 
 async def _query_metrics(ref: ActorRef[Any], state: SoakState) -> object:
-    # every node publishes a UsedHeap from the converged maps within a tick or two
-    await asyncio.sleep(2 * state.measure_interval)
+    # the last UsedHeap the node published; until it has published from the converged maps,
+    # a tick or two, the check asks again
     used_heap = state.used_heap.get(ref)
     return None if used_heap is None else used_heap.percent_per_node
 
@@ -561,51 +564,61 @@ async def run(
         except Exception as e:  # an answer that cannot be right, not a crash of the soak
             return e
 
+    def divergence() -> str:
+        views = snapshot()
+        differ = [i for i, v in enumerate(views) if v != views[0]]
+        keys = sorted(
+            {
+                str(key)
+                for v in views[1:]
+                for key in v.keys() | views[0].keys()
+                if v.get(key) != views[0].get(key)
+            }
+        )
+        return (
+            f"nodes {_nodes(differ)} differ from node 0 on keys {', '.join(keys)}"
+            if differ
+            else "they changed while the actors were asked"
+        )
+
     async def check(k: int, timeout: float) -> bool:
+        """Pass once the views have converged and every actor's answer is what they imply,
+        with the views held still while it was asked; until the deadline, try again."""
         stopped = loop.time()
         deadline = stopped + timeout
         running.clear()  # the load task stops before its next command
         state.frozen = True
+        disagreement: str | None = None  # the last attempt's, if it got as far as the answers
         while True:
-            while not converged():
-                if loop.time() >= deadline:
-                    views = snapshot()
-                    differ = [i for i, v in enumerate(views) if v != views[0]]
-                    keys = sorted(
-                        {
-                            str(key)
-                            for v in views[1:]
-                            for key in v.keys() | views[0].keys()
-                            if v.get(key) != views[0].get(key)
-                        }
-                    )
+            if converged():
+                took = loop.time() - stopped
+                views, view = snapshot(), lags.views[0]  # views are replaced, never mutated
+                expected = workload.expected(view, state)
+                answers = await asyncio.gather(*map(query, state.refs))
+                differ = [i for i, answer in enumerate(answers) if answer != expected]
+                still = snapshot() == views  # else a command in flight landed while asking
+                if not differ and still:
                     out(
-                        f"VIOLATION check #{k}: views did not converge within "
-                        f"{timeout:g} s; nodes {_nodes(differ)} differ from node 0 "
-                        f"on keys {', '.join(keys)}"
+                        f"check #{k}: {nodes} nodes converged {took:.2f} s after the load "
+                        "stopped; actors agree"
                     )
-                    return False
-                await asyncio.sleep(0.01)
-            took = loop.time() - stopped
-            views = snapshot()
-            answers = await asyncio.gather(*map(query, state.refs))
-            if snapshot() != views and loop.time() < deadline:
-                continue  # a command still in flight landed: converge again
-            expected = workload.expected(lags.views[0], state)
-            differ = [i for i, answer in enumerate(answers) if answer != expected]
-            if differ:
-                out(
-                    f"VIOLATION check #{k}: actors disagree; nodes {_nodes(differ)} differ "
-                    f"from the converged views; node {differ[0]} answered "
-                    f"{reprlib.repr(answers[differ[0]])}, the views imply "
-                    f"{reprlib.repr(expected)}"
+                    return True
+                disagreement = (
+                    f"actors disagree; nodes {_nodes(differ)} differ from the converged "
+                    f"views; node {differ[0]} answered {reprlib.repr(answers[differ[0]])}, "
+                    f"the views imply {reprlib.repr(expected)}"
+                    if differ
+                    else "the views changed while the actors were asked"
                 )
+            else:
+                disagreement = None
+            if loop.time() >= deadline:
+                reason = disagreement or (
+                    f"views did not converge within {timeout:g} s; {divergence()}"
+                )
+                out(f"VIOLATION check #{k}: {reason}")
                 return False
-            out(
-                f"check #{k}: {nodes} nodes converged {took:.2f} s after the load stopped; "
-                "actors agree"
-            )
-            return True
+            await asyncio.sleep(0.01)
 
     def resume() -> None:
         state.frozen = False

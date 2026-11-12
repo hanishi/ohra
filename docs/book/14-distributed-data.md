@@ -215,7 +215,7 @@ summary: 3810 commands, 3 checks passed, 0 failed, lag p50=394ms p99=988ms max=3
 ```
 
 - **Lag.** When node A's view changes, the soak notes the time. Node B has caught up when merging A's data into B's changes nothing a reader of B sees. The lag is the time until B caught up. A change B already holds, such as one A received from B, is not a lag. The summary's percentiles come from a uniform sample of 100,000 lags, so a run of days takes no more memory than one of minutes. `behind` counts the pairs of nodes that have not caught up yet.
-- **Check.** A check stops the load, waits until every node's view is the same, asks every node's actor, and compares the answers.
+- **Check.** A check stops the load, waits until every node's view is the same, asks every node's actor, and compares the answers. It passes only if the answers agree with the views and the views did not change while it asked. Otherwise it tries again until `--check-timeout`, since a command still in flight can land just after the views converged.
 - **VIOLATION.** A line that starts with `VIOLATION check #k:` means check `k` failed. With `--duration` the exit status is 1.
 - **Stopping.** Ctrl-C runs one last check, of at most 5 s, prints the summary and exits. During startup it skips the check. A second Ctrl-C exits at once, with status 130, and still terminates every node.
 - **Subscriber interval.** The soak sets `notify_subscribers_interval=0.01`. The default, 0.5 s, batches `Changed` and would dominate the lag.

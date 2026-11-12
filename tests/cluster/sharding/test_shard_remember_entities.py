@@ -6,7 +6,13 @@ the store and the starter manager:
   what comes meanwhile;
 - the remembered ids go to the starter manager, and the load timeout stops the shard;
 - a store that stops restarts the shard, which releases its lease first; a store that throws is
-  restarted on its own.
+  restarted on its own;
+- a start, by a message or ``StartEntity``, is written before the entity starts, and what comes
+  during a write is batched into the next one;
+- a passivated entity is written as stopped, one that stops on its own restarts after the
+  backoff;
+- a write that times out, or a store that stops during it, restarts the shard, which keeps what it
+  stashed.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import pytest
@@ -36,7 +42,20 @@ from ohra.cluster.sharding.remember_entities import (
     DDataRememberEntitiesProvider,
     RememberEntitiesShardStore,
 )
-from ohra.cluster.sharding.shard import ShardInitialized, StartEntities, shard_behavior
+from ohra.cluster.sharding.shard import (
+    CurrentShardState,
+    EntitiesMovedToOtherShard,
+    GetShardState,
+    HandOff,
+    ShardInitialized,
+    ShardStopped,
+    StartEntities,
+    StartEntity,
+    StartEntityAck,
+    _StartEntity,  # pyright: ignore[reportPrivateUsage]
+    shard_behavior,
+)
+from ohra.eventstream import Dropped
 from ohra.signals import PostStop
 from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 from ohra.testkit.lease import TestLease
@@ -184,6 +203,26 @@ class Harness:
         self.shard.tell(ShardingEnvelope(entity_id, Ping(replies.ref)))
         await replies.expect_message(Pong(entity_id), 3)
 
+    async def expect_update(
+        self, started: frozenset[str] = frozenset(), stopped: frozenset[str] = frozenset()
+    ) -> Store.Update:
+        update = await self.store.expect_message_type(Store.Update, 3)
+        assert (update.started, update.stopped) == (started, stopped)
+        return update
+
+    @staticmethod
+    def done(update: Store.Update) -> None:
+        update.reply_to.tell(Store.UpdateDone(update.started, update.stopped))
+
+    async def active_ids_become(self, ids: frozenset[str]) -> None:
+        state: TestProbe[CurrentShardState] = self.testkit.create_test_probe()
+
+        async def check() -> None:
+            self.shard.tell(GetShardState(state.ref))
+            assert (await state.expect_message_type(CurrentShardState, 3)).entity_ids == ids
+
+        await state.await_assert(check, 3)
+
 
 @asynccontextmanager
 async def remembering_shard(
@@ -303,3 +342,225 @@ async def test_without_a_provider_the_shard_is_initialized_at_once():
         await region.expect_message(ShardInitialized("1"), 3)
         shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
         await replies.expect_message(Pong("a"), 3)
+
+
+async def test_a_message_to_a_new_entity_is_remembered_before_the_entity_starts():
+    async with remembering_shard() as h:
+        await h.initialized()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        update = await h.expect_update(started=A)
+        await h.events.expect_no_message(0.1)
+        h.done(update)
+        await h.events.expect_message(Started("a"), 3)
+        await replies.expect_message(Pong("a"), 3)
+
+
+async def test_starts_during_a_write_are_batched_into_the_next_update():
+    async with remembering_shard() as h:
+        await h.initialized()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        first = await h.expect_update(started=A)
+        h.shard.tell(ShardingEnvelope("b", Ping(replies.ref)))
+        h.shard.tell(ShardingEnvelope("c", Ping(replies.ref)))
+        h.done(first)
+        await replies.expect_message(Pong("a"), 3)
+        second = await h.expect_update(started=frozenset({"b", "c"}))
+        await replies.expect_no_message(0.1)
+        h.done(second)
+        assert {await replies.receive_message(), await replies.receive_message()} == {
+            Pong("b"),
+            Pong("c"),
+        }
+
+
+async def test_no_update_follows_a_write_with_nothing_pending():
+    async with remembering_shard() as h:
+        await h.initialized()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        h.done(await h.expect_update(started=A))
+        await replies.expect_message(Pong("a"), 3)
+        await h.store.expect_no_message(0.2)
+
+
+async def test_start_entity_is_acked_after_its_start_is_written():
+    async with remembering_shard() as h:
+        await h.initialized()
+        ack: TestProbe[StartEntityAck] = h.testkit.create_test_probe()
+        h.shard.tell(_StartEntity("a", ack.ref))
+        update = await h.expect_update(started=A)
+        await ack.expect_no_message(0.1)
+        h.done(update)
+        await ack.expect_message(StartEntityAck("a", "1"), 3)
+        await h.events.expect_message(Started("a"), 3)
+
+
+async def test_start_entity_for_a_running_entity_is_acked_at_once():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        await h.ping("a")
+        ack: TestProbe[StartEntityAck] = h.testkit.create_test_probe()
+        h.shard.tell(_StartEntity("a", ack.ref))
+        await ack.expect_message(StartEntityAck("a", "1"), 3)
+        await h.store.expect_no_message(0.1)
+
+
+async def test_a_remembered_entity_starts_on_start_entity_without_a_write():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        ack: TestProbe[StartEntityAck] = h.testkit.create_test_probe()
+        h.shard.tell(_StartEntity("a", ack.ref))
+        await h.events.expect_message(Started("a"), 3)
+        await ack.expect_message(StartEntityAck("a", "1"), 3)
+        await h.store.expect_no_message(0.1)
+
+
+async def test_start_entity_in_an_envelope_is_remembered_with_no_ack():
+    async with remembering_shard() as h:
+        await h.initialized()
+        h.shard.tell(ShardingEnvelope("a", StartEntity("a")))
+        update = await h.expect_update(started=A)
+        await h.events.expect_no_message(0.1)
+        h.done(update)
+        await h.events.expect_message(Started("a"), 3)
+        await h.active_ids_become(A)
+
+
+async def test_an_entity_that_stops_on_its_own_restarts_after_the_backoff():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        await h.ping("a")
+        await h.events.expect_message(Started("a"))
+        h.shard.tell(ShardingEnvelope("a", Stop()))
+        await h.events.expect_message(Stopped("a"), 3)
+        await h.active_ids_become(frozenset())
+        await h.events.expect_no_message(0.1)
+        await h.manual.time_passes(REMEMBER.entity_restart_backoff)
+        await h.events.expect_message(Started("a"), 3)
+        await h.active_ids_become(A)
+        await h.store.expect_no_message(0)
+
+
+async def test_a_message_to_an_entity_waiting_for_restart_starts_it_at_once():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        await h.ping("a")
+        await h.events.expect_message(Started("a"))
+        h.shard.tell(ShardingEnvelope("a", Stop()))
+        await h.events.expect_message(Stopped("a"), 3)
+        await h.active_ids_become(frozenset())
+        await h.ping("a")
+        await h.events.expect_message(Started("a"))
+        # the restart timer finds the entity running
+        await h.manual.time_passes(REMEMBER.entity_restart_backoff)
+        await h.ping("a")
+        await h.events.expect_no_message(0.1)
+        await h.store.expect_no_message(0)
+
+
+async def test_a_passivated_entity_is_remembered_as_stopped():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        await h.ping("a")
+        await h.events.expect_message(Started("a"))
+        h.shard.tell(ShardingEnvelope("a", GracefulStop()))
+        await h.events.expect_message(Stopped("a"), 3)
+        h.done(await h.expect_update(stopped=A))
+        await h.active_ids_become(frozenset())
+        await h.store.expect_no_message(0.1)
+
+
+async def test_a_message_during_passivation_restarts_the_entity_once_the_stop_is_written():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        await h.ping("a")
+        await h.events.expect_message(Started("a"))
+        h.shard.tell(ShardingEnvelope("a", GracefulStop()))
+        await h.events.expect_message(Stopped("a"), 3)
+        stop = await h.expect_update(stopped=A)
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        h.done(stop)
+        start = await h.expect_update(started=A)
+        await h.events.expect_no_message(0.1)
+        h.done(start)
+        await h.events.expect_message(Started("a"), 3)
+        await replies.expect_message(Pong("a"), 3)
+
+
+async def test_entities_moved_to_another_shard_are_written_as_stopped():
+    async with remembering_shard() as h:
+        await h.initialized(frozenset({"a", "b"}))
+        h.shard.tell(EntitiesMovedToOtherShard(frozenset({"b"})))
+        h.done(await h.expect_update(stopped=frozenset({"b"})))
+        await h.store.expect_no_message(0.1)
+        await h.ping("a")
+
+
+async def test_the_write_timeout_restarts_the_shard_and_keeps_what_it_stashed(
+    caplog: pytest.LogCaptureFixture,
+):
+    async with remembering_shard() as h:
+        await h.initialized()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        await h.expect_update(started=A)
+        hand: TestProbe[ShardStopped] = h.testkit.create_test_probe()
+        h.shard.tell(HandOff("1", hand.ref))
+        await h.manual.time_passes(REMEMBER.updating_state_timeout)
+        await h.store.expect_message_type(StoreStarted, 3)
+        await h.initialized(A)  # the restarted shard loads again, then replays the HandOff
+        await hand.expect_message(ShardStopped("1"), 3)
+        assert any(
+            r.levelno == logging.ERROR
+            and r.getMessage()
+            == "Reporter: Remember entity store did not respond, restarting shard"
+            for r in caplog.records
+        )
+
+
+async def test_hand_off_waits_for_a_pending_write():
+    async with remembering_shard() as h:
+        await h.initialized()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        update = await h.expect_update(started=A)
+        hand: TestProbe[ShardStopped] = h.testkit.create_test_probe()
+        h.shard.tell(HandOff("1", hand.ref))
+        await hand.expect_no_message(0.1)
+        h.done(update)
+        await replies.expect_message(Pong("a"), 3)
+        await hand.expect_message(ShardStopped("1"), 3)
+        await h.events.expect_message(Started("a"))
+        await h.events.expect_message(Stopped("a"), 3)
+
+
+async def test_messages_beyond_buffer_size_are_dropped_while_a_start_is_written():
+    async with remembering_shard(replace(REMEMBER, buffer_size=2)) as h:
+        await h.initialized()
+        dropped = h.testkit.create_dropped_message_probe()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        for _ in range(3):
+            h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        update = await h.expect_update(started=A)
+        await dropped.expect_message(
+            Dropped(ShardingEnvelope("a", Ping(replies.ref)), "Buffer for [a] is full", h.shard), 3
+        )
+        h.done(update)
+        await replies.expect_message(Pong("a"), 3)
+        await replies.expect_message(Pong("a"), 3)
+        await replies.expect_no_message(0.1)
+
+
+async def test_a_store_crash_while_writing_restarts_the_shard():
+    async with remembering_shard() as h:
+        await h.initialized()
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("a", Ping(replies.ref)))
+        await h.expect_update(started=A)
+        h.testkit.system.resolve(f"{h.shard.path}/RememberEntitiesStore").tell(StopStore())
+        await h.store.expect_message_type(StoreStarted, 3)
+        await h.initialized(A)
+        await h.ping("a")

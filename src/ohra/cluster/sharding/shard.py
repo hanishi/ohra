@@ -131,7 +131,7 @@ class ClusterShardingSettings:
     (fail-on-invalid-entity-state-transition)."""
     entity_restart_backoff: float = 10.0
     """How long a remembered entity that stopped without passivating waits to restart
-    (entity-restart-backoff). Unused until remembered entities exist."""
+    (entity-restart-backoff)."""
     shard_failure_backoff: float = 10.0
     """How long a remembering shard that failed to store waits to restart
     (shard-failure-backoff). Unused until remembered entities exist."""
@@ -609,6 +609,10 @@ type _ShardCmd[T] = (
     | _RememberEntityStoreCrashed
     | _RememberEntityTimeout
     | RememberEntitiesShardStore.RememberedEntities
+    | RememberEntitiesShardStore.UpdateDone
+    | _StartEntity
+    | _RestartTerminatedEntity
+    | EntitiesMovedToOtherShard
     | MemberEvent
 )
 
@@ -633,7 +637,9 @@ def shard_behavior[T](
     are the nested functions returning behaviors, and its ``context.become`` is returning one,
     from the state's handler or from the helper the handler returns. Pekko's ``context.parent``
     is ``region``, ``context.stop(self)`` is returning ``Behaviors.stopped()``, and a typed
-    message has no sender, so the envelope is what is buffered and redelivered."""
+    message has no sender, so the envelope is what is buffered and redelivered. Pekko's
+    ``StartEntity`` with its sender is ``_StartEntity``, whose ``ack_to`` gets the
+    ``StartEntityAck``; a ``StartEntity`` in an envelope has no one to ack."""
 
     def shard(stash: StashBuffer[Any]) -> Behavior[Any]:
         @Behaviors.setup
@@ -646,6 +652,7 @@ def shard_behavior[T](
             type_name = entity.type_key.name
             log = ctx.log
             verbose_debug = settings.verbose_debug_logging
+            remember_entities = remember_entities_provider is not None
             remember_entities_store: ActorRef[Any] | None = None
             if remember_entities_provider is not None:
                 remember_entities_store = ctx.spawn(
@@ -696,6 +703,19 @@ def shard_behavior[T](
                 if lease_settings is not None
                 else 5.0  # not used
             )
+            # The state a helper became during this message, for the state's handler to return:
+            # Pekko's context.become from inside a helper, where the last become wins.
+            become: Behavior[Any] | None = None
+
+            def context_become(behavior: Behavior[Any]) -> None:
+                nonlocal become
+                become = behavior
+
+            def take_become(otherwise: Behavior[Any]) -> Behavior[Any]:
+                """The state a helper became during this message, else ``otherwise``."""
+                nonlocal become
+                pending, become = become, None
+                return otherwise if pending is None else pending
 
             async def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
                 if isinstance(sig, Terminated):
@@ -859,10 +879,12 @@ def shard_behavior[T](
                 return stash.unstash_all(idle())
 
             def idle() -> Behavior[Any]:
-                """Shard.scala 624-639, without the remember-entity commands and ``StartEntity``.
-                ``Terminated`` is a signal, handled in ``on_signal``."""
+                """Shard.scala 624-639. ``Terminated`` is a signal, handled in ``on_signal``."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    return take_become(receive(msg))
+
+                def receive(msg: Any) -> Behavior[Any]:
                     match msg:
                         case MemberEvent():
                             receive_member_event(msg)
@@ -870,6 +892,10 @@ def shard_behavior[T](
                             entity_terminated(ref)
                         case HandOff():
                             return receive_coordinator_message(msg)
+                        case _RestartTerminatedEntity() | EntitiesMovedToOtherShard():
+                            receive_remember_entity_command(msg)
+                        case _StartEntity(entity_id, ack_to):
+                            start_entity(entity_id, ack_to)
                         case SetActiveEntityLimit():
                             active_entity_limit_updated(msg)
                         case ShardsUpdated():
@@ -891,6 +917,259 @@ def shard_behavior[T](
                     return Behaviors.same
 
                 return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def remember_update(
+                add: frozenset[str] = frozenset(), remove: frozenset[str] = frozenset()
+            ) -> None:
+                """Shard.scala 641-648."""
+                store = remember_entities_store
+                if store is None:
+                    on_update_done(add, remove)
+                else:
+                    send_to_remember_store(store, add, remove)
+
+            def send_to_remember_store(
+                store: ActorRef[Any], storing_starts: frozenset[str], storing_stops: frozenset[str]
+            ) -> None:
+                """Shard.scala 650-675."""
+                if verbose_debug:
+                    log.debug(
+                        "%s: Remember update [%s] and stops [%s] triggered",
+                        type_name,
+                        ", ".join(storing_starts),
+                        ", ".join(storing_stops),
+                    )
+                start_time = ctx.system.scheduler.current_time
+                update = RememberEntitiesShardStore.Update(storing_starts, storing_stops, ctx.self)
+                store.tell(update)
+                ctx.timers.start_single_timer(
+                    _REMEMBER_ENTITY_TIMEOUT_KEY,
+                    _RememberEntityTimeout(update),
+                    settings.updating_state_timeout,
+                )
+                context_become(waiting_for_remember_entities_store(update, start_time))
+
+            def waiting_for_remember_entities_store(
+                update: RememberEntitiesShardStore.Update, start_time: float
+            ) -> Behavior[Any]:
+                """Shard.scala 677-728."""
+
+                def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    return take_become(receive(msg))
+
+                def receive(msg: Any) -> Behavior[Any]:
+                    match msg:
+                        # none of the current impls will send back a partial update, yet!
+                        case RememberEntitiesShardStore.UpdateDone(stored_starts, stored_stops):
+                            duration = ctx.system.scheduler.current_time - start_time
+                            if verbose_debug:
+                                log.debug(
+                                    "%s: Update done for ids, started [%s], stopped [%s]. "
+                                    "Duration %d ms",
+                                    type_name,
+                                    ", ".join(stored_starts),
+                                    ", ".join(stored_stops),
+                                    int(duration * 1000),
+                                )
+                            ctx.timers.cancel(_REMEMBER_ENTITY_TIMEOUT_KEY)
+                            on_update_done(stored_starts, stored_stops)
+                        case _RememberEntityTimeout(operation) if operation == update:
+                            log.error(
+                                "%s: Remember entity store did not respond, restarting shard",
+                                type_name,
+                            )
+                            raise RuntimeError(
+                                "Async write timed out after "
+                                f"{settings.updating_state_timeout:g} s"
+                            )
+                        case _StartEntity(entity_id, ack_to):
+                            start_entity(entity_id, ack_to)
+                        case MemberEvent():
+                            receive_member_event(msg)
+                        case _EntityTerminated(ref):
+                            entity_terminated(ref)
+                        case HandOff():
+                            stash.stash(msg)
+                        case _RestartTerminatedEntity() | EntitiesMovedToOtherShard():
+                            receive_remember_entity_command(msg)
+                        case _LeaseLost():
+                            return receive_lease_lost(msg)
+                        case Passivate(ref):
+                            if verbose_debug:
+                                passivating_id = entities.entity_id(ref)
+                                log.debug(
+                                    "%s: Passivation of [%s] arrived while updating",
+                                    type_name,
+                                    f"Unknown actor {ref}"
+                                    if passivating_id is None
+                                    else passivating_id,
+                                )
+                            passivate(ref, entity.stop_message)
+                        case GetShardState() | GetShardStats():
+                            receive_shard_query(msg)
+                        case _PassivateIntervalTick():
+                            stash.stash(msg)
+                        case _RememberEntityStoreCrashed():
+                            remember_entity_store_crashed(msg)
+                        case ShardsUpdated():
+                            shards_updated(msg)
+                        case ShardingEnvelope():
+                            deliver_message(cast(ShardingEnvelope[T], msg))
+                        case _:
+                            # shouldn't be any other message types, but just in case
+                            log.warning(
+                                "%s: Stashing unexpected message [%s] while waiting for remember "
+                                "entities update of starts [%s], stops [%s]",
+                                type_name,
+                                type(msg).__name__,
+                                ", ".join(update.started),
+                                ", ".join(update.stopped),
+                            )
+                            stash.stash(msg)
+                    return Behaviors.same
+
+                return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def on_update_done(starts: frozenset[str], stops: frozenset[str]) -> None:
+                """Shard.scala 730-770."""
+                # entities can contain both ids from start/stops and pending ones, so we need
+                # to mark the completed ones as complete to get the set of pending ones
+                for entity_id in starts:
+                    state_before_start = entities.entity_state(entity_id)
+                    # this will start the entity and transition the entity state in sessions to
+                    # active
+                    get_or_create_entity(entity_id)
+                    send_msg_buffer(entity_id)
+                    if isinstance(state_before_start, RememberingStart):
+                        for ack_to in state_before_start.ack_to:
+                            ack_to.tell(StartEntityAck(entity_id, shard_id))
+                for entity_id in stops:
+                    match entities.entity_state(entity_id):
+                        case RememberingStop():
+                            # this updates entity state
+                            passivate_completed(entity_id)
+                        case state:
+                            raise RuntimeError(
+                                f"Unexpected state [{state}] when storing stop completed for "
+                                f"entity id [{entity_id}]"
+                            )
+                pending_starts, pending_stops = entities.pending_remember_entities()
+                if not pending_starts and not pending_stops:
+                    if verbose_debug:
+                        log.debug(
+                            "%s: Update complete, no pending updates, going to idle", type_name
+                        )
+                    context_become(stash.unstash_all(idle()))
+                else:
+                    # Note: no unstashing as long as we are batching, is that a problem?
+                    pending_start_ids = frozenset(pending_starts)
+                    if verbose_debug:
+                        log.debug(
+                            "%s: Update complete, pending updates, doing another write. "
+                            "Starts [%s], stops [%s]",
+                            type_name,
+                            ", ".join(pending_start_ids),
+                            ", ".join(pending_stops),
+                        )
+                    remember_update(pending_start_ids, pending_stops)
+
+            def receive_remember_entity_command(
+                msg: _RestartTerminatedEntity | EntitiesMovedToOtherShard,
+            ) -> None:
+                """Shard.scala 787-816."""
+                match msg:
+                    case _RestartTerminatedEntity(entity_id):
+                        match entities.entity_state(entity_id):
+                            case WaitingForRestart():
+                                if verbose_debug:
+                                    log.debug(
+                                        "%s: Restarting entity unexpectedly terminated entity "
+                                        "[%s]",
+                                        type_name,
+                                        entity_id,
+                                    )
+                                get_or_create_entity(entity_id)
+                            case Active():
+                                # it up could already have been started, that's fine
+                                if verbose_debug:
+                                    log.debug(
+                                        "%s: Got RestartTerminatedEntity for [%s] but it is "
+                                        "already running",
+                                        type_name,
+                                        entity_id,
+                                    )
+                            case other:
+                                raise RuntimeError(
+                                    f"Unexpected state for [{entity_id}] when getting "
+                                    f"RestartTerminatedEntity: [{other}]"
+                                )
+                    case EntitiesMovedToOtherShard(moved_entity_ids):
+                        log.info(
+                            "%s: Clearing [%d] remembered entities started elsewhere because of "
+                            "changed shard id extractor",
+                            type_name,
+                            len(moved_entity_ids),
+                        )
+                        for entity_id in moved_entity_ids:
+                            match entities.entity_state(entity_id):
+                                case RememberedButNotCreated():
+                                    entities.remembering_stop(entity_id)
+                                case other:
+                                    raise RuntimeError(
+                                        f"Unexpected state for [{entity_id}] when getting "
+                                        f"ShardIdsMoved: [{other}]"
+                                    )
+                        remember_update(remove=moved_entity_ids)
+
+            def start_entity(entity_id: str, ack_to: ActorRef[StartEntityAck] | None) -> None:
+                """Shard.scala 820-850: this could be because of a start message or due to a new
+                message for the entity; if it is a start entity then start entity ack is sent
+                after it is created."""
+                match entities.entity_state(entity_id):
+                    case Active():
+                        if verbose_debug:
+                            log.debug(
+                                "%s: Request to start entity [%s] (Already started)",
+                                type_name,
+                                entity_id,
+                            )
+                        if ack_to is not None:
+                            ack_to.tell(StartEntityAck(entity_id, shard_id))
+                    case RememberingStart():
+                        entities.remembering_start(entity_id, ack_to)
+                    case RememberedButNotCreated() | WaitingForRestart() as state:
+                        # already remembered or waiting for backoff to restart, just start it -
+                        # this is the normal path for initially remembered entities getting
+                        # started
+                        log.debug(
+                            "%s: Request to start entity [%s] (in state [%s])",
+                            type_name,
+                            entity_id,
+                            state,
+                        )
+                        get_or_create_entity(entity_id)
+                        if ack_to is not None:
+                            ack_to.tell(StartEntityAck(entity_id, shard_id))
+                    case Passivating():
+                        # since StartEntity is handled in deliverMsg we can buffer a StartEntity
+                        # to handle when passivation completes (triggering an immediate restart)
+                        message_buffers.append(entity_id, _StartEntity(entity_id, ack_to))
+                    case RememberingStop():
+                        # Optimally: if stop is already write in progress, we want to stash, if
+                        # it is batched for later write we'd want to cancel but for now
+                        stash.stash(_StartEntity(entity_id, ack_to))
+                    case _:  # NoState
+                        # started manually from the outside, or the shard id extractor was
+                        # changed since the entity was remembered we need to store that it was
+                        # started
+                        log.debug(
+                            "%s: Request to start entity [%s] and ack to [%s]",
+                            type_name,
+                            entity_id,
+                            ack_to,
+                        )
+                        entities.remembering_start(entity_id, ack_to)
+                        remember_update(add=frozenset({entity_id}))
 
             def receive_coordinator_message(msg: HandOff) -> Behavior[Any]:
                 """Shard.scala 852-858. ``HandOff`` is the only coordinator message a shard
@@ -1001,8 +1280,7 @@ def shard_behavior[T](
                 return Behaviors.stopped()
 
             def entity_terminated(ref: ActorRef[Any]) -> None:
-                """Shard.scala 913-975, without the remember-store branches of ``Active``
-                (restart after backoff) and ``Passivating`` (store the stop)."""
+                """Shard.scala 913-975."""
                 entity_id = entities.entity_id(ref)
                 if entity_id is None:
                     log.warning("%s: Unexpected entity terminated: %s", type_name, ref)
@@ -1017,10 +1295,37 @@ def shard_behavior[T](
                                 entity_id,
                             )
                     case Active():
-                        log.debug("%s: Entity [%s] terminated", type_name, entity_id)
-                        entities.remove_entity(entity_id)
+                        if remember_entities_store is not None:
+                            log.debug(
+                                "%s: Entity [%s] stopped without passivating, will restart after "
+                                "backoff",
+                                type_name,
+                                entity_id,
+                            )
+                            entities.waiting_for_restart(entity_id)
+                            msg = _RestartTerminatedEntity(entity_id)
+                            ctx.timers.start_single_timer(
+                                msg, msg, settings.entity_restart_backoff
+                            )
+                        else:
+                            log.debug("%s: Entity [%s] terminated", type_name, entity_id)
+                            entities.remove_entity(entity_id)
                     case Passivating():
-                        if message_buffers.get_or_empty(entity_id):
+                        if remember_entities_store is not None:
+                            if entities.pending_remembered_entities_exist():
+                                # will go in next batch update
+                                if verbose_debug:
+                                    log.debug(
+                                        "%s: [%s] terminated after passivating, arrived while "
+                                        "updating, adding it to batch of pending stops",
+                                        type_name,
+                                        entity_id,
+                                    )
+                                entities.remembering_stop(entity_id)
+                            else:
+                                entities.remembering_stop(entity_id)
+                                remember_update(remove=frozenset({entity_id}))
+                        elif message_buffers.get_or_empty(entity_id):
                             if verbose_debug:
                                 log.debug(
                                     "%s: [%s] terminated after passivating, buffered messages "
@@ -1047,16 +1352,16 @@ def shard_behavior[T](
                             unexpected,
                         )
 
-            def passivate(entity: ActorRef[Any], stop_message: object | None) -> None:
+            def passivate(entity_ref: ActorRef[Any], stop_message: object | None) -> None:
                 """Shard.scala 977-997. With no stop message the entity is stopped after its
                 pending messages, as Pekko's ``PoisonPill``."""
-                entity_id = entities.entity_id(entity)
+                entity_id = entities.entity_id(entity_ref)
                 if entity_id is None:
                     log.debug(
                         "%s: Unknown entity passivating [%s]. Not sending stopMessage back to "
                         "entity",
                         type_name,
-                        entity,
+                        entity_ref,
                     )
                 elif entities.is_passivating(entity_id):
                     log.debug(
@@ -1077,9 +1382,9 @@ def shard_behavior[T](
                         log.debug("%s: Passivation started for [%s]", type_name, entity_id)
                     entities.entity_passivating(entity_id)
                     if stop_message is None:
-                        ctx.stop(entity, after_pending=True)
+                        ctx.stop(entity_ref, after_pending=True)
                     else:
-                        entity.tell(stop_message)
+                        entity_ref.tell(stop_message)
 
             def active_entity_limit_updated(updated: SetActiveEntityLimit) -> None:
                 """Shard.scala 999-1002."""
@@ -1108,9 +1413,32 @@ def shard_behavior[T](
                         for ref in refs_to_passivate:
                             passivate(ref, entity.stop_message)
 
+            def passivate_completed(entity_id: str) -> None:
+                """Shard.scala 1027-1047: after entity stopped."""
+                has_buffered_messages = bool(message_buffers.get_or_empty(entity_id))
+                entities.remove_entity(entity_id)
+                if has_buffered_messages:
+                    log.debug(
+                        "%s: Entity stopped after passivation [%s], but will be started again due "
+                        "to buffered messages",
+                        type_name,
+                        entity_id,
+                    )
+                    if remember_entities:
+                        # trigger start or batch in case we're already writing to the remember
+                        # store
+                        entities.remembering_start(entity_id, None)
+                        if not entities.pending_remembered_entities_exist():
+                            remember_update(frozenset({entity_id}))
+                    else:
+                        get_or_create_entity(entity_id)
+                        send_msg_buffer(entity_id)
+                else:
+                    log.debug("%s: Entity stopped after passivation [%s]", type_name, entity_id)
+
             def deliver_message(envelope: ShardingEnvelope[T]) -> None:
-                """Shard.scala 1049-1124, without ``StartEntity`` and the remembering branches: an
-                entity in no state is created and the message delivered at once."""
+                """Shard.scala 1049-1124. A ``StartEntity`` in an envelope has no sender, so no
+                one is acked."""
                 entity_id, payload = envelope.entity_id, envelope.message
                 if not entity_id:
                     log.warning(
@@ -1119,6 +1447,31 @@ def shard_behavior[T](
                         type(envelope).__name__,
                     )
                     ctx.system.dropped(envelope, "No recipient entity id", ctx.self)
+                    return
+                if isinstance(payload, StartEntity):
+                    # Handling StartEntity both here and in the receives allows for sending it
+                    # both as is and in an envelope to be extracted by the entity id extractor.
+
+                    # we can only start a new entity if we are not currently waiting for another
+                    # write
+                    if entities.pending_remembered_entities_exist():
+                        if verbose_debug:
+                            log.debug(
+                                "%s: StartEntity(%s) from [%s], adding to batch",
+                                type_name,
+                                payload.entity_id,
+                                None,
+                            )
+                        entities.remembering_start(entity_id, None)
+                    else:
+                        if verbose_debug:
+                            log.debug(
+                                "%s: StartEntity(%s) from [%s], starting",
+                                type_name,
+                                payload.entity_id,
+                                None,
+                            )
+                        start_entity(payload.entity_id, None)
                     return
                 match entities.entity_state(entity_id):
                     case Active(ref):
@@ -1145,11 +1498,39 @@ def shard_behavior[T](
                                 state,
                             )
                         get_or_create_entity(entity_id).tell(payload)
-                    case _:  # NoState: don't buffer if remember entities not enabled
+                    case _ if not remember_entities:  # NoState
+                        # don't buffer if remember entities not enabled
                         ref = get_or_create_entity(entity_id)
                         entities_to_passivate = passivation_strategy.entity_touched(entity_id)
                         ref.tell(payload)
                         passivate_entities(entities_to_passivate)
+                    case _ if entities.pending_remembered_entities_exist():
+                        # No actor running and write in progress for some other entity id (can
+                        # only happen with remember entities enabled)
+                        if verbose_debug:
+                            log.debug(
+                                "%s: Buffer message [%s] to [%s] (which is not started) because "
+                                "of write in progress for [%s]",
+                                type_name,
+                                type(payload).__name__,
+                                entity_id,
+                                entities.pending_remember_entities(),
+                            )
+                        append_to_message_buffer(entity_id, envelope)
+                        entities.remembering_start(entity_id, None)
+                    case _:
+                        # No actor running and no write in progress, start actor and deliver
+                        # message when started
+                        if verbose_debug:
+                            log.debug(
+                                "%s: Buffering message [%s] to [%s] and starting actor",
+                                type_name,
+                                type(payload).__name__,
+                                entity_id,
+                            )
+                        append_to_message_buffer(entity_id, envelope)
+                        entities.remembering_start(entity_id, None)
+                        remember_update(add=frozenset({entity_id}))
 
             def get_or_create_entity(entity_id: str) -> ActorRef[T]:
                 """Shard.scala 1127-1139. The behavior is created inside the child's own setup, so
@@ -1201,7 +1582,7 @@ def shard_behavior[T](
                     message_buffers.append(entity_id, msg)
 
             def send_msg_buffer(entity_id: str) -> None:
-                """Shard.scala 1166-1181, without ``StartEntity``."""
+                """Shard.scala 1166-1181: after entity started."""
                 # Get the buffered messages and remove the buffer
                 messages = message_buffers.get_or_empty(entity_id)
                 message_buffers.remove(entity_id)
@@ -1216,7 +1597,11 @@ def shard_behavior[T](
                     # Now there is no deliveryBuffer we can try to redeliver
                     # and as the child exists, the message will be directly forwarded
                     for msg in messages:
-                        deliver_message(cast(ShardingEnvelope[T], msg))
+                        match msg:
+                            case _StartEntity(start_id, ack_to):
+                                start_entity(start_id, ack_to)
+                            case _:
+                                deliver_message(cast(ShardingEnvelope[T], msg))
 
             def remember_entity_store_crashed(msg: _RememberEntityStoreCrashed) -> None:
                 """Shard.scala 1190-1192."""

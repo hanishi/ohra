@@ -483,6 +483,59 @@ class GetClusterShardingStats:
     reply_to: ActorRef[ClusterShardingStats]
 
 
+@remotable
+@dataclass(frozen=True)
+class StartEntity:
+    """ShardRegion.scala 488-492 and typed scaladsl ClusterSharding.scala 380-390: start the
+    entity with this id in its shard, if it is not running; the region answers with
+    ``StartEntityAck``."""
+
+    entity_id: str
+
+
+@remotable
+@dataclass(frozen=True)
+class StartEntityAck(DeadLetterSuppression):
+    """ShardRegion.scala 494-500: the entity ``entity_id`` was started in shard ``shard_id``,
+    which can differ from the shard that remembered it."""
+
+    entity_id: str
+    shard_id: str
+
+
+@remotable
+@dataclass(frozen=True)
+class _StartEntity:
+    """Pekko's ``StartEntity`` with its sender: ``ack_to`` gets the ``StartEntityAck``."""
+
+    entity_id: str
+    ack_to: ActorRef[StartEntityAck] | None
+
+
+@dataclass(frozen=True)
+class StartEntities:
+    """RememberEntityStarter.scala 41-42: start these remembered entities of a shard. It lives
+    here so that this module never imports the starter."""
+
+    shard: ActorRef[Any]
+    shard_id: str
+    ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _RestartTerminatedEntity:
+    """Shard.scala 72."""
+
+    entity_id: str
+
+
+@dataclass(frozen=True)
+class EntitiesMovedToOtherShard:
+    """Shard.scala 78: internal, named without the underscore as the starter's tests import it."""
+
+    ids: frozenset[str]
+
+
 @dataclass(frozen=True)
 class _EntityTerminated:
     """Shard.scala 124: an entity's termination, watched with this message."""

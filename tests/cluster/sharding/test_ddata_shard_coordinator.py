@@ -282,6 +282,24 @@ async def test_an_update_timeout_is_retried_with_pekkos_log_levels(
         await region.expect_message(RegisterAck(coordinator))
 
 
+async def test_a_store_failure_of_the_state_write_leaves_the_coordinator_waiting():
+    """A durable coordinator key (a type name starting with ``shard-`` under remember entities)
+    can answer a state write with StoreFailure. Pekko's waitingForUpdate has no case for it and
+    stashes it (ShardCoordinator.scala 1836): no ack, no retry, and later requests wait too."""
+    async with manual_node() as node:
+        replicator, region, other = node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        coordinator.tell(Register(region.ref))
+        update = await expect_update(replicator)
+        update.reply_to.tell(Replicator.StoreFailure(update.key))
+        await settle(node)
+        coordinator.tell(Register(other.ref))
+        await settle(node)
+        await region.expect_no_message(0.1)
+        await other.expect_no_message(0.1)
+        await replicator.expect_no_message(0.1)
+
+
 async def test_a_modify_failure_restarts_the_coordinator():
     async with manual_node() as node:
         replicator, region = node.probe(), node.probe()

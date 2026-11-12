@@ -335,7 +335,7 @@ How a remembering shard runs:
 - **It writes before it acts.** A message for an entity that is not running is buffered while the shard writes the start to its store, and delivered once the entity has started. A passivated entity's stop is written once the entity has stopped. Starts and stops that arrive while a write is in flight go into the next write, as one batch.
 - **The cost** is a write per entity start and stop, at the coordinator's write level: a majority plus `coordinator_state_write_majority_plus` nodes, which with the defaults is every node of a cluster of up to eight. A busy cluster that starts and stops many entities pays for each.
 - **`entity_restart_backoff`.** An entity that stops without passivating is started again after 10 s, or at once when a message arrives for it.
-- **A failed store.** A store write that fails or times out, or a store that stops, restarts the shard at once. It loads its ids again and keeps what it had stashed.
+- **A failed store.** A store write that fails, or a store that stops, restarts the shard at once. A write with no answer restarts it after `updating_state_timeout` (5 s). Either way the shard loads its ids again and keeps what it had stashed.
 - **`shard_failure_backoff`.** A remembering shard that stops without being handed off, as when it loses its lease, is started again by its region after 10 s, once the coordinator has confirmed the shard's home.
 
 The states of an entity in a remembering shard, after Pekko's diagram in `Shard.scala`:

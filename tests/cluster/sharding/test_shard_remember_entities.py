@@ -428,6 +428,23 @@ async def test_start_entity_in_an_envelope_is_remembered_with_no_ack():
         await h.active_ids_become(A)
 
 
+async def test_start_entity_for_a_running_entity_during_a_write_leaves_it_running():
+    async with remembering_shard() as h:
+        await h.initialized(A)
+        await h.ping("a")
+        await h.events.expect_message(Started("a"), 3)
+        replies: TestProbe[Pong] = h.testkit.create_test_probe()
+        h.shard.tell(ShardingEnvelope("b", Ping(replies.ref)))
+        update = await h.expect_update(started=frozenset({"b"}))
+        h.shard.tell(ShardingEnvelope("a", StartEntity("a")))
+        h.done(update)
+        await replies.expect_message(Pong("b"), 3)
+        await h.events.expect_message(Started("b"), 3)
+        await h.events.expect_no_message(0.1)
+        await h.store.expect_no_message(0.1)
+        await h.ping("a")
+
+
 async def test_an_entity_that_stops_on_its_own_restarts_after_the_backoff():
     async with remembering_shard() as h:
         await h.initialized(A)

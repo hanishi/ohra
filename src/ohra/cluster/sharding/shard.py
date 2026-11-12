@@ -44,6 +44,7 @@ from ..ddata.settings import ReplicatorSettings
 from .entities import (
     Active,
     Entities,
+    NoState,
     Passivating,
     RememberedButNotCreated,
     RememberingStart,
@@ -1453,7 +1454,12 @@ def shard_behavior[T](
 
                     # we can only start a new entity if we are not currently waiting for another
                     # write
-                    if entities.pending_remembered_entities_exist():
+                    # Deviation: Shard.scala 1061-1066 batches whatever the state; ohra batches
+                    # only an entity with no state, as any other (Active, Passivating) cannot
+                    # become RememberingStart, and start_entity handles them (appendix B).
+                    if entities.pending_remembered_entities_exist() and isinstance(
+                        entities.entity_state(entity_id), NoState
+                    ):
                         if verbose_debug:
                             log.debug(
                                 "%s: StartEntity(%s) from [%s], adding to batch",

@@ -10,7 +10,8 @@ passivating entity are buffered, up to ``buffer_size`` for the whole shard, and 
 next incarnation; what is still buffered when the shard stops is dropped, and a shard handing off
 leaves every message unhandled. An entity that stops on its own, by returning
 ``Behaviors.stopped()``, loses what is queued behind it, as in Pekko, so entities should passivate
-rather than stop themselves.
+rather than stop themselves. With ``remember_entities``, a shard of ``ClusterSharding`` loads the
+ids its store remembers before it is initialized, and has them started again.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ from ...ref import ActorRef
 from ...remote import Address
 from ...remote.serialization import remotable
 from ...result import Failure, Success, Try
-from ...signals import PostStop, Signal, Terminated
+from ...signals import PostStop, PreRestart, Signal, Terminated
+from ...supervision import SupervisorStrategy
 from ...util.message_buffer import MessageBufferMap
 from ..core import MemberEvent, MemberPreparingForShutdown, MemberReadyForShutdown, Subscribe
 from ..ddata.replicator import Replicator
@@ -56,6 +58,7 @@ from .passivation_settings import (
     describe_passivation_strategy,
     passivation_strategy,
 )
+from .remember_entities import DDataRememberEntitiesProvider, RememberEntitiesShardStore
 
 if TYPE_CHECKING:
     from ..core import ClusterSettings
@@ -572,6 +575,24 @@ _LEASE_RETRY_TIMER = "lease-retry"
 """Shard.scala 98."""
 
 
+@dataclass(frozen=True)
+class _RememberEntityStoreCrashed:
+    """Shard.scala 128: the store stopped, watched with this message."""
+
+    store: ActorRef[Any]
+
+
+_REMEMBER_ENTITY_TIMEOUT_KEY = "RememberEntityTimeout"
+"""Shard.scala 130."""
+
+
+@dataclass(frozen=True)
+class _RememberEntityTimeout:
+    """Shard.scala 131: the store did not answer ``operation`` in time."""
+
+    operation: object
+
+
 type _ShardCmd[T] = (
     ShardingEnvelope[T]
     | ShardCommand
@@ -585,25 +606,34 @@ type _ShardCmd[T] = (
     | _LeaseAcquireResult
     | _LeaseLost
     | _LeaseRetry
+    | _RememberEntityStoreCrashed
+    | _RememberEntityTimeout
+    | RememberEntitiesShardStore.RememberedEntities
     | MemberEvent
 )
 
 
 def shard_behavior[T](
-    entity: Entity[T], shard_id: str, region: ActorRef[ShardingEnvelope[T]]
+    entity: Entity[T],
+    shard_id: str,
+    region: ActorRef[Any],
+    remember_entities_provider: DDataRememberEntitiesProvider | None = None,
+    remember_entity_starter_manager: ActorRef[StartEntities] | None = None,
 ) -> Behavior[_ShardCmd[T]]:
     """Pekko's ``Shard`` actor (Shard.scala 424-1200), for one shard id of one entity type: hosts
     the entities of that shard id, and tells ``region`` it is initialized, once it holds its lease
-    if it has lease settings. While the lease is pending it stashes without a limit, as Pekko's
-    classic ``Stash`` does (``stash-capacity = -1``).
+    if it has lease settings and, with a ``remember_entities_provider``, once its store has
+    loaded the remembered entities, which it hands to ``remember_entity_starter_manager``. Until
+    then it stashes without a limit, as Pekko's classic ``Stash`` does (``stash-capacity = -1``).
 
-    Remembered entities wait for sub-project 10, so the shard is never remembering: it starts in
-    ``awaiting_lease`` or ``idle``, and each function below leaves out its remember-store
-    branches. Pekko's receive states are the nested functions returning behaviors, and its
-    ``context.become`` is returning one, from the state's handler or from the helper the handler
-    returns. Pekko's ``context.parent`` is ``region``, ``context.stop(self)`` is returning
-    ``Behaviors.stopped()``, and a typed message has no sender, so the envelope is what is
-    buffered and redelivered."""
+    The shard is supervised inside, with restart, as Pekko's classic default: the store is its
+    child, and a store that stops makes the shard throw and restart, releasing its lease
+    (Pekko's default ``preRestart`` runs ``postStop``). The stash outlives the restart, as
+    Pekko's ``preRestart`` puts the stashed messages back in the mailbox. Pekko's receive states
+    are the nested functions returning behaviors, and its ``context.become`` is returning one,
+    from the state's handler or from the helper the handler returns. Pekko's ``context.parent``
+    is ``region``, ``context.stop(self)`` is returning ``Behaviors.stopped()``, and a typed
+    message has no sender, so the envelope is what is buffered and redelivered."""
 
     def shard(stash: StashBuffer[Any]) -> Behavior[Any]:
         @Behaviors.setup
@@ -616,9 +646,20 @@ def shard_behavior[T](
             type_name = entity.type_key.name
             log = ctx.log
             verbose_debug = settings.verbose_debug_logging
+            remember_entities_store: ActorRef[Any] | None = None
+            if remember_entities_provider is not None:
+                remember_entities_store = ctx.spawn(
+                    Behaviors.supervise(
+                        remember_entities_provider.shard_store_behavior(shard_id)
+                    ).on_failure(SupervisorStrategy.restart()),
+                    "RememberEntitiesStore",
+                )
+                ctx.watch_with(
+                    remember_entities_store, _RememberEntityStoreCrashed(remember_entities_store)
+                )
             entities = Entities(
                 ctx.log,
-                False,
+                settings.remember_entities,
                 verbose_debug,
                 settings.fail_on_invalid_entity_state_transition,
             )
@@ -659,7 +700,7 @@ def shard_behavior[T](
             async def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
                 if isinstance(sig, Terminated):
                     return receive_terminated(sig.ref)
-                if sig is PostStop:
+                if sig is PostStop or sig is PreRestart:
                     await post_stop()
                     return Behaviors.same
                 return Behaviors.unhandled
@@ -669,20 +710,17 @@ def shard_behavior[T](
                 if lease is not None:
                     try_get_lease(lease)
                     return awaiting_lease()
-                # Pekko's tryLoadRememberedEntities without a store
-                return shard_initialized()
+                return try_load_remembered_entities()
 
             def awaiting_lease() -> Behavior[Any]:
                 """Shard.scala 518-544. ShardInitialized is not sent back, so the region buffers
-                the messages for this shard while it waits for the lease. Once acquired it goes
-                straight to ``shard_initialized``: Pekko's ``tryLoadRememberedEntities``
-                (563-576) without a remember store."""
+                the messages for this shard while it waits for the lease."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                     match msg:
                         case _LeaseAcquireResult(True, _):
                             log.debug("%s: Lease acquired", type_name)
-                            return shard_initialized()
+                            return try_load_remembered_entities()
                         case _LeaseAcquireResult(False, None):
                             log.error(
                                 "%s: Failed to get lease for shard id [%s]. Retry in %s",
@@ -748,16 +786,81 @@ def shard_behavior[T](
 
                 ctx.pipe_to_self(lease.acquire(lambda reason: me.tell(_LeaseLost(reason))), adapt)
 
+            def try_load_remembered_entities() -> Behavior[Any]:
+                """Shard.scala 563-576."""
+                store = remember_entities_store
+                if store is None:
+                    return shard_initialized()
+                log.debug(
+                    "%s: Waiting for load of entity ids using [%s] to complete", type_name, store
+                )
+                get_entities = RememberEntitiesShardStore.GetEntities(ctx.self)
+                store.tell(get_entities)
+                ctx.timers.start_single_timer(
+                    _REMEMBER_ENTITY_TIMEOUT_KEY,
+                    _RememberEntityTimeout(get_entities),
+                    settings.waiting_for_state_timeout,
+                )
+                return awaiting_remembered_entities()
+
+            def awaiting_remembered_entities() -> Behavior[Any]:
+                """Shard.scala 578-594."""
+
+                def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    match msg:
+                        case RememberEntitiesShardStore.RememberedEntities(entity_ids):
+                            ctx.timers.cancel(_REMEMBER_ENTITY_TIMEOUT_KEY)
+                            return on_entities_remembered(entity_ids)
+                        case _RememberEntityTimeout(RememberEntitiesShardStore.GetEntities()):
+                            return loading_entity_ids_failed()
+                        case MemberEvent():
+                            receive_member_event(msg)
+                        case _:
+                            if verbose_debug:
+                                log.debug(
+                                    "%s: Got msg of type [%s] while waiting for remember "
+                                    "entities, stashing",
+                                    type_name,
+                                    type(msg).__name__,
+                                )
+                            stash.stash(msg)
+                    return Behaviors.same
+
+                return Behaviors.receive(on_message).receive_signal(on_signal)
+
+            def loading_entity_ids_failed() -> Behavior[Any]:
+                """Shard.scala 596-603."""
+                log.error(
+                    "%s: Failed to load initial entity ids from remember entities store within "
+                    "[%s], stopping shard for backoff and restart",
+                    type_name,
+                    f"{settings.waiting_for_state_timeout:g} s",
+                )
+                # parent ShardRegion supervisor will notice that it terminated and will start it
+                # again, after backoff
+                return Behaviors.stopped()
+
+            def on_entities_remembered(ids: frozenset[str]) -> Behavior[Any]:
+                """Shard.scala 605-612."""
+                if ids:
+                    entities.already_remembered(ids)
+                    log.debug("%s: Restarting set of [%d] entities", type_name, len(ids))
+                    if remember_entity_starter_manager is not None:
+                        remember_entity_starter_manager.tell(
+                            StartEntities(ctx.self, shard_id, ids)
+                        )
+                return shard_initialized()
+
             def shard_initialized() -> Behavior[Any]:
                 """Shard.scala 614-619: ``idle``, after the messages stashed while awaiting the
-                lease."""
+                lease and the remembered entities."""
                 log.debug("%s: Shard initialized", type_name)
                 parent.tell(ShardInitialized(shard_id))
                 return stash.unstash_all(idle())
 
             def idle() -> Behavior[Any]:
-                """Shard.scala 624-639, without the remember-entity commands, ``StartEntity`` and
-                the store's crash. ``Terminated`` is a signal, handled in ``on_signal``."""
+                """Shard.scala 624-639, without the remember-entity commands and ``StartEntity``.
+                ``Terminated`` is a signal, handled in ``on_signal``."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                     match msg:
@@ -779,6 +882,8 @@ def shard_behavior[T](
                             receive_shard_query(msg)
                         case _LeaseLost():
                             return receive_lease_lost(msg)
+                        case _RememberEntityStoreCrashed():
+                            remember_entity_store_crashed(msg)
                         case ShardingEnvelope():
                             deliver_message(cast(ShardingEnvelope[T], msg))
                         case _:
@@ -1113,8 +1218,13 @@ def shard_behavior[T](
                     for msg in messages:
                         deliver_message(cast(ShardingEnvelope[T], msg))
 
+            def remember_entity_store_crashed(msg: _RememberEntityStoreCrashed) -> None:
+                """Shard.scala 1190-1192."""
+                raise RuntimeError(f"Remember entities store [{msg.store}] crashed")
+
             async def post_stop() -> None:
-                """Shard.scala 1194-1198. The interval timer stops with the shard; what is still
+                """Shard.scala 1194-1198, and Pekko's default ``preRestart``, which runs
+                ``postStop``. The interval timer stops with the shard; what is still
                 buffered is dropped silently, as Pekko's buffers are. Pekko releases the lease
                 without waiting; this awaits the release, bounded by the lease's operation
                 timeout, so nothing outlives the shard."""
@@ -1140,7 +1250,12 @@ def shard_behavior[T](
 
         return setup
 
-    return Behaviors.with_stash(sys.maxsize, shard)
+    def outer(_ctx: ActorContext[Any]) -> Behavior[Any]:
+        # One stash per actor: a restart re-runs ``shard``'s setup with the same buffer
+        stash = StashBuffer[Any](sys.maxsize)
+        return Behaviors.supervise(shard(stash)).on_failure(SupervisorStrategy.restart())
+
+    return Behaviors.setup(outer)
 
 
 def _ask_all[R](
@@ -1262,12 +1377,24 @@ type _RegionCmd[T] = (
 
 
 def _log_passivation_strategy(
-    log: logging.Logger, type_name: str, strategy: PassivationStrategy
+    log: logging.Logger,
+    type_name: str,
+    strategy: PassivationStrategy,
+    remember_entities: bool = False,
 ) -> None:
-    """ShardRegion.scala 698-705, without the remember-entities branch (sub-project 10)."""
-    log.info(
-        "%s: Automatic entity passivation: %s", type_name, describe_passivation_strategy(strategy)
-    )
+    """ShardRegion.scala 698-705."""
+    if remember_entities:
+        log.debug(
+            "%s: Entities will not be passivated automatically because 'rememberEntities' is "
+            "enabled.",
+            type_name,
+        )
+    else:
+        log.info(
+            "%s: Automatic entity passivation: %s",
+            type_name,
+            describe_passivation_strategy(strategy),
+        )
 
 
 class Sharding:

@@ -1794,8 +1794,13 @@ class Sharding:
         region, it passes ``SetActiveEntityLimit`` to every shard, and tells every shard the
         shard count when it changes; it has no graceful shutdown. It answers
         ``GetShardRegionState`` and ``GetShardRegionStats`` through a child that asks every
-        shard."""
+        shard. It refuses ``remember_entities``, which needs ``ClusterSharding``'s Replicator."""
         settings = entity.effective_settings
+        if settings.remember_entities:
+            raise ValueError(
+                "remember_entities needs ClusterSharding: the single-node Sharding has no "
+                "Replicator to remember entities in"
+            )
         strategy = settings.passivation_strategy
 
         @Behaviors.setup

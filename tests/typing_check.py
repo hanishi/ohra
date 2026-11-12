@@ -18,6 +18,7 @@ from ohra import (
     ShardRegionStats,
     RemoteRef,
     ShardingEnvelope,
+    StartEntity,
     ActorSystem,
     Behavior,
     Behaviors,
@@ -148,6 +149,13 @@ def sharding_is_typed(region: ActorRef[ShardingEnvelope[Ping]]) -> None:
     del ref, wrong
 
 
+def single_node_sharding_takes_no_start_entity(ctx: ActorContext[Any]) -> None:
+    from ohra import Sharding
+
+    region = ctx.spawn(Sharding.init(Entity(EntityTypeKey[Ping]("Ping"), lambda _e: _b)), "r")
+    region.tell(StartEntity("a"))  # type: ignore[arg-type]
+
+
 def cluster_sharding_region_takes_the_region_messages(
     system: ActorSystem[Any],
     stats: ActorRef[ShardRegionStats],
@@ -159,6 +167,7 @@ def cluster_sharding_region_takes_the_region_messages(
     region.tell(GetShardRegionStats(stats))
     region.tell(GetClusterShardingStats(3.0, cluster))
     region.tell(SetActiveEntityLimit(10))
+    region.tell(StartEntity("a"))
     region.tell(ShardingEnvelope("a", "not a ping"))  # type: ignore[arg-type]
     del envelopes
 

@@ -8,7 +8,8 @@ coordinator's Replicator and another for its store's:
   region can host them, also when they arrive late;
 - a new shard's allocation waits for both the state write and the remember write, and the remember
   write is retried on UpdateFailed and on its timeout, but not while terminating;
-- the store stopping stops the coordinator, and a restarted coordinator starts a new store;
+- the store stopping stops the coordinator, and a restarted coordinator starts a new store; a
+  store that throws is restarted on its own, and the coordinator keeps running;
 - under the on-stop backoff supervisor, a coordinator stopped by its store comes back after the
   backoff, and ``_Terminate`` stops it for good.
 
@@ -80,6 +81,11 @@ class StopStore:
 
 
 @dataclass(frozen=True)
+class CrashStore:
+    """Makes the store a ``ProbeStoreProvider`` started throw."""
+
+
+@dataclass(frozen=True)
 class ProbeStoreProvider(DDataRememberEntitiesProvider):
     """A provider whose coordinator store forwards every message to ``store``."""
 
@@ -92,6 +98,8 @@ class ProbeStoreProvider(DDataRememberEntitiesProvider):
         def forward(msg: Any) -> Behavior[Any]:
             if isinstance(msg, StopStore):
                 return Behaviors.stopped()
+            if isinstance(msg, CrashStore):
+                raise RuntimeError("store crashed")
             store.tell(msg)
             return Behaviors.same
 
@@ -307,6 +315,20 @@ async def test_the_store_stopping_stops_the_coordinator(
         await h.replicator.expect_terminated(h.coordinator, 3)
         text = "Counter: The ShardCoordinator stopping because the remember entities store stopped"
         assert logged(caplog, logging.ERROR, text) == 1
+
+
+async def test_a_coordinator_store_that_throws_is_restarted_and_the_coordinator_keeps_running():
+    async with started() as h:
+        region, asker = h.node.probe(), h.node.probe()
+        h.node.system.resolve(f"{h.coordinator.path}/RememberEntitiesStore").tell(CrashStore())
+        await settle(h.node)
+        await to_active(h)
+        await registered(h.coordinator, h.replicator, region)
+        h.coordinator.tell(GetShardHome("1", asker.ref))
+        update = await expect_update(h.replicator)
+        assert allocated(update) == {"1": region.ref.path}
+        # the restarted store still takes the coordinator's writes
+        await h.expect_add_shard("1")
 
 
 async def test_remembered_shards_before_an_empty_state_are_allocated_when_a_region_registers():

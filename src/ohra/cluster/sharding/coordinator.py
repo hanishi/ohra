@@ -17,6 +17,7 @@ from ...remote import Address, UniqueAddress
 from ...remote.serialization import Serialization
 from ...cell import is_local_actor
 from ...signals import PostStop, PreRestart, Signal
+from ...supervision import SupervisorStrategy
 from .shard import (
     ClusterShardingSettings,
     ClusterShardingStats,
@@ -619,8 +620,11 @@ def coordinator_behavior(
                     type_name,
                     remember_entities_provider,
                 )
+                # Pekko's classic default supervisor restarts a store that throws
                 remember_entities_store = ctx.spawn(
-                    remember_entities_provider.coordinator_store_behavior(),
+                    Behaviors.supervise(
+                        remember_entities_provider.coordinator_store_behavior()
+                    ).on_failure(SupervisorStrategy.restart()),
                     "RememberEntitiesStore",
                 )
                 ctx.watch_with(remember_entities_store, _RememberEntitiesStoreStopped())

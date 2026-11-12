@@ -14,6 +14,7 @@ from ohra.cluster.sharding import (
     EntityTypeKey,
 )
 from ohra.behavior import Behaviors
+from ohra.cluster.sharding.passivation_settings import NoPassivationStrategy
 
 from ...util import eventually, free_port
 from ..test_cluster import all_up, cluster_node
@@ -57,6 +58,8 @@ def test_all_maps_to_read_all_and_write_all():
         {"coordinator_state_read_majority_plus": -1},
         {"coordinator_state_write_majority_plus": -1},
         {"majority_min_cap": -1},
+        {"entity_recovery_constant_rate_frequency": 0},
+        {"entity_recovery_constant_rate_number_of_entities": 0},
     ],
 )
 def test_invalid_values_raise(bad: dict[str, int]):
@@ -73,9 +76,55 @@ def test_replicator_settings_default_to_the_clusters_with_pekkos_overrides():
     assert eff.durable_keys == frozenset()
 
 
-def test_durable_keys_are_forced_empty():
+def test_remember_entities_defaults_are_pekkos():
+    s = ClusterShardingSettings()
+    assert s.remember_entities is False
+    assert s.remember_entities_store == "ddata"
+    assert s.entity_recovery_strategy == "all"
+    assert s.entity_recovery_constant_rate_frequency == 0.1
+    assert s.entity_recovery_constant_rate_number_of_entities == 5
+    assert ClusterShardingSettings().with_remember_entities(True).remember_entities is True
+
+
+def test_durable_keys_are_cleared_without_remember_entities():
     s = ClusterShardingSettings(distributed_data=ReplicatorSettings(durable_keys=frozenset({"*"})))
     assert s.effective_replicator_settings(ClusterSettings()).durable_keys == frozenset()
+
+
+def test_remember_entities_makes_the_shard_keys_durable_by_default():
+    eff = ClusterShardingSettings(remember_entities=True).effective_replicator_settings(
+        ClusterSettings()
+    )
+    assert eff.durable_keys == frozenset({"shard-*"})
+    assert eff.is_durable("shard-Counter-7-3") and eff.is_durable("shard-Counter-all")
+    assert not eff.is_durable("CounterCoordinatorState")
+
+
+def test_remember_entities_keeps_configured_durable_keys():
+    s = ClusterShardingSettings(
+        remember_entities=True,
+        distributed_data=ReplicatorSettings(durable_keys=frozenset({"x-*"})),
+    )
+    assert s.effective_replicator_settings(ClusterSettings()).durable_keys == frozenset({"x-*"})
+
+
+def test_remember_entities_disables_passivation():
+    s = ClusterShardingSettings(remember_entities=True)
+    assert s.passivation_strategy == NoPassivationStrategy()
+
+
+@pytest.mark.parametrize("store", ["eventsourced", "custom"])
+def test_only_the_ddata_store_is_ported(store: str):
+    with pytest.raises(ValueError, match="remember_entities_store"):
+        ClusterShardingSettings(remember_entities_store=store)  # pyright: ignore[reportArgumentType]
+
+
+def test_an_unknown_recovery_strategy_is_rejected_with_pekkos_text():
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown 'entity-recovery-strategy' \[fast\], valid values are 'all' or 'constant'",
+    ):
+        ClusterShardingSettings(entity_recovery_strategy="fast")  # pyright: ignore[reportArgumentType]
 
 
 A = EntityTypeKey[str]("A")

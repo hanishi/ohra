@@ -479,7 +479,8 @@ def _policy_strategy(
 
 def passivation_strategy(settings: PassivationStrategySettings) -> PassivationStrategy:
     """Classic 747-763: the strategy the settings resolve to. A timeout of zero or less turns
-    idle passivation off. The ``remember_entities`` branch (749) waits for remembered entities."""
+    idle passivation off. The ``remember_entities`` branch (749) is in
+    ``ClusterShardingSettings.passivation_strategy``."""
     idle_settings = settings.idle_entity_settings
     idle = (
         IdlePassivationStrategy.create(idle_settings)

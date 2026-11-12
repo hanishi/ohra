@@ -111,7 +111,8 @@ class ClusterShardingSettings:
     (distributed-data.majority-min-cap)."""
     distributed_data: ReplicatorSettings | None = None
     """Sharding's own Replicator (ClusterSharding.scala 730-815); None takes the cluster's
-    distributed_data with prefer_oldest=True and max_delta_elements=5. Never durable."""
+    distributed_data with prefer_oldest=True and max_delta_elements=5. Durable only under
+    remember_entities (see ``effective_replicator_settings``)."""
 
     passivation_strategy_settings: PassivationStrategySettings = (
         PassivationStrategySettings.default_idle_strategy
@@ -129,6 +130,21 @@ class ClusterShardingSettings:
     shard_failure_backoff: float = 10.0
     """How long a remembering shard that failed to store waits to restart
     (shard-failure-backoff). Unused until remembered entities exist."""
+    remember_entities: bool = False
+    """Whether the shard remembers its entities and restarts them after a rebalance or crash
+    (remember-entities). Unused until the shard remembers entities."""
+    remember_entities_store: Literal["ddata"] = "ddata"
+    """Where the entities are remembered (remember-entities-store). Only "ddata" is ported:
+    "eventsourced" needs event sourcing, which ohra does not have."""
+    entity_recovery_strategy: Literal["all", "constant"] = "all"
+    """"all" starts every remembered entity at once, "constant" starts
+    ``entity_recovery_constant_rate_number_of_entities`` every
+    ``entity_recovery_constant_rate_frequency`` seconds (entity-recovery-strategy)."""
+    entity_recovery_constant_rate_frequency: float = 0.1
+    """The pause between batches of the "constant" strategy (entity-recovery-constant-rate-strategy
+    .frequency)."""
+    entity_recovery_constant_rate_number_of_entities: int = 5
+    """The entities per batch of the "constant" strategy (.number-of-entities)."""
     lease_settings: LeaseUsageSettings | None = None
     """The lease each shard acquires before it starts its entities, and how long it waits to
     retry a failed acquire (use-lease, lease-retry-interval); None means no lease."""
@@ -159,6 +175,21 @@ class ClusterShardingSettings:
                 raise ValueError(f"{name} must be an int >= 0 or 'all'")
         if self.majority_min_cap < 0:
             raise ValueError("majority_min_cap must be >= 0")
+        if self.remember_entities_store != "ddata":
+            raise ValueError(
+                f"remember_entities_store must be 'ddata', got {self.remember_entities_store!r}: "
+                "the event-sourced store is not ported because ohra has no event sourcing"
+            )
+        # ClusterShardingSettings.scala 880-882
+        if self.entity_recovery_strategy not in ("all", "constant"):
+            raise ValueError(
+                f"Unknown 'entity-recovery-strategy' [{self.entity_recovery_strategy}], "
+                "valid values are 'all' or 'constant'"
+            )
+        if self.entity_recovery_constant_rate_frequency <= 0:
+            raise ValueError("entity_recovery_constant_rate_frequency must be > 0")
+        if self.entity_recovery_constant_rate_number_of_entities < 1:
+            raise ValueError("entity_recovery_constant_rate_number_of_entities must be >= 1")
 
     def state_read_consistency(self) -> Replicator.ReadConsistency:
         """ClusterSharding.scala 782-788 (``stateReadConsistency``)."""
@@ -179,18 +210,26 @@ class ClusterShardingSettings:
     def effective_replicator_settings(
         self, cluster_settings: ClusterSettings
     ) -> ReplicatorSettings:
-        """ClusterSharding.scala 730-745: sharding's data is never durable."""
+        """ClusterSharding.scala 739-748: sharding's data is durable only under remember entities,
+        by the configured keys, else ``shard-*`` (reference.conf 398)."""
         if self.distributed_data is None:
             base = replace(
                 cluster_settings.distributed_data, prefer_oldest=True, max_delta_elements=5
             )
         else:
             base = self.distributed_data
-        return replace(base, durable_keys=frozenset())
+        if not self.remember_entities:
+            return replace(base, durable_keys=frozenset())
+        if self.distributed_data is None:
+            return replace(base, durable_keys=frozenset({"shard-*"}))
+        return base
 
     @property
     def passivation_strategy(self) -> PassivationStrategy:
-        """Classic 941-942: what the settings resolve to."""
+        """Classic 747-750: no passivation under remember entities, else what the settings
+        resolve to."""
+        if self.remember_entities:
+            return NoPassivationStrategy()
         return passivation_strategy(self.passivation_strategy_settings)
 
     def with_passivation_strategy(
@@ -202,6 +241,10 @@ class ClusterShardingSettings:
     def with_no_passivation_strategy(self) -> ClusterShardingSettings:
         """Typed 836-837."""
         return replace(self, passivation_strategy_settings=PassivationStrategySettings.disabled)
+
+    def with_remember_entities(self, remember_entities: bool) -> ClusterShardingSettings:
+        """Classic 948-949."""
+        return replace(self, remember_entities=remember_entities)
 
     def with_lease_settings(self, lease_settings: LeaseUsageSettings) -> ClusterShardingSettings:
         """Classic 975."""

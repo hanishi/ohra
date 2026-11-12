@@ -19,15 +19,23 @@ guardian subscribes to the sample's keys, so the soak holds every node's view of
   the sample's own query, and compares the answers with each other and with what the converged
   views imply.
 
-Ctrl-C, or the end of ``--duration``, runs one last check, prints a summary and terminates
-every system. Every random choice comes from one ``random.Random`` seeded with ``--seed``.
+Ctrl-C (SIGINT or SIGTERM), or the end of ``--duration``, runs one last check, prints a summary
+and terminates every system: ``main`` turns the signal into ``run``'s ``stop`` event. A
+cancellation of ``run`` is not a stop: the systems terminate and it propagates, so a caller's
+timeout bounds the soak. Every random choice comes from one ``random.Random`` seeded with
+``--seed``.
 
-``observed(data)`` is the entries of an ``LWWMap`` or a ``PNCounterMap``, else the data. The
-spec's ``merge(b, a) == b`` compares the whole data, including the ORSet dots under the maps'
-keys, and merge drops the dots the other side has already seen (Pekko's ORSet does the same):
-two nodes holding the same entries only become ``==`` once full-state gossip has run, so the
-lags would measure the gossip interval, not the replication. The metrics sample also rewrites
-its entries with fresh timestamps on every tick, frozen or not, so its whole data never settles.
+**Containment and convergence compare what a reader sees, not whole-data equality.** The spec
+asks for ``merge(b, a) == b``; the soak tests ``observed(merge(b, a)) == observed(b)``, and its
+checks wait for ``observed`` to be equal on every node. ``observed(data)`` is the entries of an
+``LWWMap`` or a ``PNCounterMap``, else the data. The reason is the ORSet under those maps' keys:
+merge subtracts from each element's dot the versions the other side's version vector has seen,
+so a state built from deltas and the same state built from full merges hold different dots for
+the same elements, and are not ``==`` until full-state gossip has merged them alike. Pekko's
+ORSet does the same (``ORSet.scala``, ``mergeCommonKeys``, lines 198-258, and the add delta at
+365). With whole-data equality the lags would measure the 2 s gossip interval, not the
+replication. The metrics sample also rewrites its entries with fresh timestamps on every tick,
+frozen or not, so its whole data never settles at all.
 """
 
 import argparse
@@ -35,6 +43,7 @@ import asyncio
 import math
 import random
 import reprlib
+import signal
 import socket
 import statistics
 import sys
@@ -487,9 +496,13 @@ async def run(
     seed: int | None = None,
     check_timeout: float = 30.0,
     out: Callable[[str], None] = print,
+    *,
+    stop: asyncio.Event | None = None,
 ) -> SoakResult:
-    """Run the soak; for ``duration`` seconds, or until cancelled (Ctrl-C), which runs the last
-    check and returns the result too."""
+    """Run the soak for ``duration`` seconds, or until ``stop`` is set (``main`` sets it on
+    Ctrl-C); either way the last check and the summary run. A cancellation is let through: the
+    systems terminate and it propagates, with no last check."""
+    stop = asyncio.Event() if stop is None else stop
     workload = WORKLOADS[sample]
     seed = time.time_ns() if seed is None else seed
     rng = random.Random(seed)
@@ -580,7 +593,7 @@ async def run(
             next_at += 1 / rate
             await asyncio.sleep(max(0.0, next_at - loop.time()))
 
-    async def stop(task: asyncio.Task[None]) -> None:
+    async def cancel(task: asyncio.Task[None]) -> None:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
@@ -636,45 +649,42 @@ async def run(
         lags.period, lags.all = [], []
         resume()
         if workload.command is not None:
-            stack.push_async_callback(stop, asyncio.create_task(load(workload.command)))
+            stack.push_async_callback(cancel, asyncio.create_task(load(workload.command)))
 
         start = loop.time()
         end = math.inf if duration is None else start + duration
         next_report, next_check = start + report_every, start + check_every
         last_report, last_commands, k = start, 0, 0
-        try:
-            while True:
-                await asyncio.sleep(max(0.0, min(next_report, next_check, end) - loop.time()))
-                now = loop.time()
-                if now >= end:
-                    break
-                if now >= next_check:
-                    k += 1
-                    if await check(k):
-                        passed += 1
-                    else:
-                        failed += 1
-                    resume()
-                    while next_check <= loop.time():
-                        next_check += check_every
-                now = loop.time()
-                if now >= next_report:
-                    p50, p95, p99 = _percentiles(lags.period, 50, 95, 99)
-                    peak = _ms(max(lags.period)) if lags.period else "-"
-                    per_second = (state.commands - last_commands) / (now - last_report)
-                    out(
-                        f"t={now - start:.0f}s cmds={state.commands} ({per_second:.0f}/s) "
-                        f"lag p50={p50} p95={p95} p99={p99} max={peak} "
-                        f"behind={lags.behind}/{len(lags.queues)} pairs"
-                    )
-                    lags.period = []
-                    last_report, last_commands = now, state.commands
-                    while next_report <= now:
-                        next_report += report_every
-        except asyncio.CancelledError:  # Ctrl-C: the last check and the summary still run
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
+        while not stop.is_set():
+            with suppress(TimeoutError):
+                async with asyncio.timeout(min(next_report, next_check, end) - loop.time()):
+                    await stop.wait()
+            now = loop.time()
+            if stop.is_set() or now >= end:
+                break
+            if now >= next_check:
+                k += 1
+                if await check(k):
+                    passed += 1
+                else:
+                    failed += 1
+                resume()
+                while next_check <= loop.time():
+                    next_check += check_every
+            now = loop.time()
+            if now >= next_report:
+                p50, p95, p99 = _percentiles(lags.period, 50, 95, 99)
+                peak = _ms(max(lags.period)) if lags.period else "-"
+                per_second = (state.commands - last_commands) / (now - last_report)
+                out(
+                    f"t={now - start:.0f}s cmds={state.commands} ({per_second:.0f}/s) "
+                    f"lag p50={p50} p95={p95} p99={p99} max={peak} "
+                    f"behind={lags.behind}/{len(lags.queues)} pairs"
+                )
+                lags.period = []
+                last_report, last_commands = now, state.commands
+                while next_report <= now:
+                    next_report += report_every
         k += 1
         if await check(k):
             passed += 1
@@ -700,8 +710,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--check-timeout", type=float, default=30.0, metavar="SECONDS")
     args = parser.parse_args()
-    result = asyncio.run(
-        run(
+
+    async def soak() -> SoakResult:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):  # Ctrl-C: the last check and the summary
+            loop.add_signal_handler(sig, stop.set)
+        return await run(
             args.sample,
             nodes=args.nodes,
             rate=args.rate,
@@ -710,8 +725,10 @@ def main() -> None:
             duration=args.duration,
             seed=args.seed,
             check_timeout=args.check_timeout,
+            stop=stop,
         )
-    )
+
+    result = asyncio.run(soak())
     if args.duration is not None and result.checks_failed > 0:
         sys.exit(1)
 

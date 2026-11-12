@@ -2,7 +2,7 @@
 
 Not a port of a Pekko spec. The first test runs ``soak.run`` as the CLI does, briefly; the second
 pins that an actor answering differently from the converged views is a violation, and that a
-failed check does not hang.
+failed check does not hang; the third, that a cancellation of ``run`` propagates.
 """
 
 import asyncio
@@ -43,6 +43,8 @@ async def test_a_disagreeing_actor_is_a_violation(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setitem(soak.WORKLOADS, "broken", replace(cache, query=query))
     lines: list[str] = []
+    loop = asyncio.get_running_loop()
+    start = loop.time()
     async with asyncio.timeout(10):
         result = await soak.run(
             "broken",
@@ -54,5 +56,22 @@ async def test_a_disagreeing_actor_is_a_violation(monkeypatch: pytest.MonkeyPatc
             seed=1,
             out=lines.append,
         )
+    assert loop.time() - start < 10
     assert result.checks_failed >= 1
     assert any(line.startswith("VIOLATION check #") for line in lines)
+
+
+async def test_a_cancellation_propagates():
+    reported = asyncio.Event()
+
+    def out(line: str) -> None:
+        if line.startswith("t="):
+            reported.set()
+
+    task = asyncio.create_task(soak.run("cache", nodes=2, rate=20, report_every=0.5, out=out))
+    async with asyncio.timeout(30):
+        await reported.wait()
+    task.cancel()
+    async with asyncio.timeout(10):
+        with pytest.raises(asyncio.CancelledError):
+            await task

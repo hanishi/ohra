@@ -554,7 +554,8 @@ async def test_an_unreachable_node_stalls_new_allocations_until_it_is_removed():
         [fresh] = ids_on_new_shards(1, {shard_id_of(e, 10) for e in where})
         fresh_shard = shard_id_of(fresh, 10)
         coordinator = nodes[0].resolve(
-            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator/singleton"
+            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator"
+            "/singleton/coordinator"
         )
         home = TestProbe[ShardHome](Node(nodes[0]))
         await crash(nodes[2])
@@ -616,7 +617,8 @@ async def test_a_rejoined_node_at_the_same_address_serves_its_entities_again():
         await eventually(lambda: all_up(a, 2) and all_up(b2, 2), timeout=8)
         start(b2, settings=DDATA)
         coordinator = a.resolve(
-            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator/singleton"
+            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator"
+            "/singleton/coordinator"
         )
         coordinator.tell(Register(cast(Any, "not a region")))  # fails it: it restarts
         for e in on_b:

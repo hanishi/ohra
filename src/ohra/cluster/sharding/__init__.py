@@ -14,6 +14,7 @@ from ...coordinated_shutdown import CoordinatedShutdown
 from ..core import Cluster
 from ..ddata.replicator import Replicator
 from ..singleton import ClusterSingleton, SingletonActor
+from .backoff_supervisor import backoff_on_stop_supervisor
 from .coordinator import (
     CoordinatorState,
     LeastShardAllocationStrategy,
@@ -160,9 +161,6 @@ class ClusterSharding:
             f"region-shutdown-{name}",
             progress.task(Cluster(self.system), region.ref),
         )
-        # Pekko's BackoffOpts.onStop restarts a coordinator that throws at once, with its default
-        # decider; the backoff is for one that stops, which this one does only after its stop
-        # message
         # ClusterSharding.scala 766-794, without roles: the coordinator's store, when remember
         # entities is on
         provider = (
@@ -175,7 +173,20 @@ class ClusterSharding:
         supervised = Behaviors.supervise(
             coordinator_behavior(name, settings, self._replicator, provider)
         ).on_failure(SupervisorStrategy.restart())
-        coordinator = SingletonActor(supervised, f"{name}Coordinator").with_stop_message(
+        # ClusterSharding.scala 816-834: Pekko's BackoffOpts.onStop(...).withFinalStopMessage(_ ==
+        # Terminate), with the coordinator as its child "coordinator". Its default decider
+        # restarts a coordinator that throws at once; the backoff is for one that stops, as when
+        # its remember-entities store stops
+        backoff = settings.coordinator_failure_backoff
+        singleton = backoff_on_stop_supervisor(
+            supervised,
+            "coordinator",
+            backoff,
+            backoff * 5,
+            0.2,
+            lambda m: isinstance(m, _Terminate),
+        )
+        coordinator = SingletonActor(singleton, f"{name}Coordinator").with_stop_message(
             _Terminate()
         )
         if settings.coordinator_singleton_settings is not None:

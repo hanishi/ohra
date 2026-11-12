@@ -8,7 +8,9 @@ coordinator's Replicator and another for its store's:
   region can host them, also when they arrive late;
 - a new shard's allocation waits for both the state write and the remember write, and the remember
   write is retried on UpdateFailed and on its timeout, but not while terminating;
-- the store stopping stops the coordinator, and a restarted coordinator starts a new store."""
+- the store stopping stops the coordinator, and a restarted coordinator starts a new store;
+- under the on-stop backoff supervisor, a coordinator stopped by its store comes back after the
+  backoff, and ``_Terminate`` stops it for good."""
 
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ from ohra.cluster.sharding.coordinator import (
     _Terminate,  # pyright: ignore[reportPrivateUsage]
     coordinator_behavior,
 )
+from ohra.cluster.sharding.backoff_supervisor import backoff_on_stop_supervisor
 from ohra.cluster.sharding.remember_entities import (
     DDataRememberEntitiesProvider,
     RememberEntitiesCoordinatorStore,
@@ -391,3 +394,43 @@ async def test_without_remember_entities_no_store_is_spawned():
         update.reply_to.tell(Replicator.UpdateSuccess(update.key))
         await asker.expect_message(ShardHome("1", region.ref), 3)
         await replicator.expect_no_message(0.1)
+
+
+def backed_off(node: Node, replicator: TestProbe[Any], store: TestProbe[Any]) -> ActorRef[Any]:
+    """A coordinator with remember entities on as ``ClusterSharding.init`` wires it: under the
+    on-stop backoff supervisor, as its child ``coordinator``."""
+    provider = ProbeStoreProvider("Counter", REMEMBER, 5, node.probe().ref, store.ref)
+    supervised = Behaviors.supervise(
+        coordinator_behavior("Counter", REMEMBER, replicator.ref, provider)
+    ).on_failure(SupervisorStrategy.restart())
+    backoff = REMEMBER.coordinator_failure_backoff
+    behavior = backoff_on_stop_supervisor(
+        supervised, "coordinator", backoff, backoff * 5, 0.2, lambda m: isinstance(m, _Terminate)
+    )
+    return node.system._system_root.spawn_child(behavior, "singleton", None).ref  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_store_stopping_restarts_the_coordinator_after_the_backoff():
+    async with manual_node() as node:
+        replicator, store = node.probe(), node.probe()
+        singleton = backed_off(node, replicator, store)
+        coordinator = f"{singleton.path}/coordinator"
+        assert (await store.expect_message_type(Coord.GetShards, 3)).reply_to.path == coordinator
+        node.system.resolve(f"{coordinator}/RememberEntitiesStore").tell(StopStore())
+        await replicator.expect_terminated(node.system.resolve(coordinator), 3)
+        assert node.manual is not None
+        backoff = REMEMBER.coordinator_failure_backoff
+        await node.manual.expect_no_message_for(backoff - 0.01, store)
+        await node.manual.time_passes(backoff * 0.2 + 0.01)  # the random factor at most
+        assert (await store.expect_message_type(Coord.GetShards, 3)).reply_to.path == coordinator
+
+
+async def test_terminate_stops_the_supervised_coordinator_for_good():
+    async with manual_node() as node:
+        replicator, store = node.probe(), node.probe()
+        singleton = backed_off(node, replicator, store)
+        await store.expect_message_type(Coord.GetShards, 3)
+        singleton.tell(_Terminate())
+        await replicator.expect_terminated(singleton, 3)
+        assert node.manual is not None
+        await node.manual.expect_no_message_for(REMEMBER.coordinator_failure_backoff * 6, store)

@@ -670,7 +670,8 @@ async def test_a_failed_coordinator_restarts():
         start(a)
         assert await ask(ref(a, "warm"), lambda r: Count(1, r), timeout=5) == 1
         coordinator = a.resolve(
-            f"ohra://c@127.0.0.1:{p}/system/singletonManagerCounterCoordinator/singleton"
+            f"ohra://c@127.0.0.1:{p}/system/singletonManagerCounterCoordinator"
+            "/singleton/coordinator"
         )
         coordinator.tell(Register(cast(Any, "not a region")))  # fails the coordinator
         [fresh] = ids_on_new_shards(1, {shard_id_of("warm", FAST_SHARDING.number_of_shards)})

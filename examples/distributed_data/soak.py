@@ -9,21 +9,26 @@ actor on each, and sends random commands at ``--rate`` per second to random node
 guardian subscribes to the sample's keys, so the soak holds every node's view of every key.
 
 - **Lag.** When node A's view changes at time t, ``(t, A's view)`` goes on a queue for each other
-  node B. B has caught up with it when, for every key of it, merging A's data into B's changes
-  nothing a reader of B sees: ``observed(merge(B's data, A's data)) == observed(B's data)``. A's
-  views only grow, so each queue is popped from its head while B has caught up, and the lag of an
-  entry is the time B first caught up minus t. Only the lags under the load count: the soak
-  waits for the views to converge after startup and clears the queues before the load starts.
+  node B that has not caught up with it yet. B has caught up with it when, for every key of it,
+  merging A's data into B's changes nothing a reader of B sees:
+  ``observed(merge(B's data, A's data)) == observed(B's data)``. A's views only grow, so each
+  queue is popped from its head while B has caught up, and the lag of an entry is the time B
+  first caught up minus t. A view B already holds, such as one A got from B, is no lag: counted,
+  it would add a 0 for every relay and pull the percentiles down. Only the lags under the load
+  count: the soak waits for the views to converge after startup and clears the queues before the
+  load starts. The run's percentiles come from a uniform sample of ``LAG_SAMPLE_SIZE`` lags; its
+  count and max are exact.
 - **Check.** Every ``--check-every`` seconds the load stops (the metrics' measure freezes at its
   last values), the soak waits until every node's view is equal, asks every node's actor through
   the sample's own query, and compares the answers with each other and with what the converged
   views imply.
 
 Ctrl-C (SIGINT or SIGTERM), or the end of ``--duration``, runs one last check, prints a summary
-and terminates every system: ``main`` turns the signal into ``run``'s ``stop`` event. A
-cancellation of ``run`` is not a stop: the systems terminate and it propagates, so a caller's
-timeout bounds the soak. Every random choice comes from one ``random.Random`` seeded with
-``--seed``.
+and terminates every system: ``main`` turns the signal into ``run``'s ``stop`` event. During
+startup it skips the check; after a Ctrl-C the last check waits at most ``STOP_CHECK_TIMEOUT``.
+A second Ctrl-C cancels ``run``. A cancellation of ``run`` is not a stop: the systems terminate
+and it propagates, so a caller's timeout bounds the soak. Every random choice comes from one
+``random.Random`` seeded with ``--seed``.
 
 **Containment and convergence compare what a reader sees, not whole-data equality.** The spec
 asks for ``merge(b, a) == b``; the soak tests ``observed(merge(b, a)) == observed(b)``, and its
@@ -44,7 +49,6 @@ import math
 import random
 import reprlib
 import signal
-import socket
 import statistics
 import sys
 import time
@@ -77,6 +81,7 @@ from ohra.cluster.ddata import (
     Replicator,
     ReplicatorSettings,
 )
+from ohra.testkit.multi_node_spec import free_port
 from replicated_cache import Cached, Evict, GetFromCache, PutInCache, data_key, replicated_cache
 from replicated_metrics import (
     MAX_HEAP_KEY,
@@ -100,6 +105,8 @@ from voting_service import (
 NOTIFY_SUBSCRIBERS_INTERVAL = 0.01
 ASK_TIMEOUT = 5.0  # above the samples' own read timeouts of 3 s
 STARTUP_TIMEOUT = 30.0
+STOP_CHECK_TIMEOUT = 5.0  # the last check's, after a Ctrl-C
+LAG_SAMPLE_SIZE = 100_000  # the run's percentiles come from a uniform sample of this many lags
 
 type View = dict[Key[Any], ReplicatedData]
 
@@ -365,7 +372,8 @@ class SoakResult:
     checks_passed: int
     checks_failed: int
     lags: list[float]
-    """Every lag measured, in seconds."""
+    """A uniform sample of the lags measured, in seconds: all of them up to
+    ``LAG_SAMPLE_SIZE``."""
 
 
 # the nodes
@@ -405,21 +413,19 @@ def _guardian(
     return setup
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 # the measuring
 
 
-class _Lags:
+class Lags:
     """Every node's view, and for each pair (A, B) the queue of A's views B has not caught up
     with. B has caught up with a view of A when merging it into B's view changes nothing a
-    reader of B sees."""
+    reader of B sees.
 
-    def __init__(self, nodes: int) -> None:
+    The lags since the last report are ``period``. The run's are ``count`` and ``max``, exact,
+    and ``sample``, a uniform sample of at most ``capacity`` (Algorithm R), so a run that goes
+    on for days holds the same memory as one of minutes."""
+
+    def __init__(self, nodes: int, rng: random.Random, capacity: int = LAG_SAMPLE_SIZE) -> None:
         self.views: list[View] = [{} for _ in range(nodes)]
         pairs = [(a, b) for a in range(nodes) for b in range(nodes) if a != b]
         self.queues: dict[tuple[int, int], deque[tuple[float, View]]] = {p: deque() for p in pairs}
@@ -428,17 +434,41 @@ class _Lags:
         self._seen: dict[tuple[int, int], dict[Key[Any], tuple[object, object, bool]]] = {
             p: {} for p in pairs
         }
+        self._rng = rng
+        self._capacity = capacity
         self.period: list[float] = []
-        self.all: list[float] = []
+        self.count = 0
+        self.max = 0.0
+        self.sample: list[float] = []
+
+    def reset(self) -> None:
+        """Forget every queue and lag, the views kept."""
+        for queue in self.queues.values():
+            queue.clear()
+        self.period = []
+        self.count, self.max, self.sample = 0, 0.0, []
+
+    def record(self, lag: float) -> None:
+        self.period.append(lag)
+        self.count += 1
+        self.max = max(self.max, lag)
+        if len(self.sample) < self._capacity:
+            self.sample.append(lag)
+        else:
+            j = self._rng.randrange(self.count)
+            if j < self._capacity:
+                self.sample[j] = lag
 
     def changed(self, node: int, key: Key[Any], data: ReplicatedData, now: float) -> None:
         view = {**self.views[node], key: data}
         self.views[node] = view
         for (a, b), queue in self.queues.items():
             if a == node:
-                queue.append((now, view))
-                if len(queue) == 1:  # a longer queue's head is not caught up: b has not changed
-                    self._catch_up(a, b, now)
+                # a longer queue's head is not caught up, so b cannot hold this later view; an
+                # empty one may: a view a got from b, or from a node b heard from first, is no
+                # wait of b's, and no lag
+                if queue or not self._contains(a, b, view):
+                    queue.append((now, view))
             elif b == node:
                 self._catch_up(a, b, now)
 
@@ -446,8 +476,7 @@ class _Lags:
         queue = self.queues[(a, b)]
         while queue and self._contains(a, b, queue[0][1]):
             t, _ = queue.popleft()
-            self.period.append(now - t)
-            self.all.append(now - t)
+            self.record(now - t)
 
     def _contains(self, a: int, b: int, view_a: View) -> bool:
         view_b = self.views[b]
@@ -508,7 +537,7 @@ async def run(
     rng = random.Random(seed)
     state = SoakState(rng, measure_interval=nodes / rate)
     loop = asyncio.get_running_loop()
-    lags = _Lags(nodes)
+    lags = Lags(nodes, rng)
     passed = failed = 0
     running = asyncio.Event()  # the load runs while it is set
 
@@ -532,9 +561,9 @@ async def run(
         except Exception as e:  # an answer that cannot be right, not a crash of the soak
             return e
 
-    async def check(k: int) -> bool:
+    async def check(k: int, timeout: float) -> bool:
         stopped = loop.time()
-        deadline = stopped + check_timeout
+        deadline = stopped + timeout
         running.clear()  # the load task stops before its next command
         state.frozen = True
         while True:
@@ -552,7 +581,7 @@ async def run(
                     )
                     out(
                         f"VIOLATION check #{k}: views did not converge within "
-                        f"{check_timeout:g} s; nodes {_nodes(differ)} differ from node 0 "
+                        f"{timeout:g} s; nodes {_nodes(differ)} differ from node 0 "
                         f"on keys {', '.join(keys)}"
                     )
                     return False
@@ -598,6 +627,21 @@ async def run(
         with suppress(asyncio.CancelledError):
             await task
 
+    async def unless_stopped(work: Awaitable[None]) -> bool:
+        """Run ``work``; False if ``stop`` was set first, which cancels it."""
+        task = asyncio.ensure_future(work)
+        stopped = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            task.cancel()
+            stopped.cancel()
+            await asyncio.gather(task, stopped, return_exceptions=True)
+        if task.cancelled():
+            return False
+        task.result()  # its error, if it failed
+        return True
+
     out(
         f"soak {sample}: {nodes} nodes, rate {rate:g}/s, seed {seed}, "
         f"notify_subscribers_interval={NOTIFY_SUBSCRIBERS_INTERVAL:g} s"
@@ -614,14 +658,17 @@ async def run(
             system.terminate()
         await asyncio.gather(*(system.when_terminated() for system in systems))
 
-    async with AsyncExitStack() as stack:
-        stack.push_async_callback(terminate)
+    async def replica_count(system: ActorSystem[Any]) -> int:
+        replicator = DistributedData(system).replicator
+        return (await ask(replicator, Replicator.GetReplicaCount, ASK_TIMEOUT)).n
+
+    async def startup() -> None:
         for i in range(nodes):
             ready: asyncio.Future[ActorRef[Any]] = loop.create_future()
             system = ActorSystem(
                 _guardian(i, workload, state, ready, on_change),
                 "soak",
-                address=("127.0.0.1", _free_port()),
+                address=("127.0.0.1", free_port()),
                 cluster=settings,
             )
             systems.append(system)
@@ -630,11 +677,6 @@ async def run(
         seed_node = Cluster(systems[0]).self_address
         for system in systems:
             Cluster(system).manager.tell(Join(seed_node))
-
-        async def replica_count(system: ActorSystem[Any]) -> int:
-            replicator = DistributedData(system).replicator
-            return (await ask(replicator, Replicator.GetReplicaCount, ASK_TIMEOUT)).n
-
         async with asyncio.timeout(STARTUP_TIMEOUT):
             while any(n != nodes for n in await asyncio.gather(*map(replica_count, systems))):
                 await asyncio.sleep(0.1)
@@ -644,9 +686,21 @@ async def run(
             # data written before every node had joined reaches the late ones by gossip only
             while not converged():
                 await asyncio.sleep(0.01)
-        for queue in lags.queues.values():  # the lags are measured under the load only
-            queue.clear()
-        lags.period, lags.all = [], []
+
+    def summary() -> SoakResult:
+        p50, p99 = _percentiles(lags.sample, 50, 99)
+        peak = _ms(lags.max) if lags.count else "-"
+        out(
+            f"summary: {state.commands} commands, {passed} checks passed, {failed} failed, "
+            f"lag p50={p50} p99={p99} max={peak}"
+        )
+        return SoakResult(state.commands, passed, failed, list(lags.sample))
+
+    async with AsyncExitStack() as stack:
+        stack.push_async_callback(terminate)
+        if not await unless_stopped(startup()):  # a Ctrl-C during startup: nothing to check
+            return summary()
+        lags.reset()  # the lags are measured under the load only
         resume()
         if workload.command is not None:
             stack.push_async_callback(cancel, asyncio.create_task(load(workload.command)))
@@ -664,7 +718,7 @@ async def run(
                 break
             if now >= next_check:
                 k += 1
-                if await check(k):
+                if await check(k, check_timeout):
                     passed += 1
                 else:
                     failed += 1
@@ -686,17 +740,13 @@ async def run(
                 while next_report <= now:
                     next_report += report_every
         k += 1
-        if await check(k):
+        # after a Ctrl-C, a short last check: whoever pressed it wants out
+        timeout = min(check_timeout, STOP_CHECK_TIMEOUT) if stop.is_set() else check_timeout
+        if await check(k, timeout):
             passed += 1
         else:
             failed += 1
-        p50, p99 = _percentiles(lags.all, 50, 99)
-        peak = _ms(max(lags.all)) if lags.all else "-"
-        out(
-            f"summary: {state.commands} commands, {passed} checks passed, {failed} failed, "
-            f"lag p50={p50} p99={p99} max={peak}"
-        )
-        return SoakResult(state.commands, passed, failed, list(lags.all))
+        return summary()
 
 
 def main() -> None:
@@ -714,8 +764,16 @@ def main() -> None:
     async def soak() -> SoakResult:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):  # Ctrl-C: the last check and the summary
-            loop.add_signal_handler(sig, stop.set)
+        task = asyncio.current_task()
+        assert task is not None
+
+        def interrupt() -> None:  # the first Ctrl-C: the last check and the summary
+            if stop.is_set():
+                task.cancel()  # the second: no check, the systems still terminate
+            stop.set()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, interrupt)
         return await run(
             args.sample,
             nodes=args.nodes,
@@ -728,7 +786,11 @@ def main() -> None:
             stop=stop,
         )
 
-    result = asyncio.run(soak())
+    try:
+        result = asyncio.run(soak())
+    except asyncio.CancelledError:
+        print("soak interrupted: no last check", file=sys.stderr)
+        sys.exit(130)
     if args.duration is not None and result.checks_failed > 0:
         sys.exit(1)
 

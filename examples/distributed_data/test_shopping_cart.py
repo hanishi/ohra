@@ -4,10 +4,23 @@
 ``test_handle_updates_from_different_nodes`` are Pekko's three cases.
 ``test_removing_an_item_from_an_empty_cart_does_nothing`` is ohra's own, for the Review Focus:
 a ``RemoveItem`` on a cart that was never written.
+``test_an_update_of_a_deleted_cart_is_unhandled`` is ohra's own too: the Scala's
+``receiveOther`` has no case for ``UpdateDataDeleted``.
 """
 
-from shopping_cart import AddItem, Cart, Command, GetCart, LineItem, RemoveItem, shopping_cart
-from ohra import Address, ActorRef, Cluster, ClusterSettings, Join
+from typing import Any
+
+from shopping_cart import (
+    AddItem,
+    Cart,
+    Command,
+    GetCart,
+    LineItem,
+    RemoveItem,
+    cart_key,
+    shopping_cart,
+)
+from ohra import Address, ActorRef, Cluster, ClusterSettings, EventStream, Join, UnhandledMessage
 from ohra.cluster.ddata import DistributedData, Replicator
 from ohra.testkit import MultiNodeConfig, MultiNodeSpec, TestProbe, multi_node_spec
 
@@ -90,3 +103,25 @@ async def test_removing_an_item_from_an_empty_cart_does_nothing(spec: MultiNodeS
     cart.tell(RemoveItem("9"))
     cart.tell(AddItem(LineItem("1", "Apples", 1)))
     await expect_cart(spec, cart, {LineItem("1", "Apples", 1)})
+
+
+@multi_node_spec(one_node)
+async def test_an_update_of_a_deleted_cart_is_unhandled(spec: MultiNodeSpec):
+    cart = spec.spawn(shopping_cart("user-1"))
+    unhandled: TestProbe[UnhandledMessage] = spec.create_test_probe()
+    spec.system.event_stream.tell(EventStream.Subscribe(UnhandledMessage, unhandled.ref))
+    deleted: TestProbe[Replicator.DeleteResponse[Any]] = spec.create_test_probe()
+    replicator = DistributedData(spec.system).replicator
+    replicator.tell(Replicator.Delete(cart_key("user-1"), Replicator.WriteLocal(), deleted.ref))
+    await deleted.expect_message(Replicator.DeleteSuccess(cart_key("user-1")))
+    cart.tell(AddItem(LineItem("1", "Apples", 1)))
+    update = await unhandled.expect_message_type(UnhandledMessage, 3.0)
+    assert update.recipient == cart
+    assert getattr(update.message, "rsp") == Replicator.UpdateDataDeleted(cart_key("user-1"))
+    # the cart lives on: a GetCart reaches it, and its GetDataDeleted is unhandled too, so no
+    # Cart comes back, as in the Scala
+    nobody: TestProbe[Cart] = spec.create_test_probe()
+    cart.tell(GetCart(nobody.ref))
+    get = await unhandled.expect_message_type(UnhandledMessage, 3.0)
+    assert get.recipient == cart
+    assert getattr(get.message, "rsp") == Replicator.GetDataDeleted(cart_key("user-1"))

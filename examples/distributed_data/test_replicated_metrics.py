@@ -111,4 +111,4 @@ async def test_the_percent_is_used_over_max(spec: MultiNodeSpec):
 
 def test_memory_usage_measures_this_process():
     used, max_ = memory_usage()
-    assert 0 < used < max_
+    assert 2**20 < used < max_  # a CPython process's peak is well over 1 MiB, in bytes

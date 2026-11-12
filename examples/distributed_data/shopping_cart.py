@@ -7,7 +7,8 @@ Differences from the Scala:
   .orElse(receiveOther)`` is one ``match`` with the four groups' cases in that order, marked by
   comments. A message none of them matches is unhandled.
 - An unexpected update failure raises ``RuntimeError``, where the Scala throws
-  ``IllegalStateException``.
+  ``IllegalStateException``. ``UpdateDataDeleted`` is no ``UpdateFailure`` in the Scala, so its
+  ``receiveOther`` leaves it unhandled, and so does the ``match``.
 - The Scala matches ``GetSuccess(DataKey, _)`` and so on; there is one key per actor here, so
   the patterns match the response class alone.
 - ``LineItem`` is ``@remotable``, which is the Scala spec's jackson-cbor serialization binding
@@ -171,6 +172,9 @@ def shopping_cart(user_id: str) -> Behavior[Command]:
                     case _InternalUpdateResponse(Replicator.UpdateTimeout()):
                         # will eventually be replicated
                         return Behaviors.same
+                    case _InternalUpdateResponse(Replicator.UpdateDataDeleted()):
+                        # not an UpdateFailure: the Scala has no case for it
+                        return Behaviors.unhandled
                     case _InternalUpdateResponse(rsp):
                         raise RuntimeError(f"Unexpected failure: {rsp}")
                     case _:

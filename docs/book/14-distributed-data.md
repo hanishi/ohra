@@ -200,20 +200,24 @@ uv run python examples/distributed_data/soak.py cache --nodes 5 --rate 100 --che
 This is a run of it:
 
 ```
-soak cache: 5 nodes, rate 100/s, seed 1794500558526901000, notify_subscribers_interval=0.01 s
-t=5s cmds=501 (100/s) lag p50=391ms p95=638ms p99=776ms max=1014ms behind=20/20 pairs
-t=10s cmds=1000 (100/s) lag p50=385ms p95=729ms p99=819ms max=908ms behind=19/20 pairs
-check #1: 5 nodes converged 0.74 s after the load stopped; actors agree
-t=16s cmds=1501 (83/s) lag p50=394ms p95=755ms p99=975ms max=1239ms behind=0/20 pairs
-...
-check #3: 5 nodes converged 0.75 s after the load stopped; actors agree
-summary: 3773 commands, 3 checks passed, 0 failed, lag p50=400ms p99=1251ms max=3179ms
+soak cache: 5 nodes, rate 100/s, seed 1794504131874011000, notify_subscribers_interval=0.01 s
+t=5s cmds=500 (99/s) lag p50=399ms p95=777ms p99=887ms max=1201ms behind=20/20 pairs
+t=10s cmds=1000 (101/s) lag p50=413ms p95=1153ms p99=2376ms max=3102ms behind=20/20 pairs
+check #1: 5 nodes converged 0.71 s after the load stopped; actors agree
+t=16s cmds=1501 (84/s) lag p50=385ms p95=749ms p99=818ms max=951ms behind=0/20 pairs
+t=20s cmds=1905 (100/s) lag p50=373ms p95=683ms p99=820ms max=864ms behind=20/20 pairs
+t=25s cmds=2405 (100/s) lag p50=395ms p95=778ms p99=825ms max=887ms behind=20/20 pairs
+check #2: 5 nodes converged 0.59 s after the load stopped; actors agree
+t=31s cmds=2905 (84/s) lag p50=393ms p95=791ms p99=987ms max=1148ms behind=0/20 pairs
+t=35s cmds=3309 (100/s) lag p50=401ms p95=712ms p99=794ms max=849ms behind=18/20 pairs
+check #3: 5 nodes converged 0.80 s after the load stopped; actors agree
+summary: 3810 commands, 3 checks passed, 0 failed, lag p50=394ms p99=988ms max=3102ms
 ```
 
-- **Lag.** When node A's view changes, the soak notes the time. Node B has caught up when merging A's data into B's changes nothing a reader of B sees. The lag is the time until B caught up. `behind` counts the pairs of nodes that have not caught up yet.
+- **Lag.** When node A's view changes, the soak notes the time. Node B has caught up when merging A's data into B's changes nothing a reader of B sees. The lag is the time until B caught up. A change B already holds, such as one A received from B, is not a lag. The summary's percentiles come from a uniform sample of 100,000 lags, so a run of days takes no more memory than one of minutes. `behind` counts the pairs of nodes that have not caught up yet.
 - **Check.** A check stops the load, waits until every node's view is the same, asks every node's actor, and compares the answers.
 - **VIOLATION.** A line that starts with `VIOLATION check #k:` means check `k` failed. With `--duration` the exit status is 1.
-- **Stopping.** Ctrl-C runs one last check, prints the summary and exits.
+- **Stopping.** Ctrl-C runs one last check, of at most 5 s, prints the summary and exits. During startup it skips the check. A second Ctrl-C exits at once, with status 130, and still terminates every node.
 - **Subscriber interval.** The soak sets `notify_subscribers_interval=0.01`. The default, 0.5 s, batches `Changed` and would dominate the lag.
 
 ## How it works

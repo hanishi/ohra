@@ -154,7 +154,9 @@ def stand_in(probe: TestProbe[Any]) -> Any:
     """``shard_behavior`` replaced by a shard that is initialized at once and passes every
     message to ``probe``."""
 
-    def shard_behavior(_entity: Any, shard: str, region: ActorRef[Any]) -> Behavior[Any]:
+    def shard_behavior(
+        _entity: Any, shard: str, region: ActorRef[Any], *_remember: Any
+    ) -> Behavior[Any]:
         def setup(_ctx: ActorContext[Any]) -> Behavior[Any]:
             region.tell(ShardInitialized(shard))
 

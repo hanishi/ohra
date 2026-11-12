@@ -27,13 +27,18 @@ from .shard import (
     ShardInitialized,
     ShardsUpdated,
     ShardStopped,
+    StartEntities,
+    StartEntity,
     _log_passivation_strategy,  # pyright: ignore[reportPrivateUsage]
+    _StartEntity,  # pyright: ignore[reportPrivateUsage]
     region_state_query,
     region_stats_query,
     shard_behavior,
     shard_id_of,
 )
 from .passivation_settings import NoPassivationStrategy
+from .remember_entities import DDataRememberEntitiesProvider
+from .remember_entity_starter import remember_entity_starter_manager
 from ..core import (
     Cluster,
     MemberDowned,
@@ -80,6 +85,14 @@ class _ShardTerminated:
 
 
 @dataclass(frozen=True)
+class _RestartShard:
+    """ShardRegion.scala 481-485: when remembering entities and the shard stops unexpected (e.g.
+    persist failure), we restart it after a back off using this message."""
+
+    shard_id: str
+
+
+@dataclass(frozen=True)
 class _GracefulShutdown:
     """CoordinatedShutdown's region-shutdown task (Pekko's GracefulShutdown): hand every shard
     off."""
@@ -104,8 +117,16 @@ class _ExitingProgress:
 
 
 def region_behavior(
-    entity: Entity[Any], settings: ClusterShardingSettings, progress: _ExitingProgress
+    entity: Entity[Any],
+    settings: ClusterShardingSettings,
+    progress: _ExitingProgress,
+    remember_entities_provider: DDataRememberEntitiesProvider | None = None,
 ) -> Behavior[Any]:
+    """Pekko's ``ShardRegion``. With a ``remember_entities_provider``, its shards remember their
+    entities in the provider's store and start them through the region's starter manager, and a
+    shard that stops while not being handed off is started again after
+    ``shard_failure_backoff``."""
+
     @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
         progress.future = asyncio.get_running_loop().create_future()
@@ -118,7 +139,10 @@ def region_behavior(
         # shards spawned that have not sent ShardInitialized yet (ShardRegion.scala 652)
         starting_shards: set[str] = set()
         region_by_shard: dict[str, ActorRef[Any]] = {}
-        shard_buffers: dict[str, deque[ShardingEnvelope[Any]]] = {}
+        # envelopes, _StartEntity and _RestartShard, as Pekko's shardBuffers
+        shard_buffers: dict[str, deque[Any]] = {}
+        # shards that were sent HandOff, whose termination is no failure (ShardRegion.scala 653)
+        handing_off: set[ActorRef[Any]] = set()
         buffered = 0
         logged_full_buffer_warning = False
         next_registration_delay = max(0.1, settings.retry_interval / 8)
@@ -127,7 +151,14 @@ def region_behavior(
         passivation_strategy = settings.passivation_strategy
         cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
         ctx.timers.start_timer_with_fixed_delay("retry", _Retry(), settings.retry_interval)
-        _log_passivation_strategy(log, type_name, passivation_strategy)
+        # When rememberEntities is enabled, create a manager to throttle entity starting across
+        # all shards in this region (per entity type) rather than per shard (674-678)
+        starter_manager: ActorRef[StartEntities] | None = (
+            ctx.spawn(remember_entity_starter_manager(ctx.self, settings), "RememberEntityStarter")
+            if remember_entities_provider is not None
+            else None
+        )
+        _log_passivation_strategy(log, type_name, passivation_strategy, settings.remember_entities)
 
         # --- coordinator location ----------------------------------------------------------------
 
@@ -190,7 +221,12 @@ def region_behavior(
             if ref is not None:
                 return ref
             log.debug("%s: Starting shard [%s] in region", type_name, shard)
-            ref = ctx.spawn(shard_behavior(entity, shard, ctx.self), shard)
+            ref = ctx.spawn(
+                shard_behavior(
+                    entity, shard, ctx.self, remember_entities_provider, starter_manager
+                ),
+                shard,
+            )
             ctx.watch_with(ref, _ShardTerminated(shard))
             shards[shard] = ref
             starting_shards.add(shard)
@@ -212,8 +248,8 @@ def region_behavior(
             if ref is not None:
                 deliver_buffered(shard, ref)
 
-        def deliver(envelope: ShardingEnvelope[Any]) -> None:
-            """ShardRegion.scala 1281-1329, for an envelope."""
+        def deliver(envelope: ShardingEnvelope[Any] | _StartEntity) -> None:
+            """ShardRegion.scala 1281-1329, for an envelope or a ``_StartEntity``."""
             shard = shard_id_of(envelope.entity_id, settings.number_of_shards)
             home = region_by_shard.get(shard)
             if home is None:
@@ -236,7 +272,39 @@ def region_behavior(
             else:
                 home.tell(envelope)
 
-        def buffer(shard: str, envelope: ShardingEnvelope[Any]) -> None:
+        def deliver_start_entity(msg: _StartEntity) -> None:
+            """ShardRegion.scala 1266-1276. Pekko catches the MatchError of a shard id extractor
+            that does not handle ``StartEntity``; ohra's shard id is always ``shard_id_of``, so
+            this is a plain delivery."""
+            deliver(msg)
+
+        def restart_shard(msg: _RestartShard) -> None:
+            """deliverMessage's RestartShard branch (ShardRegion.scala 1283-1299): buffered
+            without the buffer-size check, as ``shardBuffers.append``."""
+            nonlocal buffered
+            shard = msg.shard_id
+            home = region_by_shard.get(shard)
+            if home is not None:
+                if home.path == ctx.self.path:
+                    get_shard(shard)
+                return
+            if shard not in shard_buffers:
+                log.debug(
+                    "%s: Request shard [%s] home. Coordinator [%s]", type_name, shard, coordinator
+                )
+                if coordinator is not None:
+                    coordinator.tell(GetShardHome(shard, ctx.self))
+            buf = shard_buffers.setdefault(shard, deque())
+            log.debug(
+                "%s: Buffer message for shard [%s]. Total [%s] buffered messages.",
+                type_name,
+                shard,
+                len(buf) + 1,
+            )
+            buf.append(msg)
+            buffered += 1
+
+        def buffer(shard: str, envelope: ShardingEnvelope[Any] | _StartEntity) -> None:
             """ShardRegion.scala 1216-1240, without the fill-level logs: the full-buffer warning
             is logged once until the next delivery of a buffer."""
             nonlocal buffered, logged_full_buffer_warning
@@ -258,9 +326,17 @@ def region_behavior(
         def deliver_buffered(shard: str, receiver: ActorRef[Any]) -> None:
             """ShardRegion.scala 1242-1260."""
             nonlocal buffered, logged_full_buffer_warning
-            for envelope in shard_buffers.pop(shard, ()):
+            for msg in shard_buffers.pop(shard, ()):
                 buffered -= 1
-                receiver.tell(envelope)
+                if isinstance(msg, _RestartShard) and receiver.path != ctx.self.path:
+                    log.debug(
+                        "%s: Dropping buffered message %s, these are only processed by a local "
+                        "ShardRegion.",
+                        type_name,
+                        msg,
+                    )
+                else:
+                    receiver.tell(msg)
             logged_full_buffer_warning = False
 
         def receive_shard_home(shard: str, region: ActorRef[Any]) -> None:
@@ -281,6 +357,7 @@ def region_behavior(
                 )
                 local = shards.get(shard)
                 if local is not None:
+                    handing_off.add(local)
                     local.tell(HandOff(shard, ctx.system.ignore_ref))
                 for envelope in shard_buffers.pop(shard, ()):
                     buffered -= 1
@@ -320,6 +397,10 @@ def region_behavior(
         def active(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             nonlocal coordinator, buffered, logged_full_buffer_warning
             nonlocal graceful_shutdown_in_progress, preparing_for_shutdown
+            if isinstance(msg, StartEntity):
+                # Pekko Typed's StartEntity is the envelope the shard's deliverMessage takes
+                # (typed scaladsl ClusterSharding.scala 380-390)
+                msg = ShardingEnvelope(msg.entity_id, msg)
             if isinstance(msg, ShardingEnvelope):
                 envelope = cast(ShardingEnvelope[Any], msg)
                 if not envelope.entity_id:
@@ -418,18 +499,35 @@ def region_behavior(
                         logged_full_buffer_warning = False
                     local = shards.get(shard)
                     if local is not None:
+                        handing_off.add(local)
                         local.tell(msg)
                     else:
                         reply_to.tell(ShardStopped(shard))
                 case _ShardTerminated(shard):
                     # ShardRegion.scala 1007-1031
-                    shards.pop(shard, None)
+                    ref = shards.pop(shard, None)
                     starting_shards.discard(shard)
                     if (
                         passivation_strategy != NoPassivationStrategy()
                         and not graceful_shutdown_in_progress
                     ):
                         deliver_to_all_shards(ShardsUpdated(len(shards)))
+                    if ref is not None and ref in handing_off:
+                        handing_off.discard(ref)
+                        log.debug("%s: Shard [%s] handoff complete", type_name, shard)
+                    else:
+                        # if persist fails it will stop
+                        log.debug(
+                            "%s: Shard [%s]  terminated while not being handed off",
+                            type_name,
+                            shard,
+                        )
+                        if settings.remember_entities:
+                            ctx.timers.start_single_timer(
+                                ("RestartShard", shard),
+                                _RestartShard(shard),
+                                settings.shard_failure_backoff,
+                            )
                     if (
                         region_by_shard.get(shard) is not None
                         and region_by_shard[shard].path == ctx.self.path
@@ -460,6 +558,10 @@ def region_behavior(
                     send_graceful_shutdown_to_coordinator()
                 case ShardInitialized(shard):
                     initialize_shard(shard)
+                case _RestartShard():
+                    restart_shard(msg)
+                case _StartEntity():
+                    deliver_start_entity(msg)
                 case SetActiveEntityLimit():
                     deliver_to_all_shards(msg)
                 case _:

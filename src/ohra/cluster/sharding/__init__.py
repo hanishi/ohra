@@ -47,6 +47,7 @@ from .shard import (
     ShardingEnvelope,
     ShardRegionStats,
     ShardStopped,
+    StartEntity,
     shard_id_of,
 )
 
@@ -82,8 +83,17 @@ __all__ = [
     "ShardStopped",
     "Sharding",
     "ShardingEnvelope",
+    "StartEntity",
     "shard_id_of",
 ]
+
+
+def _remember_entities_provider(
+    name: str, settings: ClusterShardingSettings, replicator: ActorRef[Replicator.Command]
+) -> DDataRememberEntitiesProvider:
+    """ClusterSharding.scala 766-794, without roles: the provider of the remember-entities
+    stores, the coordinator's and every shard's, on sharding's Replicator."""
+    return DDataRememberEntitiesProvider(name, settings, settings.majority_min_cap, replicator)
 
 
 # --- the extension -------------------------------------------------------------------------------
@@ -121,14 +131,15 @@ class ClusterSharding:
         self, entity: Entity[M]
     ) -> ActorRef[
         ShardingEnvelope[M]
+        | StartEntity
         | GetShardRegionState
         | GetShardRegionStats
         | GetClusterShardingStats
         | SetActiveEntityLimit
     ]:
         """The region of the entity type on this node, as Pekko Typed's ``init``. It takes the
-        envelopes, and the region queries and ``SetActiveEntityLimit`` that Pekko's region takes
-        as its own messages."""
+        envelopes, ``StartEntity``, and the region queries and ``SetActiveEntityLimit`` that
+        Pekko's region takes as its own messages."""
         name = entity.type_key.name
         if name == "replicator":
             raise ValueError(
@@ -154,21 +165,21 @@ class ClusterSharding:
                 "sharding's Replicator keeps the first's",
                 name,
             )
+        # ClusterSharding.scala 766-794: the stores of the coordinator and of the region's
+        # shards, when remember entities is on
+        provider = (
+            _remember_entities_provider(name, settings, self._replicator)
+            if settings.remember_entities
+            else None
+        )
         progress = _ExitingProgress()
-        region = self._parent.spawn_child(region_behavior(entity, settings, progress), name, None)
+        region = self._parent.spawn_child(
+            region_behavior(entity, settings, progress, provider), name, None
+        )
         CoordinatedShutdown(self.system).add_task(
             "cluster-sharding-shutdown-region",
             f"region-shutdown-{name}",
             progress.task(Cluster(self.system), region.ref),
-        )
-        # ClusterSharding.scala 766-794, without roles: the coordinator's store, when remember
-        # entities is on
-        provider = (
-            DDataRememberEntitiesProvider(
-                name, settings, settings.majority_min_cap, self._replicator
-            )
-            if settings.remember_entities
-            else None
         )
         supervised = Behaviors.supervise(
             coordinator_behavior(name, settings, self._replicator, provider)

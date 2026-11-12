@@ -84,7 +84,7 @@ When a node leaves, its shards move to the others, and their entities start agai
 > - `ClusterSharding(system).init(Entity(key, create))`, `entity_ref_for`, `EntityTypeKey`, `EntityContext`, `ShardingEnvelope` and `Passivate` are Pekko's. `Entity` takes `create` as its second argument instead of a second argument list.
 > - The shard id is `crc32(id) % number_of_shards`, as `HashCodeMessageExtractor`, with Pekko's default of 1000 shards.
 > - `Sharding.init` is the region on one node with no coordinator, for apps that run in one process.
-> - There are no remembered entities and no custom allocation strategies. [Appendix B](appendix-deviations.md) has the full list.
+> - [Remembered entities](#remembered-entities) keep their ids in Distributed Data, as Pekko's `remember-entities-store = ddata`. There are no custom allocation strategies. [Appendix B](appendix-deviations.md) has the full list.
 
 ## How it works
 
@@ -119,7 +119,7 @@ sequenceDiagram
 
 **Rebalance and hand-off.** Every 10 seconds the coordinator compares shard counts and may move a few shards from the busiest region to the least busy. A move is a hand-off. The coordinator tells every region `BeginHandOff`, so they start buffering for that shard. Once all have acknowledged, it sends `HandOff` to the owner, whose shard stops its entities and reports `ShardStopped`. Then the shard is allocated afresh and the buffers drain to the new home. A leaving node does the same for all of its shards, in the `cluster-sharding-shutdown-region` phase.
 
-**After a crash.** The coordinator keeps its shard map in [Distributed Data](14-distributed-data.md), in an `LWWRegister` on sharding's own Replicator at `/system/sharding/replicator`. A new coordinator reads the map from a majority of the nodes before it answers anyone, and each change is written to a majority before it takes effect. With the defaults, every node of a cluster of up to eight takes part in each write, and of up to twelve in each read, so while a crashed node has not yet been removed, a new shard's allocation waits for it and is retried. A crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md).
+**After a crash.** The coordinator keeps its shard map in [Distributed Data](14-distributed-data.md), in an `LWWRegister` on sharding's own Replicator at `/system/sharding/replicator`. A new coordinator reads the map from a majority of the nodes before it answers anyone, and each change is written to a majority before it takes effect. With the defaults, every node of a cluster of up to eight takes part in each write, and of up to twelve in each read, so while a crashed node has not yet been removed, a new shard's allocation waits for it and is retried. A crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md). [Remembered entities](#remembered-entities) start there without waiting for a message.
 
 ### Sharding in one process
 
@@ -164,7 +164,7 @@ region = ClusterSharding(system).init(Entity(COUNTER, lambda entity: counter()))
 print(await ask(ClusterSharding(system).entity_ref_for(COUNTER, "alice"), CountUp, timeout=3))
 ```
 
-Entities are in memory: a moved or handed-off entity starts fresh on its new node, and `Behaviors.persisted` is how state outlives that. A rebalance can drop messages that reach the old host in its hand-off window, as Pekko's does; a message that reaches a shard handing off is unhandled, and a message buffered for a passivating entity is dropped when its shard stops or hands off. `ClusterShardingSettings` carries Pekko's `number_of_shards`, `retry_interval`, `rebalance_interval`, `handoff_timeout`, `shard_start_timeout`, `buffer_size`, `rebalance_absolute_limit`, `rebalance_relative_limit` and `coordinator_singleton_settings` (the coordinator's `ClusterSingletonSettings`), plus `shard_region_query_timeout`, `passivation_strategy_settings`, `lease_settings`, `verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff` and `shard_failure_backoff`. The last two are unused until remembered entities arrive. A coordinator that fails on a message restarts at once, as Pekko's does, and the regions register with the new one. A region whose buffer is full drops a message for a shard with no known home into dead letters, and still asks for that shard's home.
+Entities are in memory: a moved or handed-off entity starts fresh on its new node, and `Behaviors.persisted` is how state outlives that. A rebalance can drop messages that reach the old host in its hand-off window, as Pekko's does; a message that reaches a shard handing off is unhandled, and a message buffered for a passivating entity is dropped when its shard stops or hands off. `ClusterShardingSettings` carries Pekko's `number_of_shards`, `retry_interval`, `rebalance_interval`, `handoff_timeout`, `shard_start_timeout`, `buffer_size`, `rebalance_absolute_limit`, `rebalance_relative_limit` and `coordinator_singleton_settings` (the coordinator's `ClusterSingletonSettings`), plus `shard_region_query_timeout`, `passivation_strategy_settings`, `lease_settings`, `verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff` and `shard_failure_backoff`; the [remembered entities](#remembered-entities) section has the rest. A coordinator that fails on a message restarts at once, as Pekko's does, and the regions register with the new one. A region whose buffer is full drops a message for a shard with no known home into dead letters, and still asks for that shard's home.
 
 The coordinator's reads and writes of its state are tuned with six more fields. Their defaults are Pekko's.
 
@@ -175,7 +175,7 @@ The coordinator's reads and writes of its state are tuned with six more fields. 
 | `coordinator_state_read_majority_plus` | `coordinator-state.read-majority-plus` | 5; `"all"` reads from every node |
 | `coordinator_state_write_majority_plus` | `coordinator-state.write-majority-plus` | 3; `"all"` writes to every node |
 | `majority_min_cap` | `distributed-data.majority-min-cap` | 5: the fewest nodes a majority-plus read or write reaches |
-| `distributed_data` | `distributed-data` | `None`: the cluster's `ReplicatorSettings` with `prefer_oldest=True` and `max_delta_elements=5`, never durable |
+| `distributed_data` | `distributed-data` | `None`: the cluster's `ReplicatorSettings` with `prefer_oldest=True` and `max_delta_elements=5`, durable only with [remembered entities](#remembered-entities) |
 
 A read or write reaches a majority plus its extra nodes (5 for reads, 3 for writes), at least `majority_min_cap` and at most every node. With the defaults, writes reach every node of a cluster of up to eight nodes and reads every node of one of up to twelve; in a cluster of three, the majority of two plus the extra nodes is more than three already, so `majority_min_cap` does not come into it. A larger cluster that wants every write on every node asks for it:
 
@@ -236,11 +236,131 @@ print(settings.passivation_strategy_settings.idle_entity_settings)
 PassivationStrategySettings.IdleSettings(timeout=600.0, interval=None)
 ```
 
+### Remembered entities
+
+An entity starts on its first message. When its shard moves to another node, or restarts, the entity starts again only once a message arrives for it. Some entities have to run without being asked, such as one that polls a feed. **Remembered entities** keep the ids of a shard's entities in [Distributed Data](14-distributed-data.md), and start them again with no message:
+
+- after a rebalance or a hand-off, on the shard's new node;
+- after the shard restarts, as when its store fails;
+- after a coordinator fail-over, as when the node that hosted the shard crashed: the new coordinator allocates the remembered shards, and their entities start on their new homes;
+- after the whole cluster restarts, from the durable store on disk.
+
+Turn them on with `with_remember_entities(True)`, on every node:
+
+```python
+import asyncio
+import tempfile
+from dataclasses import dataclass
+from functools import partial
+
+from ohra import (
+    ActorContext,
+    ActorSystem,
+    Address,
+    Behavior,
+    Behaviors,
+    ClusterSettings,
+    ClusterSharding,
+    ClusterShardingSettings,
+    Entity,
+    EntityContext,
+    EntityTypeKey,
+    StartEntity,
+)
+from ohra.cluster.ddata import ReplicatorSettings, sqlite_durable_store
+
+
+@dataclass(frozen=True)
+class Work:
+    job: str
+
+
+WORKER = EntityTypeKey[Work]("Worker")
+started: asyncio.Queue[str] = asyncio.Queue()
+
+
+def worker(entity: EntityContext[Work]) -> Behavior[Work]:
+    @Behaviors.setup
+    def setup(_ctx: ActorContext[Work]) -> Behavior[Work]:
+        started.put_nowait(entity.entity_id)
+        return Behaviors.ignore
+
+    return setup
+
+
+def remembering(directory: str) -> ClusterShardingSettings:
+    durable = ReplicatorSettings(
+        durable_keys=frozenset({"shard-*"}),
+        durable_store=partial(sqlite_durable_store, directory),
+    )
+    return ClusterShardingSettings(distributed_data=durable).with_remember_entities(True)
+
+
+def node() -> ActorSystem[None]:
+    settings = ClusterSettings(seed_nodes=(Address("jobs", "127.0.0.1", 2551),))
+    return ActorSystem(Behaviors.empty, "jobs", address=("127.0.0.1", 2551), cluster=settings)
+
+
+async def main() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        entity = Entity(WORKER, worker).with_settings(remembering(directory))
+        async with node() as system:
+            ClusterSharding(system).init(entity).tell(StartEntity("alice"))
+            print("first run:", await asyncio.wait_for(started.get(), 10))
+        async with node() as system:  # a new cluster: nothing is sent to alice
+            ClusterSharding(system).init(entity)
+            print("second run:", await asyncio.wait_for(started.get(), 30))
+
+
+asyncio.run(main())
+```
+
+It prints:
+
+```
+first run: alice
+second run: alice
+```
+
+- **`StartEntity("alice")`** sent to the region starts alice with no message for her, and the start is remembered like any other. As in Pekko Typed, nothing answers it.
+- **The second run is a new cluster,** and nothing is sent to alice. The coordinator reads the remembered shards from the durable store and allocates them; each shard loads its entity ids and starts them.
+- **Passivation is off.** With remembered entities, `passivation_strategy` resolves to no passivation, as in Pekko. An entity runs until it passivates itself with `Passivate`, and a passivated entity is forgotten.
+- **The durable keys.** A shard keeps its ids in five `ORSet`s, `shard-<type>-<shard id>-0` to `-4`, and the coordinator keeps its shard ids in a `GSet`, `shard-<type>-all`, all on sharding's Replicator. With remembered entities on, the `shard-*` keys are durable. With `distributed_data=None`, their SQLite database is in `ddata-<system>-replicator-<port>`, in the working directory, by [chapter 14's rule](14-distributed-data.md#durable-storage). A `distributed_data` given in the settings keeps its own `durable_keys`: pass `durable_keys=frozenset({"shard-*"})` with it, as the example does, or the entities are forgotten when the whole cluster stops.
+- **`Sharding.init` refuses it** with a `ValueError`: the single-node region has no Replicator to remember entities in.
+
+How a remembering shard runs:
+
+- **It loads before it starts.** A shard reads its ids from its store before it tells the region it is initialized, stashing what arrives meanwhile. It hands the ids to the region's `RememberEntityStarter`, which starts them through the region, so an id whose shard has changed with `number_of_shards` starts on its new shard. The starter sends each start again every `retry_interval` until the shard acknowledges it.
+- **`entity_recovery_strategy`.** `"all"`, the default, starts every remembered entity at once. `"constant"` starts `entity_recovery_constant_rate_number_of_entities` (5) at a time, every `entity_recovery_constant_rate_frequency` seconds (0.1), one shard after another, so a node with many remembered entities does not start them all in one go.
+- **It writes before it acts.** A message for an entity that is not running is buffered while the shard writes the start to its store, and delivered once the entity has started. A passivated entity's stop is written once the entity has stopped. Starts and stops that arrive while a write is in flight go into the next write, as one batch.
+- **The cost** is a write per entity start and stop, at the coordinator's write level: a majority plus `coordinator_state_write_majority_plus` nodes, which with the defaults is every node of a cluster of up to eight. A busy cluster that starts and stops many entities pays for each.
+- **`entity_restart_backoff`.** An entity that stops without passivating is started again after 10 s, or at once when a message arrives for it.
+- **A failed store.** A store write that fails, or a store that stops, restarts the shard at once. A write with no answer restarts it after `updating_state_timeout` (5 s). Either way the shard loads its ids again and keeps what it had stashed.
+- **`shard_failure_backoff`.** A remembering shard that stops without being handed off, as when it loses its lease, is started again by its region after 10 s, once the coordinator has confirmed the shard's home.
+
+The states of an entity in a remembering shard, after Pekko's diagram in `Shard.scala`:
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoState
+    NoState --> RememberedButNotCreated: id loaded from the store
+    NoState --> RememberingStart: message or StartEntity
+    RememberingStart --> Active: start stored, entity started
+    RememberedButNotCreated --> Active: StartEntity or a message
+    RememberedButNotCreated --> RememberingStop: started on another shard
+    Active --> Passivating: Passivate
+    Active --> WaitingForRestart: stopped without passivating
+    WaitingForRestart --> Active: entity_restart_backoff, or a message
+    Passivating --> RememberingStop: entity stopped
+    RememberingStop --> NoState: stop stored
+    RememberingStop --> RememberingStart: stop stored, messages were buffered
+```
+
 ### The shard
 
-A shard hosts the entities of one shard id. Both `Sharding.init` and the cluster regions run it. It follows Pekko's `Shard` with remembered entities off.
+A shard hosts the entities of one shard id. Both `Sharding.init` and the cluster regions run it. It follows Pekko's `Shard`, and the [remembered entities](#remembered-entities) section has what it does when it remembers.
 
-- **Entity states.** An entity is `NoState`, `Active` or `Passivating`. The first message makes it `Active`. `Passivate` makes it `Passivating`, and its termination makes it `NoState` again. The remember-entity states (`RememberingStart`, `RememberingStop`, `RememberedButNotCreated`, `WaitingForRestart`) are the ones remembered entities will use.
+- **Entity states.** An entity is `NoState`, `Active` or `Passivating`. The first message makes it `Active`. `Passivate` makes it `Passivating`, and its termination makes it `NoState` again. Remembered entities add four more, in the [diagram above](#remembered-entities).
 
 ```mermaid
 stateDiagram-v2

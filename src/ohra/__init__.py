@@ -98,6 +98,7 @@ from .cluster.sharding import (
     Sharding,
     ShardingEnvelope,
     ShardRegionStats,
+    StartEntity,
 )
 from .cluster.sbr import (
     DownAll,
@@ -346,6 +347,7 @@ __all__ = [
     "SqliteStore",
     "StashBuffer",
     "StashOverflowError",
+    "StartEntity",
     "Store",
     "Subscribe",
     "Success",

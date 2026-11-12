@@ -8,21 +8,20 @@ coordinator's Replicator and another for its store's:
   region can host them, also when they arrive late;
 - a new shard's allocation waits for both the state write and the remember write, and the remember
   write is retried on UpdateFailed and on its timeout, but not while terminating;
-- the store stopping stops the coordinator, and a restarted coordinator starts a new store;
+- the store stopping stops the coordinator, and a restarted coordinator starts a new store; a
+  store that throws is restarted on its own, and the coordinator keeps running;
 - under the on-stop backoff supervisor, a coordinator stopped by its store comes back after the
   backoff, and ``_Terminate`` stops it for good.
 
-The coordinator side of Pekko's ``ClusterShardingRememberEntitiesSpec`` runs on real nodes: the
-remembered shards start again after a coordinator fail-over and in a new cluster on the same
-durable store. The region does not start remembered entities yet, so the tests observe shards."""
+Pekko's ``ClusterShardingRememberEntitiesSpec``, the coordinator fail-over and the new cluster on
+the same durable store, runs on real nodes in test_cluster_sharding_remember_entities_spec.py."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -50,15 +49,10 @@ from ohra.cluster.sharding.remember_entities import (
     DDataRememberEntitiesProvider,
     RememberEntitiesCoordinatorStore,
 )
-from ohra.cluster.core import Cluster, Down
-from ohra.cluster.ddata import Replicator, ReplicatorSettings, sqlite_durable_store
-from ohra.remote import Address
+from ohra.cluster.ddata import Replicator
 from ohra.supervision import SupervisorStrategy
 from ohra.testkit import FishingOutcomes, TestProbe
 
-from ...util import eventually, free_port
-from ..test_cluster import all_up, unreachable_ports
-from ..test_cluster_sharding import FAST_SHARDING, crash, ids_hosted_by, node, shards_on, start
 from .test_ddata_shard_coordinator import (
     SETTINGS,
     Node,
@@ -80,6 +74,11 @@ class StopStore:
 
 
 @dataclass(frozen=True)
+class CrashStore:
+    """Makes the store a ``ProbeStoreProvider`` started throw."""
+
+
+@dataclass(frozen=True)
 class ProbeStoreProvider(DDataRememberEntitiesProvider):
     """A provider whose coordinator store forwards every message to ``store``."""
 
@@ -92,6 +91,8 @@ class ProbeStoreProvider(DDataRememberEntitiesProvider):
         def forward(msg: Any) -> Behavior[Any]:
             if isinstance(msg, StopStore):
                 return Behaviors.stopped()
+            if isinstance(msg, CrashStore):
+                raise RuntimeError("store crashed")
             store.tell(msg)
             return Behaviors.same
 
@@ -307,6 +308,20 @@ async def test_the_store_stopping_stops_the_coordinator(
         await h.replicator.expect_terminated(h.coordinator, 3)
         text = "Counter: The ShardCoordinator stopping because the remember entities store stopped"
         assert logged(caplog, logging.ERROR, text) == 1
+
+
+async def test_a_coordinator_store_that_throws_is_restarted_and_the_coordinator_keeps_running():
+    async with started() as h:
+        region, asker = h.node.probe(), h.node.probe()
+        h.node.system.resolve(f"{h.coordinator.path}/RememberEntitiesStore").tell(CrashStore())
+        await settle(h.node)
+        await to_active(h)
+        await registered(h.coordinator, h.replicator, region)
+        h.coordinator.tell(GetShardHome("1", asker.ref))
+        update = await expect_update(h.replicator)
+        assert allocated(update) == {"1": region.ref.path}
+        # the restarted store still takes the coordinator's writes
+        await h.expect_add_shard("1")
 
 
 async def test_remembered_shards_before_an_empty_state_are_allocated_when_a_region_registers():
@@ -569,66 +584,3 @@ async def test_terminate_stops_the_supervised_coordinator_for_good():
         await replicator.expect_terminated(singleton, 3)
         assert node.manual is not None
         await node.manual.expect_no_message_for(REMEMBER.coordinator_failure_backoff * 6, store)
-
-
-# --- ClusterShardingRememberEntitiesSpec, the coordinator side, on real nodes -------------------
-
-IN_MEMORY = replace(
-    FAST_SHARDING,
-    remember_entities=True,
-    distributed_data=ReplicatorSettings(prefer_oldest=True, max_delta_elements=5),
-)
-"""Remember entities on, with sharding's Replicator keeping nothing on disk."""
-
-
-async def test_remembered_shards_start_again_when_the_coordinator_fails_over():
-    """ "start remembered entities when coordinator fail over": the new coordinator allocates the
-    shards of the crashed node's region with no message sent. The region does not start
-    remembered entities yet, so the shards are what shows."""
-    p1, p2, p3 = free_port(), free_port(), free_port()
-    async with AsyncExitStack() as stack:
-        nodes = [await stack.enter_async_context(node(p, [p1])) for p in (p1, p2, p3)]
-        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
-        regions = [start(n, settings=IN_MEMORY) for n in nodes]
-        where = await ids_hosted_by(regions, nodes, 12)
-        assert {1, 2} <= set(where.values())
-        on_first = await shards_on(regions[0])
-        assert on_first
-        await crash(nodes[0])
-        await eventually(lambda: unreachable_ports(nodes[1]) == {p1}, timeout=5)
-        Cluster(nodes[1]).manager.tell(Down(Address("c", "127.0.0.1", p1)))
-        await eventually(lambda: all_up(nodes[1], 2) and all_up(nodes[2], 2), timeout=5)
-
-        async def all_started() -> None:
-            surviving = await shards_on(regions[1]) | await shards_on(regions[2])
-            assert on_first <= surviving
-
-        await Node(nodes[1]).probe().await_assert(all_started, max=10)
-
-
-async def test_remembered_shards_start_in_a_new_cluster(tmp_path: Path):
-    """ "start remembered entities in new cluster": a new system on the same durable store hosts
-    the shards the old one remembered, with no message sent."""
-    settings = replace(
-        FAST_SHARDING,
-        remember_entities=True,
-        distributed_data=ReplicatorSettings(
-            durable_keys=frozenset({"shard-*"}),
-            durable_store=lambda: sqlite_durable_store(tmp_path / "ddata"),
-        ),
-    )
-    p = free_port()
-    async with node(p, [p]) as first:
-        await eventually(lambda: all_up(first, 1), timeout=5)
-        region = start(first, settings=settings)
-        await ids_hosted_by([region], [first], 6)
-        remembered = await shards_on(region)
-        assert remembered
-    async with node(p, [p]) as second:
-        await eventually(lambda: all_up(second, 1), timeout=5)
-        region = start(second, settings=settings)
-
-        async def all_started() -> None:
-            assert await shards_on(region) == remembered
-
-        await Node(second).probe().await_assert(all_started, max=10)

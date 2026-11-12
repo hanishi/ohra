@@ -112,7 +112,9 @@ class ClusterShardingSettings:
     distributed_data: ReplicatorSettings | None = None
     """Sharding's own Replicator (ClusterSharding.scala 730-815); None takes the cluster's
     distributed_data with prefer_oldest=True and max_delta_elements=5. Durable only under
-    remember_entities (see ``effective_replicator_settings``)."""
+    remember_entities (see ``effective_replicator_settings``). Settings given here keep their own
+    ``durable_keys``: pass ``durable_keys=frozenset({"shard-*"})`` with them, or remembered
+    entities do not survive a full cluster restart (Pekko's reference.conf has that default)."""
 
     passivation_strategy_settings: PassivationStrategySettings = (
         PassivationStrategySettings.default_idle_strategy
@@ -132,7 +134,8 @@ class ClusterShardingSettings:
     (shard-failure-backoff). Unused until remembered entities exist."""
     remember_entities: bool = False
     """Whether the shard remembers its entities and restarts them after a rebalance or crash
-    (remember-entities). Unused until the shard remembers entities."""
+    (remember-entities). It already turns passivation off and makes the ``shard-*`` keys durable;
+    the shard does not remember entities yet."""
     remember_entities_store: Literal["ddata"] = "ddata"
     """Where the entities are remembered (remember-entities-store). Only "ddata" is ported:
     "eventsourced" needs event sourcing, which ohra does not have."""

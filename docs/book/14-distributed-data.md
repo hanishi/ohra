@@ -565,9 +565,9 @@ All the data is in memory, on every node, and gossip sends the whole value of a 
 
 CRDTs hold state, not commands. A value that has to be decided once, such as which node owns a cart, needs one owner, a [singleton](06-singleton.md) or [sharding](07-sharding.md), rather than a merge.
 
-### Not here yet
+### Inside ohra
 
-The sharding coordinator ([chapter 7](07-sharding.md#sharding-across-nodes)) and the receptionist ([chapter 2](02-actor-system.md#receptionist)) already run on Distributed Data, each with a Replicator of its own. Remembered entities, which Pekko also keeps there, are next.
+The sharding coordinator ([chapter 7](07-sharding.md#sharding-across-nodes)) and the receptionist ([chapter 2](02-actor-system.md#receptionist)) run on Distributed Data, each with a Replicator of its own. So do [remembered entities](07-sharding.md#remembered-entities), on sharding's Replicator: with them on, sharding's `shard-*` keys are [durable](#durable-storage), so the entities start again after the whole cluster has stopped.
 
 ---
 

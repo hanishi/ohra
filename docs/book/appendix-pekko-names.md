@@ -83,6 +83,11 @@
 | `Shard.GetShardStats`, `ShardStats` | internal, in `shard.py`: `GetShardStats(reply_to)`, `ShardStats(shard_id, entity_count)` |
 | `pekko.cluster.sharding.use-lease`, `lease-retry-interval`; `ClusterShardingSettings.withLeaseSettings` | `ClusterShardingSettings.lease_settings`, a `LeaseUsageSettings`; `with_lease_settings(...)` |
 | `verbose-debug-logging`, `fail-on-invalid-entity-state-transition`, `entity-restart-backoff`, `shard-failure-backoff` | `ClusterShardingSettings.verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff`, `shard_failure_backoff` |
+| `pekko.cluster.sharding.remember-entities`, `ClusterShardingSettings.withRememberEntities` | `ClusterShardingSettings.remember_entities`, `with_remember_entities(...)` |
+| `pekko.cluster.sharding.remember-entities-store = ddata` | `ClusterShardingSettings.remember_entities_store`, which is only `"ddata"` |
+| `entity-recovery-strategy`, `entity-recovery-constant-rate-strategy.frequency`, `number-of-entities` | `ClusterShardingSettings.entity_recovery_strategy` (`"all"` or `"constant"`), `entity_recovery_constant_rate_frequency`, `entity_recovery_constant_rate_number_of_entities` |
+| `ShardRegion.StartEntity(entityId)`; typed `ClusterSharding.StartEntity(entityId)` | `StartEntity(entity_id)`, sent to the region; `ShardRegion.StartEntityAck` is internal |
+| `RememberEntityStarterManager`, `RememberEntityStarter` (internal) | internal, in `remember_entity_starter.py`: `remember_entity_starter_manager`, `remember_entity_starter` |
 | `DistributedData(system).replicator`, `selfUniqueAddress` | `DistributedData(system).replicator`, `self_unique_address`; raises `RuntimeError` on a system without `cluster=` |
 | `DistributedData.withReplicatorMessageAdapter[Command, A](factory)` | `DistributedData.with_replicator_message_adapter(factory, unexpected_ask_timeout=20.0)` |
 | `ReplicatorMessageAdapter.askUpdate / askGet / askDelete / askReplicaCount / subscribe / unsubscribe` | `ReplicatorMessageAdapter[M, A].ask_update / ask_get / ask_delete / ask_replica_count / subscribe / unsubscribe` |

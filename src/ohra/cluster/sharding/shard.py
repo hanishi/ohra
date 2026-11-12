@@ -134,11 +134,10 @@ class ClusterShardingSettings:
     (entity-restart-backoff)."""
     shard_failure_backoff: float = 10.0
     """How long a remembering shard that failed to store waits to restart
-    (shard-failure-backoff). Unused until remembered entities exist."""
+    (shard-failure-backoff)."""
     remember_entities: bool = False
     """Whether the shard remembers its entities and restarts them after a rebalance or crash
-    (remember-entities). It already turns passivation off and makes the ``shard-*`` keys durable;
-    the shard does not remember entities yet."""
+    (remember-entities). It turns passivation off and makes the ``shard-*`` keys durable."""
     remember_entities_store: Literal["ddata"] = "ddata"
     """Where the entities are remembered (remember-entities-store). Only "ddata" is ported:
     "eventsourced" needs event sourcing, which ohra does not have."""

@@ -71,7 +71,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, cast
 
 from ohra import (
     ActorRef,
@@ -80,9 +80,12 @@ from ohra import (
     Behaviors,
     ClusterSharding,
     ClusterShardingSettings,
+    CurrentShardRegionState,
     Entity,
     EntityContext,
     EntityTypeKey,
+    GetShardRegionState,
+    ShardingEnvelope,
     ask,
     remotable,
 )
@@ -353,3 +356,41 @@ async def test_cluster_sharding_ddata_mode():
             assert local >= 2
 
         await probe.await_assert(sixth_hosts_at_least_two, max=10.0, interval=0.1)
+
+
+@dataclass(frozen=True)
+class Echo:
+    text: str
+    reply_to: ActorRef[str]
+
+
+ECHO = EntityTypeKey[Echo]("echo")
+
+
+@Behaviors.receive_message
+def echo(msg: Echo) -> Behavior[Echo]:
+    msg.reply_to.tell(msg.text)
+    return Behaviors.same
+
+
+async def test_a_restarted_region_registers_again_and_delivers():
+    """The region runs under restart(), as under Pekko's system guardian. An envelope whose entity
+    id is not a string fails it (hashing the id raises). The new incarnation starts empty, with
+    the old shards stopped, registers again and delivers. The coordinator's ShardHomes on the
+    registration (informAboutCurrentShards) start the old shard afresh, without its entity."""
+    shard_a = shard_id_of("a", FAST_SHARDING.number_of_shards)
+    shard_b = shard_id_of("b", FAST_SHARDING.number_of_shards)
+    assert shard_a != shard_b
+    p1 = free_port()
+    async with node(p1, [p1]) as system:
+        await eventually(lambda: all_up(system, 1), timeout=5)
+        region = ClusterSharding(system).init(
+            Entity(ECHO, lambda _: echo).with_settings(FAST_SHARDING)
+        )
+        assert await ask(region, lambda r: ShardingEnvelope("a", Echo("1", r)), timeout=3) == "1"
+        before: CurrentShardRegionState = await ask(region, GetShardRegionState, timeout=3)
+        assert before == CurrentShardRegionState(frozenset({"a"}), frozenset({shard_a}))
+        region.tell(ShardingEnvelope(cast(Any, 1), Echo("lost", system.ignore_ref)))
+        assert await ask(region, lambda r: ShardingEnvelope("b", Echo("2", r)), timeout=3) == "2"
+        after: CurrentShardRegionState = await ask(region, GetShardRegionState, timeout=3)
+        assert after == CurrentShardRegionState(frozenset({"b"}), frozenset({shard_a, shard_b}))

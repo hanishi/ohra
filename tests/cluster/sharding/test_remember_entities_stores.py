@@ -354,6 +354,20 @@ async def test_only_the_latest_get_shards_asker_is_answered():
         await first.expect_no_message(0.1)
 
 
+async def test_a_second_get_shards_after_the_answer_stays_unanswered():
+    """onGotAllShards (DDataRememberEntitiesCoordinatorStore.scala 133-139) clears the shards once
+    it has answered: a coordinator asking again gets nothing."""
+    async with one_node() as node:
+        replicator, first, second = node.probe(), node.probe(), node.probe()
+        s = coordinator_store(node, replicator)
+        get = await expect_get(replicator)
+        get.reply_to.tell(Replicator.GetSuccess(get.key, GSet(frozenset({"a"}))))
+        s.tell(Coord.GetShards(first.ref))
+        await first.expect_message(Coord.RememberedShards(frozenset({"a"})), 3)
+        s.tell(Coord.GetShards(second.ref))
+        await second.expect_no_message(0.1)
+
+
 async def test_a_get_failure_is_retried_with_pekkos_log_levels(
     caplog: pytest.LogCaptureFixture,
 ):

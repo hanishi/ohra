@@ -25,6 +25,7 @@ from .coordinator import (
     _Terminate,  # pyright: ignore[reportPrivateUsage]
 )
 from .region import _ExitingProgress, region_behavior  # pyright: ignore[reportPrivateUsage]
+from .remember_entities import DDataRememberEntitiesProvider
 from .passivation_settings import PassivationStrategySettings
 from .shard import (
     ClusterShardingSettings,
@@ -162,8 +163,17 @@ class ClusterSharding:
         # Pekko's BackoffOpts.onStop restarts a coordinator that throws at once, with its default
         # decider; the backoff is for one that stops, which this one does only after its stop
         # message
+        # ClusterSharding.scala 766-794, without roles: the coordinator's store, when remember
+        # entities is on
+        provider = (
+            DDataRememberEntitiesProvider(
+                name, settings, settings.majority_min_cap, self._replicator
+            )
+            if settings.remember_entities
+            else None
+        )
         supervised = Behaviors.supervise(
-            coordinator_behavior(name, settings, self._replicator)
+            coordinator_behavior(name, settings, self._replicator, provider)
         ).on_failure(SupervisorStrategy.restart())
         coordinator = SingletonActor(supervised, f"{name}Coordinator").with_stop_message(
             _Terminate()

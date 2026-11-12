@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 from ...behavior import Behavior, Behaviors, StashBuffer
@@ -27,6 +27,7 @@ from .shard import (
     ShardStopped,
     _ask_all,  # pyright: ignore[reportPrivateUsage]
 )
+from .remember_entities import DDataRememberEntitiesProvider, RememberEntitiesCoordinatorStore
 from ..ddata import SelfUniqueAddress
 from ..ddata.distributed_data import ReplicatorMessageAdapter
 from ..ddata.lww_register import LWWRegister, LWWRegisterKey
@@ -178,44 +179,66 @@ type DomainEvent = (
 
 @dataclass(frozen=True)
 class CoordinatorState:
-    """ShardCoordinator.State (ShardCoordinator.scala ~455-540): shard -> region path, and region
+    """ShardCoordinator.State (ShardCoordinator.scala 455-521): shard -> region path, and region
     path -> its shards. Regions are keyed by path so a local and a remote ref to the same region
     compare equal. It is the value of the coordinator's LWWRegister, so it travels on the wire.
-    Actor paths carry no uid here, so ``region_nodes`` records each region's node."""
+    Actor paths carry no uid here, so ``region_nodes`` records each region's node.
+    ``unallocated_shards`` is only used if remembered entities is enabled."""
 
     shards: dict[str, str]
     regions: dict[str, tuple[str, ...]]
     region_nodes: dict[str, UniqueAddress]
+    unallocated_shards: frozenset[str] = frozenset()
+    remember_entities: bool = False
     EMPTY: ClassVar[CoordinatorState]
+
+    def with_remember_entities(self, enabled: bool) -> CoordinatorState:
+        """withRememberEntities (474-479)."""
+        if enabled:
+            return replace(self, remember_entities=True)
+        return replace(self, unallocated_shards=frozenset(), remember_entities=False)
+
+    @property
+    def is_empty(self) -> bool:
+        """isEmpty (481-482): ohra has no region proxies here, and unallocated shards do not
+        count."""
+        return not self.shards and not self.regions
 
     def updated(self, event: DomainEvent) -> CoordinatorState:
         match event:
             case ShardRegionRegistered(region, node):
                 if region in self.regions:
                     raise ValueError(f"Region {region} already registered: {self}")
-                return CoordinatorState(
-                    dict(self.shards),
-                    {**self.regions, region: ()},
-                    {**self.region_nodes, region: node},
+                return replace(
+                    self,
+                    regions={**self.regions, region: ()},
+                    region_nodes={**self.region_nodes, region: node},
                 )
             case ShardRegionTerminated(region):
                 if region not in self.regions:
                     raise ValueError(f"Terminated region {region} not registered: {self}")
                 gone = set(self.regions[region])
-                return CoordinatorState(
-                    {s: r for s, r in self.shards.items() if s not in gone},
-                    {r: ids for r, ids in self.regions.items() if r != region},
-                    {r: n for r, n in self.region_nodes.items() if r != region},
+                return replace(
+                    self,
+                    shards={s: r for s, r in self.shards.items() if s not in gone},
+                    regions={r: ids for r, ids in self.regions.items() if r != region},
+                    region_nodes={r: n for r, n in self.region_nodes.items() if r != region},
+                    unallocated_shards=self.unallocated_shards | gone
+                    if self.remember_entities
+                    else self.unallocated_shards,
                 )
             case ShardHomeAllocated(shard, region):
                 if region not in self.regions:
                     raise ValueError(f"Region {region} not registered: {self}")
                 if shard in self.shards:
                     raise ValueError(f"Shard [{shard}] already allocated: {self}")
-                return CoordinatorState(
-                    {**self.shards, shard: region},
-                    {**self.regions, region: (*self.regions[region], shard)},
-                    self.region_nodes,
+                return replace(
+                    self,
+                    shards={**self.shards, shard: region},
+                    regions={**self.regions, region: (*self.regions[region], shard)},
+                    unallocated_shards=self.unallocated_shards - {shard}
+                    if self.remember_entities
+                    else self.unallocated_shards,
                 )
             case ShardHomeDeallocated(shard):
                 if shard not in self.shards:
@@ -223,15 +246,22 @@ class CoordinatorState:
                 region = self.shards[shard]
                 if region not in self.regions:
                     raise ValueError(f"Region {region} for shard [{shard}] not registered: {self}")
-                return CoordinatorState(
-                    {s: r for s, r in self.shards.items() if s != shard},
-                    {**self.regions, region: tuple(s for s in self.regions[region] if s != shard)},
-                    self.region_nodes,
+                return replace(
+                    self,
+                    shards={s: r for s, r in self.shards.items() if s != shard},
+                    regions={
+                        **self.regions,
+                        region: tuple(s for s in self.regions[region] if s != shard),
+                    },
+                    unallocated_shards=self.unallocated_shards | {shard}
+                    if self.remember_entities
+                    else self.unallocated_shards,
                 )
 
     @property
     def all_shards(self) -> frozenset[str]:
-        return frozenset(self.shards)
+        """allShards (484)."""
+        return frozenset(self.shards) | self.unallocated_shards
 
 
 CoordinatorState.EMPTY = CoordinatorState({}, {}, {})
@@ -391,6 +421,26 @@ class _DelayedShardRegionTerminated:
     region: str
 
 
+# DDataShardCoordinator's (ShardCoordinator.scala 1514-1523)
+
+
+@dataclass(frozen=True)
+class _RememberEntitiesStoreStopped: ...
+
+
+@dataclass(frozen=True)
+class _RememberEntitiesTimeout:
+    shard_id: str
+
+
+@dataclass(frozen=True)
+class _RememberEntitiesLoadTimeout: ...
+
+
+_REMEMBER_ENTITIES_TIMEOUT_KEY = "RememberEntityTimeout"
+"""Both timers share it (1522), so a new AddShard's timer replaces a pending load timer."""
+
+
 # The member statuses whose region may register. Pekko's isMember (734-738) takes self or Up only;
 # here a region may also register while its member is Leaving or Exiting, or prepares for a full
 # cluster shutdown, so the regions register again after a coordinator restart meanwhile.
@@ -501,10 +551,13 @@ def coordinator_behavior(
     type_name: str,
     settings: ClusterShardingSettings,
     replicator: ActorRef[Replicator.Command],
+    remember_entities_provider: DDataRememberEntitiesProvider | None = None,
 ) -> Behavior[Any]:
     """ShardCoordinator (ShardCoordinator.scala 600-1385) with DDataShardCoordinator's
     (1535-1976): the state is the value of an LWWRegister in sharding's Replicator, read by
     majority when the coordinator starts and written by majority before each change takes effect.
+    With a ``remember_entities_provider``, its coordinator store, a child, remembers every
+    allocated shard, and the remembered shards are allocated again when the coordinator starts.
     Pekko's receive states are the nested functions returning behaviors; a helper that becomes
     ``waitingForUpdate`` sets ``become``, which the state's handler returns."""
 
@@ -516,7 +569,11 @@ def coordinator_behavior(
             strategy = LeastShardAllocationStrategy(
                 settings.rebalance_absolute_limit, settings.rebalance_relative_limit
             )
-            state = CoordinatorState.EMPTY
+            # initEmptyState (1565)
+            init_empty_state = CoordinatorState.EMPTY.with_remember_entities(
+                settings.remember_entities
+            )
+            state = init_empty_state
             refs: dict[str, ActorRef[Any]] = {}
             alive_regions: set[str] = set()
             graceful_shutdown_in_progress: set[str] = set()
@@ -544,12 +601,30 @@ def coordinator_behavior(
             update_state_retries = 0
             # The waitingForUpdate a helper's update started, for the state's handler to return.
             become: Behavior[Any] | None = None
-            # Pekko's update does context.become(waitingForUpdate, discardOld = false) (1912) and
-            # unbecomeAfterUpdate does context.unbecome() (1839): the state underneath the update,
-            # set where Pekko does a plain context.become of a base state. Assigned below, once
-            # the states are defined.
+            # ``become`` and ``unbecome_to`` together are Pekko's two-deep become stack: update
+            # does context.become(waitingForUpdate, discardOld = false) (1913) over the base
+            # state, and unbecomeAfterUpdate does context.unbecome() (1840) back to it.
+            # ``unbecome_to`` is that base state, set where Pekko does a plain context.become of
+            # one, and assigned below once the states are defined. A handler that can reach
+            # update() must end in take_become.
             unbecome_to: Callable[[], Behavior[Any]]
             queued_updates: deque[tuple[DomainEvent, Callable[[], None]]] = deque()
+            # rememberEntitiesStore (1572-1579)
+            remember_entities_store: ActorRef[RememberEntitiesCoordinatorStore.Command] | None = (
+                None
+            )
+            if remember_entities_provider is not None:
+                log.debug(
+                    "%s: Starting remember entities store from provider %s",
+                    type_name,
+                    remember_entities_provider,
+                )
+                remember_entities_store = ctx.spawn(
+                    remember_entities_provider.coordinator_store_behavior(),
+                    "RememberEntitiesStore",
+                )
+                ctx.watch_with(remember_entities_store, _RememberEntitiesStoreStopped())
+            remember_entities = remember_entities_store is not None
             cluster.subscriptions.tell(ClusterSubscribe(ctx.self, ClusterDomainEvent))
             ctx.timers.start_timer_with_fixed_delay(
                 "rebalance", _RebalanceTick(), settings.rebalance_interval
@@ -593,21 +668,78 @@ def coordinator_behavior(
                     lambda reply_to: Replicator.Get(key, read_consistency, reply_to), _GetResult
                 )
 
-            def waiting_for_initial_state() -> Behavior[Any]:
+            def get_all_remembered_shards() -> None:
+                """getAllRememberedShards (1920-1926)."""
+                ctx.timers.start_single_timer(
+                    _REMEMBER_ENTITIES_TIMEOUT_KEY,
+                    _RememberEntitiesLoadTimeout(),
+                    settings.waiting_for_state_timeout,
+                )
+                if remember_entities_store is not None:
+                    remember_entities_store.tell(
+                        RememberEntitiesCoordinatorStore.GetShards(ctx.self)
+                    )
+
+            def remember_shard_allocated(shard: str) -> None:
+                """rememberShardAllocated (1941-1948)."""
+                log.debug("%s: Remembering shard allocation [%s]", type_name, shard)
+                if remember_entities_store is not None:
+                    remember_entities_store.tell(
+                        RememberEntitiesCoordinatorStore.AddShard(shard, ctx.self)
+                    )
+                ctx.timers.start_single_timer(
+                    _REMEMBER_ENTITIES_TIMEOUT_KEY,
+                    _RememberEntitiesTimeout(shard),
+                    settings.updating_state_timeout,
+                )
+
+            def on_remember_entities_update_failed(shard: str) -> Behavior[Any]:
+                """onRememberEntitiesUpdateFailed (1956-1968)."""
+                log.error(
+                    "%s: The ShardCoordinator was unable to update remembered shard [%s] within "
+                    "'updating-state-timeout': %d millis, %s",
+                    type_name,
+                    shard,
+                    int(settings.updating_state_timeout * 1000),
+                    "terminating" if terminating else "retrying",
+                )
+                if terminating:
+                    return Behaviors.stopped()
+                # retry until successful
+                remember_shard_allocated(shard)
+                return Behaviors.same
+
+            def on_remember_entities_store_stopped() -> Behavior[Any]:
+                """onRememberEntitiesStoreStopped (1970-1974)."""
+                # rely on backoff supervision of coordinator
+                log.error(
+                    "%s: The ShardCoordinator stopping because the remember entities store "
+                    "stopped",
+                    type_name,
+                )
+                return Behaviors.stopped()
+
+            def waiting_for_initial_state(
+                remembered_shards: frozenset[str] = frozenset(),
+            ) -> Behavior[Any]:
                 """waitingForInitialState (1592-1647): every other message is dropped, since the
-                regions retry."""
+                regions retry. The remembered shards can arrive here or later, and do not keep
+                the coordinator in this state."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                     nonlocal initial_state_retries
                     match msg:
                         case _GetResult(Replicator.GetSuccess() as success):
-                            loaded = success.get(key).value
+                            existing_state = success.get(key).value.with_remember_entities(
+                                settings.remember_entities
+                            )
                             log.debug(
                                 "%s: Received initial coordinator state with [%d] shards",
                                 type_name,
-                                len(loaded.shards),
+                                len(existing_state.shards)
+                                + len(existing_state.unallocated_shards),
                             )
-                            return take_become(on_initial_state(loaded))
+                            return take_become(on_initial_state(existing_state, remembered_shards))
                         case _GetResult(Replicator.GetFailure()):
                             initial_state_retries += 1
                             if initial_state_retries == 1:
@@ -628,7 +760,19 @@ def coordinator_behavior(
                         case _GetResult(Replicator.NotFound()):
                             log.debug("%s: Initial coordinator is empty.", type_name)
                             # this.state is empty initially
-                            return take_become(on_initial_state(state))
+                            return take_become(on_initial_state(state, remembered_shards))
+                        case RememberEntitiesCoordinatorStore.RememberedShards(shard_ids):
+                            log.debug(
+                                "%s: Received [%d] remembered shard ids (when "
+                                "waitingForInitialState)",
+                                type_name,
+                                len(shard_ids),
+                            )
+                            ctx.timers.cancel(_REMEMBER_ENTITIES_TIMEOUT_KEY)
+                            return waiting_for_initial_state(shard_ids)
+                        case _RememberEntitiesLoadTimeout():
+                            # repeat until successful
+                            get_all_remembered_shards()
                         case _Terminate():
                             log.debug(
                                 "%s: Received termination message while waiting for state",
@@ -642,18 +786,31 @@ def coordinator_behavior(
                                 type_name,
                                 region.path,
                             )
+                        case _RememberEntitiesStoreStopped():
+                            # receiveTerminated (1950-1954)
+                            return on_remember_entities_store_stopped()
                         case _:
                             pass
                     return Behaviors.same
 
                 return Behaviors.receive(on_message).receive_signal(on_signal)
 
-            def on_initial_state(loaded: CoordinatorState) -> Behavior[Any]:
-                """onInitialState (1649-1665), without remembered entities: the next state. An
-                update watchStateActors starts is in ``become``, over this state."""
+            def on_initial_state(
+                loaded_state: CoordinatorState, remembered_shards: frozenset[str]
+            ) -> Behavior[Any]:
+                """onInitialState (1649-1665): the next state. An update watchStateActors starts
+                is in ``become``, over this state."""
                 nonlocal state, unbecome_to
-                state = loaded
-                if not loaded.shards and not loaded.regions:
+                if settings.remember_entities and remembered_shards:
+                    # Note that we don't wait for shards from store so they could also arrive
+                    # later
+                    new_unallocated_shards = state.unallocated_shards | (
+                        remembered_shards.difference(state.shards)
+                    )
+                    state = replace(loaded_state, unallocated_shards=new_unallocated_shards)
+                else:
+                    state = loaded_state
+                if state.is_empty:
                     # empty state, activate immediately
                     return activate()
                 unbecome_to = waiting_for_state_initialized
@@ -663,9 +820,11 @@ def coordinator_behavior(
 
             def waiting_for_state_initialized() -> Behavior[Any]:
                 """waitingForStateInitialized (1667-1700): stash everything until
-                StateInitialized, which watchStateActors scheduled."""
+                StateInitialized, which watchStateActors scheduled. Remembered shards that arrive
+                here are kept: Pekko's 1686-1687 builds the new state and discards it."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                    nonlocal state
                     match msg:
                         case _StateInitialized():
                             unstash_one_get_shard_home_request()
@@ -680,6 +839,23 @@ def coordinator_behavior(
                                 type_name,
                             )
                             return Behaviors.stopped()
+                        case RememberEntitiesCoordinatorStore.RememberedShards(shard_ids):
+                            log.debug(
+                                "%s: Received [%d] remembered shard ids (when "
+                                "waitingForStateInitialized)",
+                                type_name,
+                                len(shard_ids),
+                            )
+                            new_unallocated_shards = state.unallocated_shards | (
+                                shard_ids.difference(state.shards)
+                            )
+                            state = replace(state, unallocated_shards=new_unallocated_shards)
+                            ctx.timers.cancel(_REMEMBER_ENTITIES_TIMEOUT_KEY)
+                        case _RememberEntitiesLoadTimeout():
+                            # repeat until successful
+                            get_all_remembered_shards()
+                        case _RememberEntitiesStoreStopped():
+                            return on_remember_entities_store_stopped()
                         case _:
                             stash.stash(msg)
                     return Behaviors.same
@@ -687,7 +863,7 @@ def coordinator_behavior(
                 return Behaviors.receive(on_message).receive_signal(on_signal)
 
             def activate() -> Behavior[Any]:
-                """activate (1868-1873): the active state."""
+                """activate (1868-1873): the active state, with receiveLateRememberedEntities."""
                 nonlocal unbecome_to
                 unbecome_to = active
                 log.info(
@@ -696,6 +872,30 @@ def coordinator_behavior(
                     len(state.shards),
                 )
                 return active()
+
+            def receive_late_remembered_entities(msg: Any) -> None:
+                """receiveLateRememberedEntities (1875-1889): only used once the coordinator is
+                initialized."""
+                nonlocal state
+                match msg:
+                    case RememberEntitiesCoordinatorStore.RememberedShards(shard_ids):
+                        log.debug(
+                            "%s: Received [%d] remembered shard ids (after state initialized)",
+                            type_name,
+                            len(shard_ids),
+                        )
+                        if shard_ids:
+                            new_unallocated_shards = state.unallocated_shards | (
+                                shard_ids.difference(state.shards)
+                            )
+                            state = replace(state, unallocated_shards=new_unallocated_shards)
+                            allocate_shard_homes_for_remember_entities()
+                        ctx.timers.cancel(_REMEMBER_ENTITIES_TIMEOUT_KEY)
+                    case _RememberEntitiesLoadTimeout():
+                        # repeat until successful
+                        get_all_remembered_shards()
+                    case _:
+                        pass
 
             def watch_state_actors() -> None:
                 """watchStateActors (1174-1202). A region whose node incarnation is not a member
@@ -726,13 +926,20 @@ def coordinator_behavior(
                 for shard, region in state.shards.items():
                     if region in refs:
                         send_host_shard(shard, region)
+                allocate_shard_homes_for_remember_entities()
+
+            def allocate_shard_homes_for_remember_entities() -> None:
+                """allocateShardHomesForRememberEntities (1269-1274), in shard id order."""
+                if settings.remember_entities and state.unallocated_shards:
+                    for shard in sorted(state.unallocated_shards):
+                        ctx.self.tell(GetShardHome(shard, ctx.system.ignore_ref))
 
             # --- DDataShardCoordinator: update (1702-1866, 1891-1940) ----------------------------
 
             def update[E: DomainEvent](evt: E, f: Callable[[E], None]) -> None:
-                """update (1891-1914), without remembered entities: write the state with ``evt``,
-                and run ``f`` once the write succeeds, in waitingForUpdate meanwhile, which
-                ``become`` holds for the state's handler."""
+                """update (1891-1914): write the state with ``evt``, and run ``f`` once the write
+                succeeds, and the remember write of a new shard too, in waitingForUpdate
+                meanwhile, which ``become`` holds for the state's handler."""
                 nonlocal become
 
                 def after() -> None:
@@ -743,8 +950,33 @@ def coordinator_behavior(
                     # both, and the second write can then miss the first's change
                     queued_updates.append((evt, after))
                     return
-                become = waiting_for_update(evt, after)
+                become = start_update(evt, after)
+
+            def start_update(evt: DomainEvent, after: Callable[[], None]) -> Behavior[Any]:
+                """update's body (1892-1912): send the state write, and the remember write of a
+                shard allocated for the first time, and return the waitingForUpdate for both."""
                 send_coordinator_state_update(evt)
+                match evt:
+                    case ShardHomeAllocated(shard) if (
+                        remember_entities and shard not in state.shards
+                    ):
+                        remember_shard_allocated(shard)
+                        return waiting_for_update(
+                            evt,
+                            shard,
+                            waiting_for_state_write=True,
+                            waiting_for_remember_shard=True,
+                            after=after,
+                        )
+                    case _:
+                        # no update of shards, already known
+                        return waiting_for_update(
+                            evt,
+                            None,
+                            waiting_for_state_write=True,
+                            waiting_for_remember_shard=False,
+                            after=after,
+                        )
 
             def send_coordinator_state_update(evt: DomainEvent) -> None:
                 """sendCoordinatorStateUpdate (1928-1940): Pekko's ``Some(evt)`` request is the
@@ -753,7 +985,7 @@ def coordinator_behavior(
                 adapter.ask_update(
                     lambda reply_to: Replicator.Update(
                         key,
-                        LWWRegister.create(self_unique_address, CoordinatorState.EMPTY),
+                        LWWRegister.create(self_unique_address, init_empty_state),
                         write_consistency,
                         reply_to,
                         lambda reg: reg.with_value(self_unique_address, s),
@@ -761,20 +993,44 @@ def coordinator_behavior(
                     lambda rsp: _UpdateResult(evt, rsp),
                 )
 
-            def waiting_for_update(evt: DomainEvent, after: Callable[[], None]) -> Behavior[Any]:
-                """waitingForUpdate (1702-1837), without remembered entities."""
+            def waiting_for_update(
+                evt: DomainEvent,
+                shard_id: str | None,
+                waiting_for_state_write: bool,
+                waiting_for_remember_shard: bool,
+                after: Callable[[], None],
+            ) -> Behavior[Any]:
+                """waitingForUpdate (1702-1837): stash everything until the state write succeeds
+                and, for a shard allocated for the first time, its remember write too. Each
+                half that completes first becomes a waitingForUpdate for the other."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                     nonlocal update_state_retries, terminating
                     match msg:
                         case _UpdateResult(e, Replicator.UpdateSuccess()) if e == evt:
                             update_state_retries = 0
+                            if not waiting_for_remember_shard:
+                                log.debug(
+                                    "%s: The coordinator state was successfully updated with %s",
+                                    type_name,
+                                    evt,
+                                )
+                                if shard_id is not None:
+                                    ctx.timers.cancel(_REMEMBER_ENTITIES_TIMEOUT_KEY)
+                                return unbecome_after_update(after)
                             log.debug(
-                                "%s: The coordinator state was successfully updated with %s",
+                                "%s: The coordinator state was successfully updated with %s, "
+                                "waiting for remember shard update",
                                 type_name,
                                 evt,
                             )
-                            return unbecome_after_update(after)
+                            return waiting_for_update(
+                                evt,
+                                shard_id,
+                                waiting_for_state_write=False,
+                                waiting_for_remember_shard=True,
+                                after=after,
+                            )
                         case _UpdateResult(e, Replicator.UpdateTimeout()) if e == evt:
                             update_state_retries += 1
                             log_at = log.warning if update_state_retries < 5 else log.error
@@ -821,6 +1077,67 @@ def coordinator_behavior(
                             )
                             terminating = True
                             stash.stash(msg)
+                        case RememberEntitiesCoordinatorStore.UpdateDone(shard):
+                            if shard != shard_id:
+                                log.warning(
+                                    "%s: Saw remember entities update complete for shard id "
+                                    "[%s], while waiting for [%s]",
+                                    type_name,
+                                    shard,
+                                    shard_id or "",
+                                )
+                            elif not waiting_for_state_write:
+                                log.debug(
+                                    "%s: The ShardCoordinator saw remember shard start "
+                                    "successfully written %s",
+                                    type_name,
+                                    evt,
+                                )
+                                ctx.timers.cancel(_REMEMBER_ENTITIES_TIMEOUT_KEY)
+                                return unbecome_after_update(after)
+                            else:
+                                log.debug(
+                                    "%s: The ShardCoordinator saw remember shard start "
+                                    "successfully written %s, waiting for state update",
+                                    type_name,
+                                    evt,
+                                )
+                                return waiting_for_update(
+                                    evt,
+                                    shard_id,
+                                    waiting_for_state_write=True,
+                                    waiting_for_remember_shard=False,
+                                    after=after,
+                                )
+                        case RememberEntitiesCoordinatorStore.UpdateFailed(shard):
+                            if shard == shard_id:
+                                return on_remember_entities_update_failed(shard)
+                            log.warning(
+                                "%s: Got an remember entities update failed for [%s] while "
+                                "waiting for [%s], ignoring",
+                                type_name,
+                                shard,
+                                shard_id or "",
+                            )
+                        case _RememberEntitiesTimeout(shard):
+                            if shard == shard_id:
+                                return on_remember_entities_update_failed(shard)
+                            log.warning(
+                                "%s: Got an remember entities update timeout for [%s] while "
+                                "waiting for [%s], ignoring",
+                                type_name,
+                                shard,
+                                shard_id or "",
+                            )
+                        case _RememberEntitiesStoreStopped():
+                            return on_remember_entities_store_stopped()
+                        case RememberEntitiesCoordinatorStore.RememberedShards():
+                            log.debug(
+                                "%s: Late arrival of remembered shards while waiting for update, "
+                                "stashing",
+                                type_name,
+                            )
+                            stash.stash(msg)
                         case _:
                             stash.stash(msg)
                     return Behaviors.same
@@ -836,8 +1153,7 @@ def coordinator_behavior(
                     return Behaviors.stopped()
                 if become is None and queued_updates:
                     evt, queued_after = queued_updates.popleft()
-                    become = waiting_for_update(evt, queued_after)
-                    send_coordinator_state_update(evt)
+                    become = start_update(evt, queued_after)
                 unstash_one_get_shard_home_request()
                 return stash.unstash_all(take_become(unbecome_to()))
 
@@ -862,7 +1178,8 @@ def coordinator_behavior(
             # --- ShardCoordinator: active (740-967) ----------------------------------------------
 
             def active() -> Behavior[Any]:
-                """active (740-967). ``StopShards`` (1118) has no ohra counterpart."""
+                """active (740-967), with receiveLateRememberedEntities (1875-1889) and the
+                store's end (1950-1954). ``StopShards`` (1118) has no ohra counterpart."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                     nonlocal preparing_for_shutdown
@@ -900,8 +1217,11 @@ def coordinator_behavior(
                             terminate()
                         case GetClusterShardingStats(timeout, reply_to):
                             cluster_sharding_stats(timeout, reply_to)
+                        case _RememberEntitiesStoreStopped():
+                            # receiveTerminated (1950-1954)
+                            return on_remember_entities_store_stopped()
                         case _:
-                            pass
+                            receive_late_remembered_entities(msg)
                     if stop_now:
                         return Behaviors.stopped()
                     return take_become(Behaviors.same)
@@ -958,6 +1278,7 @@ def coordinator_behavior(
                 if path in state.regions:
                     region.tell(RegisterAck(ctx.self))
                     inform_about_current_shards(region)
+                    allocate_shard_homes_for_remember_entities()
                 else:
                     graceful_shutdown_in_progress.discard(path)
                     # we don't have to wait for updated state for this
@@ -971,6 +1292,7 @@ def coordinator_behavior(
                         if is_local_actor(region):
                             ctx.watch_with(region, RegionStopped(path))
                         region.tell(RegisterAck(ctx.self))
+                        allocate_shard_homes_for_remember_entities()
 
                     update(ShardRegionRegistered(path, node), registered)
 
@@ -1085,6 +1407,7 @@ def coordinator_behavior(
                     region_termination_in_progress.discard(path)
                     alive_regions.discard(path)
                     refs.pop(path, None)
+                    allocate_shard_homes_for_remember_entities()
                     if waiting_for_local_region_to_terminate and _is_at(
                         path, cluster.self_address
                     ):
@@ -1195,6 +1518,7 @@ def coordinator_behavior(
                             nonlocal state
                             state = state.updated(evt)
                             clear_rebalance_in_progress(shard)
+                            allocate_shard_homes_for_remember_entities()
                             # reallocate at once
                             ctx.self.tell(GetShardHome(shard, ctx.system.ignore_ref))
 
@@ -1221,6 +1545,8 @@ def coordinator_behavior(
             unbecome_to = waiting_for_initial_state
             # get state from ddata replicator, repeat until GetSuccess
             get_coordinator_state()
+            if settings.remember_entities:
+                get_all_remembered_shards()
             return waiting_for_initial_state()
 
         return setup

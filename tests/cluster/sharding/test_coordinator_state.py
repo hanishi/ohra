@@ -3,6 +3,7 @@
 state travels as the value of an LWWRegister, and each region's entry records its node (D5)."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -67,3 +68,63 @@ def test_updated_keeps_pekkos_checks():
         s.updated(ShardHomeAllocated("s9", "/user/none"))
     with pytest.raises(ValueError):
         s.updated(ShardHomeDeallocated("s9"))
+
+
+def _remember() -> CoordinatorState:
+    return _two_regions().with_remember_entities(True)
+
+
+def test_with_remember_entities_off_clears_the_unallocated_shards():
+    s = replace(_remember(), unallocated_shards=frozenset({"1"}))
+    assert s.with_remember_entities(False).unallocated_shards == frozenset()
+    assert not s.with_remember_entities(False).remember_entities
+    assert s.with_remember_entities(True).unallocated_shards == frozenset({"1"})
+
+
+def test_a_terminated_regions_shards_become_unallocated_with_remember_entities():
+    after = _remember().updated(ShardRegionTerminated(A))
+    assert after.unallocated_shards == frozenset({"s1", "s2"})
+    assert after.shards == {"s3": B}
+    assert after.remember_entities
+
+
+def test_an_allocated_shard_is_no_longer_unallocated():
+    s = replace(_remember(), unallocated_shards=frozenset({"s9"}))
+    after = s.updated(ShardHomeAllocated("s9", B))
+    assert after.unallocated_shards == frozenset()
+    assert after.remember_entities
+
+
+def test_a_deallocated_shard_becomes_unallocated_with_remember_entities():
+    after = _remember().updated(ShardHomeDeallocated("s3"))
+    assert after.unallocated_shards == frozenset({"s3"})
+    assert after.remember_entities
+
+
+def test_without_remember_entities_nothing_becomes_unallocated():
+    s = _two_regions()
+    assert s.updated(ShardHomeDeallocated("s3")).unallocated_shards == frozenset()
+    assert s.updated(ShardRegionTerminated(A)).unallocated_shards == frozenset()
+    s = s.updated(ShardHomeDeallocated("s3")).updated(ShardHomeAllocated("s3", A))
+    assert s.unallocated_shards == frozenset()
+
+
+def test_all_shards_includes_the_unallocated_ones():
+    s = replace(_two_regions(), unallocated_shards=frozenset({"s9"}))
+    assert s.all_shards == frozenset({"s1", "s2", "s3", "s9"})
+
+
+def test_is_empty_ignores_the_unallocated_shards():
+    assert replace(CoordinatorState.EMPTY, unallocated_shards=frozenset({"1"})).is_empty
+    assert not _two_regions().is_empty
+
+
+def test_the_remember_fields_survive_serialization():
+    state = replace(_remember(), unallocated_shards=frozenset({"1", "2"}))
+    reg = LWWRegister._create(n1, state, lambda _t, _v: 1)
+    wire = json.loads(json.dumps(Serialization.encode(reg, lambda r: r.path)))
+    back = Serialization.decode(wire, _never)
+    assert back == reg
+    assert isinstance(back, LWWRegister)
+    assert back.value.unallocated_shards == frozenset({"1", "2"})
+    assert back.value.remember_entities

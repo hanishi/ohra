@@ -133,7 +133,7 @@ def region_behavior(
 
         def coordinator_path(member: Member) -> str:
             manager = _manager_name(f"{type_name}Coordinator")
-            return f"{member.address.root}/system/{manager}/singleton"
+            return f"{member.address.root}/system/{manager}/singleton/coordinator"
 
         def change_members(new_members: list[Member]) -> None:
             nonlocal members_by_age, coordinator

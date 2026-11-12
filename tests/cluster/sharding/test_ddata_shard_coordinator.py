@@ -8,7 +8,9 @@ standing in for the Replicator:
 - update and waitingForUpdate: an ack only after its write, the GetShardHome fast path, the
   UpdateTimeout retry, ModifyFailure's restart, and Terminate during an update;
 - watchStateActors with D5 (a region of a gone node incarnation is terminated), and
-  stateInitialized 500 ms later.
+  stateInitialized 500 ms later;
+- register with D5: a new incarnation's registration at a recorded path terminates the old
+  region first and cancels its down-removal margin, with the new incarnation on real time.
 
 The review-focus tests run several real nodes with sharding's own Replicator."""
 
@@ -16,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
@@ -24,6 +26,7 @@ from typing import Any, cast
 import pytest
 
 from ohra import ActorRef, ActorSystem, Behaviors, ask
+from ohra.behavior import Behavior
 from ohra.cluster import ClusterSettings
 from ohra.cluster.core import Cluster, Down
 from ohra.cluster.ddata import LWWRegister, LWWRegisterKey, Replicator, SelfUniqueAddress
@@ -98,14 +101,16 @@ class Node:
 
 
 @asynccontextmanager
-async def manual_node() -> AsyncGenerator[Node]:
-    """One joined node on ManualTime."""
+async def manual_node(**cluster: Any) -> AsyncGenerator[Node]:
+    """One joined node on ManualTime; ``cluster`` overrides the fast ClusterSettings."""
     port = free_port()
     system = ActorSystem(
         Behaviors.ignore,
         "c",
         address=("127.0.0.1", port),
-        cluster=ClusterSettings(seed_nodes=(Address("c", "127.0.0.1", port),), **FAST),
+        cluster=ClusterSettings(
+            seed_nodes=(Address("c", "127.0.0.1", port),), **{**FAST, **cluster}
+        ),
         shutdown=FAST_SHUTDOWN,
         scheduler=ExplicitlyTriggeredScheduler(),
     )
@@ -402,6 +407,80 @@ async def test_a_loaded_region_of_a_gone_incarnation_is_terminated():
         assert after.regions == {} and after.shards == {} and after.region_nodes == {}
 
 
+def forwarding(to: ActorRef[Any]) -> Behavior[Any]:
+    @Behaviors.receive_message
+    def forward(msg: Any) -> Behavior[Any]:
+        to.tell(msg)
+        return Behaviors.same
+
+    return forward
+
+
+def region_on(system: ActorSystem[Any]) -> tuple[ActorRef[Any], TestProbe[Any]]:
+    """A stand-in region at the fixed path ``/system/region``, forwarding to a probe."""
+    probe = TestProbe[Any](Node(system))
+    region = system._system_root.spawn_child(forwarding(probe.ref), "region", None).ref  # pyright: ignore[reportPrivateUsage]
+    return region, probe
+
+
+async def pump(node: Node, cond: Callable[[], bool], timeout: float = 8.0) -> None:
+    """Move the node's manual clock in small steps until ``cond``, for peers on real time."""
+    assert node.manual is not None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not cond():
+        assert loop.time() < deadline, "condition not met in time"
+        await node.manual.time_passes(0.02)
+
+
+async def test_a_registration_from_a_new_incarnation_at_a_recorded_path_terminates_the_old_first():
+    """D5 in register: a region registering from a new incarnation at the address of one in the
+    state means the old process is gone for certain. The old region, removed and waiting out the
+    down-removal margin, is terminated first, then the new one registered, and the margin's timer
+    is cancelled."""
+    async with manual_node(down_removal_margin=30.0) as a, AsyncExitStack() as stack:
+        assert a.manual is not None
+        p1, p2 = a.unique_address.port, free_port()
+        replicator = a.probe()
+        coordinator = await active(a, replicator)
+        b = await stack.enter_async_context(node(p2, [p1], retry_unsuccessful_join_after=0.1))
+        await pump(a, lambda: all_up(a.system, 2) and all_up(b, 2))
+        region, acks = region_on(b)
+        b.resolve(coordinator.path).tell(Register(region))
+        update = await expect_update(replicator)
+        old = Cluster(b).self_unique_address
+        assert update.modify(update.initial).value.region_nodes == {region.path: old}
+        update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+        await acks.expect_message_type(RegisterAck, 3)
+
+        await crash(b)
+        Cluster(a.system).manager.tell(Down(Address("c", "127.0.0.1", p2)))
+        await pump(a, lambda: all_up(a.system, 1))
+        await settle(a)
+        await replicator.expect_no_message(0.1)  # the region waits out the margin
+        removed_at = a.manual.scheduler.current_time
+
+        b2 = await stack.enter_async_context(node(p2, [p1], retry_unsuccessful_join_after=0.1))
+        await pump(a, lambda: all_up(a.system, 2) and all_up(b2, 2))
+        region2, acks2 = region_on(b2)
+        assert region2.path == region.path
+        assert a.manual.scheduler.current_time - removed_at < 30.0  # the margin still runs
+        b2.resolve(coordinator.path).tell(Register(region2))
+        terminated = await expect_update(replicator)
+        after = terminated.modify(terminated.initial).value
+        assert after.regions == {} and after.region_nodes == {}
+        terminated.reply_to.tell(Replicator.UpdateSuccess(terminated.key))
+        registered = await expect_update(replicator)
+        new = Cluster(b2).self_unique_address
+        assert new != old
+        assert registered.modify(registered.initial).value.region_nodes == {region.path: new}
+        registered.reply_to.tell(Replicator.UpdateSuccess(registered.key))
+        await acks2.expect_message_type(RegisterAck, 3)
+
+        await a.manual.time_passes(30.0)
+        await replicator.expect_no_message(0.1)  # the margin's timer was cancelled
+
+
 async def test_two_gone_regions_are_written_one_update_after_the_other():
     """watchStateActors terminates both; the second write waits for the first, so it holds both
     changes."""
@@ -554,7 +633,8 @@ async def test_an_unreachable_node_stalls_new_allocations_until_it_is_removed():
         [fresh] = ids_on_new_shards(1, {shard_id_of(e, 10) for e in where})
         fresh_shard = shard_id_of(fresh, 10)
         coordinator = nodes[0].resolve(
-            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator/singleton"
+            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator"
+            "/singleton/coordinator"
         )
         home = TestProbe[ShardHome](Node(nodes[0]))
         await crash(nodes[2])
@@ -616,7 +696,8 @@ async def test_a_rejoined_node_at_the_same_address_serves_its_entities_again():
         await eventually(lambda: all_up(a, 2) and all_up(b2, 2), timeout=8)
         start(b2, settings=DDATA)
         coordinator = a.resolve(
-            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator/singleton"
+            f"ohra://c@127.0.0.1:{p1}/system/singletonManagerCounterCoordinator"
+            "/singleton/coordinator"
         )
         coordinator.tell(Register(cast(Any, "not a region")))  # fails it: it restarts
         for e in on_b:

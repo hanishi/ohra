@@ -178,6 +178,44 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
 > - The settings are `ReplicatorSettings`, a field of `ClusterSettings` (`distributed_data=`), not HOCON under `pekko.cluster.distributed-data`.
 > - Roles are not here: every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
 
+## Samples
+
+`examples/distributed_data` ports Pekko's four Distributed Data samples, one module each.
+
+- `voting_service.py` is Pekko's `VotingService`. A `Flag` opens and closes the contest, written with `WriteAll`. Votes go into a `PNCounterMap`, written locally and read with `ReadAll`.
+- `shopping_cart.py` is Pekko's `ShoppingCart`. Each user's cart is an `LWWMap`, written and read at majority. A remove reads the cart before it writes.
+- `replicated_cache.py` is Pekko's `ReplicatedCache`. The entries are spread over 100 `LWWMap` keys, so that no single map grows large.
+- `replicated_metrics.py` is Pekko's `ReplicatedMetrics`. It uses `Changed` subscriptions and member events, shares each node's memory use, and removes the nodes that left.
+
+The specs are the `test_*.py` files beside them. Run them with `uv run pytest examples/distributed_data`.
+
+### The soak
+
+The soak is ohra's own, with no Pekko counterpart. It runs N nodes in one process, sends random commands to random nodes, and keeps going until you stop it.
+
+```
+uv run python examples/distributed_data/soak.py cache --nodes 5 --rate 100 --check-every 15 --duration 40
+```
+
+This is a run of it:
+
+```
+soak cache: 5 nodes, rate 100/s, seed 1794500558526901000, notify_subscribers_interval=0.01 s
+t=5s cmds=501 (100/s) lag p50=391ms p95=638ms p99=776ms max=1014ms behind=20/20 pairs
+t=10s cmds=1000 (100/s) lag p50=385ms p95=729ms p99=819ms max=908ms behind=19/20 pairs
+check #1: 5 nodes converged 0.74 s after the load stopped; actors agree
+t=16s cmds=1501 (83/s) lag p50=394ms p95=755ms p99=975ms max=1239ms behind=0/20 pairs
+...
+check #3: 5 nodes converged 0.75 s after the load stopped; actors agree
+summary: 3773 commands, 3 checks passed, 0 failed, lag p50=400ms p99=1251ms max=3179ms
+```
+
+- **Lag.** When node A's view changes, the soak notes the time. Node B has caught up when merging A's data into B's changes nothing a reader of B sees. The lag is the time until B caught up. `behind` counts the pairs of nodes that have not caught up yet.
+- **Check.** A check stops the load, waits until every node's view is the same, asks every node's actor, and compares the answers.
+- **VIOLATION.** A line that starts with `VIOLATION check #k:` means check `k` failed. With `--duration` the exit status is 1.
+- **Stopping.** Ctrl-C runs one last check, prints the summary and exits.
+- **Subscriber interval.** The soak sets `notify_subscribers_interval=0.01`. The default, 0.5 s, batches `Changed` and would dominate the lag.
+
 ## How it works
 
 ### The data types

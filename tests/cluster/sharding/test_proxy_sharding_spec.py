@@ -20,6 +20,7 @@ role apart from the shard role (``coordinator_singleton_override_role=False``)."
 
 from __future__ import annotations
 
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from typing import Any
@@ -202,3 +203,21 @@ async def test_a_node_without_the_coordinator_role_runs_no_coordinator():
             s.resolve(f"{root(s)}{manager}")
         assert await ask_where(s, "1") == ps
         assert await ask_where(c, "2") == ps
+
+
+async def test_a_proxy_with_no_coordinator_warns_about_the_roles(caplog: pytest.LogCaptureFixture):
+    """ShardRegion.scala 1124-1170: with messages buffered and no member to register with after
+    five retries, the region names the likely cause, here a role no member has."""
+    p = free_port()
+    async with node(p, [p]) as system:
+        await eventually(lambda: all_up(system, 1), timeout=5)
+        proxy = init(system, replace(FAST_SHARDING, role="backnd"))
+        assert proxy.path.endswith("myTypeProxy")
+        ClusterSharding(system).entity_ref_for(KEY, "1").tell(ProxyWhere(system.ignore_ref))
+        expected = (
+            "myType: No coordinator found to register. Has Cluster Sharding been started on "
+            "every node and nodes been configured with the correct role(s)? Total [1] buffered "
+            "messages."
+        )
+        with caplog.at_level(logging.WARNING):
+            await eventually(lambda: expected in caplog.messages, timeout=3)

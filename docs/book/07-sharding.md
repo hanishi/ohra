@@ -210,7 +210,7 @@ def start(system: ActorSystem[None]) -> None:
     ClusterSharding(system).init(entity)
 ```
 
-Each role has its own Replicator for sharding's data: `/system/sharding/replicator` with no role, `/system/sharding/<role>Replicator` (the role URL-encoded) with one. It counts only the members of its role, so the members without the role need no Replicator and need not answer its reads and writes. With [remembered entities](#remembered-entities) and a coordinator role apart from the shard role, the stores use the role-less Replicator, as Pekko's do, and every member with either role runs it.
+Each role has its own Replicator for sharding's data: `/system/sharding/replicator` with no role, `/system/sharding/<role>Replicator` (the role URL-encoded) with one. It counts only the members of its role, so the members without the role need no Replicator and need not answer its reads and writes. With [remembered entities](#remembered-entities) and a coordinator role apart from the shard role, the stores use the role-less Replicator, as Pekko's do. Every member with either role runs it, but it counts every member of the cluster, the proxy-only ones too, which do not run it. Its majority reads and writes therefore need enough members with one of the two roles: with one `coordinator` member, one `shard` member and three others, a majority is three of five, only two can answer, and the coordinator cannot remember a new shard.
 
 The coordinator allocates no shard until enough regions have registered: `min_nr_of_members` of the cluster's settings, or with a role, that role's `min_nr_of_members_of_role` (1 when it names none), as Pekko's `minMembers`. A request for a shard's home before then is ignored, and the region asks again on its retry interval.
 

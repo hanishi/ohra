@@ -28,7 +28,8 @@ import pytest
 from ohra import ActorRef, ActorSystem, Behaviors, ask
 from ohra.behavior import Behavior
 from ohra.cluster import ClusterSettings
-from ohra.cluster.core import Cluster, Down
+from ohra.cluster.core import Cluster, Down, MemberRemoved
+from ohra.cluster.gossip import Member
 from ohra.cluster.ddata import LWWRegister, LWWRegisterKey, Replicator, SelfUniqueAddress
 from ohra.cluster.sharding import ClusterSharding, ClusterShardingSettings, shard_id_of
 from ohra.cluster.sharding.coordinator import (
@@ -44,6 +45,7 @@ from ohra.cluster.sharding.coordinator import (
     ShardHome,
     ShardHomeAllocated,
     ShardHomes,
+    ShardRegionProxyRegistered,
     ShardRegionRegistered,
     ShardStarted,
     _Terminate,  # pyright: ignore[reportPrivateUsage]
@@ -807,6 +809,44 @@ async def test_a_stopped_proxy_is_dropped():
         coordinator = await active(node, replicator)
         await proxy_registered(coordinator, replicator, p)
         coordinator.tell(RegionStopped(p.ref.path))
+        update = await expect_update(replicator)
+        assert update.modify(update.initial).value.region_proxies == {}
+
+
+async def test_a_proxy_whose_local_ref_stops_is_dropped():
+    """A local proxy is watched (1376-1378): its termination drops it."""
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await proxy_registered(coordinator, replicator, p)
+        p.stop()
+        update = await expect_update(replicator)
+        assert update.modify(update.initial).value.region_proxies == {}
+
+
+async def test_a_proxy_on_a_removed_member_is_dropped():
+    """regionProxyTerminated for a removed member's proxies (1093-1105), with no margin."""
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await proxy_registered(coordinator, replicator, p)
+        removed = Member(node.unique_address, 1, "removed", frozenset())
+        coordinator.tell(MemberRemoved(removed, "exiting"))
+        update = await expect_update(replicator)
+        assert update.modify(update.initial).value.region_proxies == {}
+
+
+async def test_a_loaded_proxy_of_a_gone_member_is_dropped():
+    """watchStateActors (1189-1195): a stored proxy whose member is gone is terminated, even
+    when its path still resolves (here to a live probe, recorded under another incarnation)."""
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        me = node.unique_address
+        gone = UniqueAddress(me.host, me.port, me.uid + 1, me.name)
+        state = CoordinatorState.EMPTY.updated(ShardRegionProxyRegistered(p.ref.path, gone))
+        node.coordinator(replicator)
+        get = await expect_get(replicator)
+        get.reply_to.tell(Replicator.GetSuccess(get.key, node.loaded(state)))
         update = await expect_update(replicator)
         assert update.modify(update.initial).value.region_proxies == {}
 

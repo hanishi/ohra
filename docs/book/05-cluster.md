@@ -295,6 +295,16 @@ settings = ClusterSettings(
 - `KeepOldest(down_if_alone=True)`: keep the side with the oldest member, except that an oldest partitioned from two or more others downs itself.
 - `DownAll()`: down every node, the conservative choice.
 
+`KeepMajority`, `StaticQuorum` and `KeepOldest` take an optional `role`, Pekko's `keep-majority.role`, `static-quorum.role` and `keep-oldest.role`: the decision then counts only the members with that role, and downing applies to every member. With no member of the role on this side of the last known membership, the decision is to down all.
+
+```python
+from ohra import ClusterSettings, KeepMajority, SplitBrainResolverSettings
+
+settings = ClusterSettings(
+    downing=SplitBrainResolverSettings(strategy=KeepMajority(role="backend")),
+)
+```
+
 All four detect indirectly connected nodes, which are marked unreachable over some links but still talk over others, and down those first, as Pekko. `down_all_when_unstable` (`None` is Pekko's `on`: three quarters of `stable_after`, at least four seconds; `0` is off) downs everything on every node when reachability keeps flapping for `stable_after + down_all_when_unstable`. `down_removal_margin` is how long the surviving side waits after a removal before starting that node's singletons and shards, so the downed side has time to stop them; it defaults to `stable_after`.
 
 ### Leases

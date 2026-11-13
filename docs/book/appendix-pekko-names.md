@@ -62,6 +62,7 @@
 | `pekko.cluster.downing-provider-class = "...SplitBrainResolverProvider"` | `ClusterSettings(downing=SplitBrainResolverSettings(...))` |
 | `split-brain-resolver.active-strategy`, `stable-after`, `down-all-when-unstable` | `SplitBrainResolverSettings(strategy, stable_after, down_all_when_unstable)` |
 | `static-quorum.quorum-size`, `keep-oldest.down-if-alone` | `StaticQuorum(quorum_size)`, `KeepOldest(down_if_alone)`; `KeepMajority()`, `DownAll()` |
+| `keep-majority.role`, `static-quorum.role`, `keep-oldest.role` | the strategies' `role`: `KeepMajority(role=...)`, `StaticQuorum(n, role=...)`, `KeepOldest(role=...)` |
 | `pekko.cluster.down-removal-margin` | `ClusterSettings.down_removal_margin` |
 | `ClusterSharding(system).init(Entity(key, create))`, `entityRefFor(key, id)` | same, `entity_ref_for(key, id)`; the region ref is returned, as Pekko Typed |
 | `HashCodeMessageExtractor(numberOfShards)` | `ClusterShardingSettings(number_of_shards=...)`; the shard id is `crc32(entity_id) % number_of_shards` |

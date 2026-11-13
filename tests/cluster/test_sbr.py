@@ -44,16 +44,22 @@ from ohra.remote import Address, UniqueAddress
 DC = frozenset({"dc-default"})
 
 
-def member(host: str, up_number: int) -> Member:
-    return Member(UniqueAddress(host, 7355, 0, "sys"), up_number, "up", DC)
+def member(host: str, up_number: int, *roles: str) -> Member:
+    return Member(UniqueAddress(host, 7355, 0, "sys"), up_number, "up", DC | frozenset(roles))
 
 
-# E is the oldest
-A, B, C, D, E, F, G = (member(h, n) for h, n in zip("abcdefg", (5, 4, 3, 2, 1, 5, 6), strict=True))
+# E is the oldest; roles as TestAddresses.scala
+A = member("a", 5, "role3")
+B = member("b", 4, "role1", "role3")
+C = member("c", 3, "role2")
+D = member("d", 2, "role1", "role2", "role3")
+E = member("e", 1)
+F = member("f", 5)
+G = member("g", 6)
 
 
 def joining(m: Member) -> Member:
-    return Member(m.unique_address, UP_NUMBER_UNSET, "joining", DC)
+    return Member(m.unique_address, UP_NUMBER_UNSET, "joining", m.roles)
 
 
 def leaving(m: Member) -> Member:
@@ -262,6 +268,10 @@ def downing(
 # StaticQuorum
 
 
+def test_static_quorum_downs_unreachable_when_enough_reachable_nodes_with_role():
+    downing(StaticQuorum(2, role="role3"), {D, E}, {A, B, C}, {D, E})
+
+
 def test_static_quorum_downs_unreachable_when_enough_reachable():
     downing(StaticQuorum(3), {B, D}, {A, C, E}, {B, D})
 
@@ -286,6 +296,21 @@ def test_static_quorum_does_not_count_leaving_and_exiting():
 
 
 # KeepMajority
+
+
+def test_keep_majority_downs_minority_partition_with_role():
+    # {A*, B*} | {C, D*, E} => {A*, B*}
+    downing(KeepMajority(role="role3"), {C, D, E}, {A, B}, {C, D, E})
+
+
+def test_keep_majority_keeps_half_with_lowest_address_with_role_when_equal():
+    # {A, D*, E} | {B, C*} => {B, C*}: C is the lowest with role2
+    downing(KeepMajority(role="role2"), {A, D, E}, {A, D, E}, {B, C})
+
+
+def test_keep_majority_downs_all_when_no_node_has_the_role():
+    # {C} | {E} => {}
+    downing(KeepMajority(role="role3"), {C, E}, {C}, {E})
 
 
 def test_keep_majority_downs_minority():
@@ -366,6 +391,11 @@ def test_keep_majority_double_indirectly_connected_raises():
 
 
 # KeepOldest (E is the oldest)
+
+
+def test_keep_oldest_keeps_partition_with_oldest_with_role():
+    # C and D have role2, D is the oldest
+    downing(KeepOldest(role="role2"), {A, E}, {A, E}, {B, C, D})
 
 
 def test_keep_oldest_keeps_partition_with_oldest():

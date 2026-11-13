@@ -614,6 +614,13 @@ def coordinator_behavior(
             state = init_empty_state
             refs: dict[str, ActorRef[Any]] = {}
             alive_regions: set[str] = set()
+            # minMembers (686-690): the shard role's minimum, else min-nr-of-members
+            min_members = (
+                cluster.settings.min_nr_of_members
+                if settings.role is None
+                else cluster.settings.min_nr_of_members_of_role.get(settings.role, 1)
+            )
+            all_regions_registered = False
             graceful_shutdown_in_progress: set[str] = set()
             region_termination_in_progress: set[str] = set()
             rebalance_in_progress: dict[str, list[ActorRef[Any]]] = {}
@@ -1406,6 +1413,15 @@ def coordinator_behavior(
                     rebalance_in_progress[shard].append(reply_to)
                     unstash_one_get_shard_home_request()  # continue unstashing
                     return True
+                if not has_all_regions_registered():
+                    log.debug(
+                        "%s: GetShardHome [%s] request from [%s] ignored, because not all "
+                        "regions have registered yet.",
+                        type_name,
+                        shard,
+                        reply_to.path,
+                    )
+                    return True
                 known = state.shards.get(shard)
                 if known is None:
                     return False  # location not known, yet, caller will handle allocation
@@ -1421,6 +1437,14 @@ def coordinator_behavior(
                     reply_to.tell(ShardHome(shard, refs[known]))
                 unstash_one_get_shard_home_request()  # continue unstashing
                 return True
+
+            def has_all_regions_registered() -> bool:
+                """hasAllRegionsRegistered (1209-1216): the check is only for startup, i.e. once
+                all have registered we don't check more."""
+                nonlocal all_regions_registered
+                if not all_regions_registered:
+                    all_regions_registered = len(alive_regions) >= min_members
+                return all_regions_registered
 
             def get_shard_home(shard: str, reply_to: ActorRef[Any]) -> None:
                 """active's GetShardHome (788-811)."""

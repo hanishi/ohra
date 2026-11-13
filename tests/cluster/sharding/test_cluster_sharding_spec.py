@@ -48,17 +48,22 @@ Differences from the Scala:
   visible). ``Stop`` is part of the Counter; passivation is not ported (the "support passivation"
   case is outside this port), so the count of entity 2 is 3 where the Scala has 4 (451, 537).
 - ``ReceiveTimeout`` is not sent either.
-- "setup shared journal" (Scala 421), "support passivation and activation of entities" (498),
-  "support proxy only mode" (516), "easy to use with extensions" and "easy API for starting" are
-  not ported. ``GetCurrentRegions``/``CurrentRegions`` (Scala 446) has no counterpart in ohra's
-  public API, so that assertion is not ported.
+- "setup shared journal" (Scala 421), "support passivation and activation of entities" (498)
+  and "easy API for starting" are not ported, nor the extension cases of "easy to use with
+  extensions" (``AnotherCounter`` and ``SupervisedCounter`` on the fifth node). "support proxy
+  only mode" (516) and that case's sixth, ``frontend``, node are tests of their own below, each
+  on a cluster of two ``backend`` nodes and a ``frontend`` one. ``GetCurrentRegions``/
+  ``CurrentRegions`` (Scala 446) has no counterpart in ohra's public API, so that assertion is
+  not ported.
 - ``ClusterSharding.init`` starts the coordinator singleton and a region on a node together. The
   Scala creates the coordinators of every type on every node at ``join`` and a region on first
   use. The rebalancing type is therefore started on the third, fourth and fifth nodes (the oldest
   node must run its coordinator), so its ten shards are spread over those three before the sixth
   joins, where the Scala has them all on the fourth.
-- Roles (``backend`` and the sixth's ``frontend``) have no counterpart: ohra's sharding has no
-  roles.
+- The Scala gives the first five nodes the cluster role ``backend`` and the sixth ``frontend``,
+  but sets no sharding role, so the roles change nothing in the sequence, which runs without
+  them. The Scala calls the sixth "a frontend node, i.e. proxy only"; the two tests after the
+  sequence make it one, with sharding's role ``backend``.
 - Nodes are crashed with the ``crash`` of tests/cluster/test_cluster_sharding.py: the transport is
   closed and the system terminated, so nothing the node says on its way down gets out
   (``testConductor.exit``).
@@ -199,14 +204,16 @@ def join(system: ActorSystem[Any], seed: ActorSystem[Any]) -> None:
 
 
 def start(
-    system: ActorSystem[Any], journal: Journal, *keys: EntityTypeKey[CounterCommand]
+    system: ActorSystem[Any],
+    journal: Journal,
+    *keys: EntityTypeKey[CounterCommand],
+    role: str | None = None,
 ) -> None:
     """``createCoordinator`` and the region: sharding's init for each type on this node."""
     for key in keys:
         entity = Entity(key, counter(journal, port_of(system)))
-        ClusterSharding(system).init(
-            entity.with_settings(settings_of(rebalancing=key is REBALANCING_COUNTER))
-        )
+        settings = settings_of(rebalancing=key is REBALANCING_COUNTER).with_role(role)
+        ClusterSharding(system).init(entity.with_settings(settings))
 
 
 async def get(
@@ -394,3 +401,50 @@ async def test_a_restarted_region_registers_again_and_delivers():
         assert await ask(region, lambda r: ShardingEnvelope("b", Echo("2", r)), timeout=3) == "2"
         after: CurrentShardRegionState = await ask(region, GetShardRegionState, timeout=3)
         assert after == CurrentShardRegionState(frozenset({"b"}), frozenset({shard_a, shard_b}))
+
+
+BACKEND = frozenset({"backend"})
+FRONTEND = frozenset({"frontend"})
+
+
+async def test_support_proxy_only_mode():
+    """516-535: a region proxy answers with the counts the backend holds. The Scala starts the
+    proxy (``ShardRegion.proxyProps``) on ``second``; here it is ``init`` on a node without the
+    ``backend`` role, as the sixth node of "easy to use with extensions"."""
+    journal: Journal = {}
+    p1, p2, pf = free_port(), free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        first = await stack.enter_async_context(node(p1, [p1], roles=BACKEND))
+        second = await stack.enter_async_context(node(p2, [p1], roles=BACKEND))
+        frontend = await stack.enter_async_context(node(pf, [p1], roles=FRONTEND))
+        nodes = [first, second, frontend]
+        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+        for n in nodes:
+            start(n, journal, COUNTER, role="backend")
+        for entity_id, times in ((1, 2), (2, 4)):
+            for _ in range(times):
+                tell(first, entity_id, CsIncrement())
+            assert (await get(first, COUNTER, entity_id)).count == times
+
+        assert (await get(frontend, COUNTER, 1)).count == 2
+        assert (await get(frontend, COUNTER, 2)).count == 4
+
+
+async def test_easy_to_use_with_extensions_from_a_frontend_node():
+    """731-740, the sixth node: a ``frontend`` node is proxy only, and the counters it increments
+    run on the backend."""
+    journal: Journal = {}
+    p1, p2, pf = free_port(), free_port(), free_port()
+    async with AsyncExitStack() as stack:
+        first = await stack.enter_async_context(node(p1, [p1], roles=BACKEND))
+        second = await stack.enter_async_context(node(p2, [p1], roles=BACKEND))
+        sixth = await stack.enter_async_context(node(pf, [p1], roles=FRONTEND))
+        nodes = [first, second, sixth]
+        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+        for n in nodes:
+            start(n, journal, COUNTER, role="backend")
+        for n in range(1000, 1011):
+            tell(sixth, n, CsIncrement())
+            answer = await get(sixth, COUNTER, n)
+            assert answer.count == 1
+            assert answer.node != pf

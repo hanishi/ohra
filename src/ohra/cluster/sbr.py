@@ -56,6 +56,10 @@ class KeepMajority:
 
     role: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
+
 
 @dataclass(frozen=True)
 class StaticQuorum:
@@ -68,6 +72,8 @@ class StaticQuorum:
     def __post_init__(self) -> None:
         if self.quorum_size < 1:
             raise ValueError("quorum_size must be >= 1")
+        if self.role == "":
+            object.__setattr__(self, "role", None)
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,10 @@ class KeepOldest:
 
     down_if_alone: bool = True
     role: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
 
 
 @dataclass(frozen=True)

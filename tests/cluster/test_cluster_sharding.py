@@ -621,6 +621,19 @@ async def test_coordinator_singleton_settings_apply_to_the_coordinator():
         assert asyncio.get_running_loop().time() - began < 0.6
 
 
+async def test_a_role_on_the_coordinator_singleton_settings_is_ignored():
+    """Pekko's ClusterSharding.scala overrides the role of coordinatorSingletonSettings with
+    sharding's own, so a role the node lacks neither raises nor strands the coordinator."""
+    fast = FAST_SHARDING.coordinator_singleton_settings
+    assert fast is not None
+    settings = replace(FAST_SHARDING, coordinator_singleton_settings=fast.with_role("ghost"))
+    p = free_port()
+    async with node(p, [p]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        start(a, settings=settings)
+        assert await ask(ref(a, "x"), lambda r: Count(1, r), timeout=5) == 1
+
+
 def ids_on_new_shards(count: int, taken: set[str]) -> list[str]:
     """``count`` entity ids, each on a shard of its own that is not in ``taken``."""
     ids: list[str] = []

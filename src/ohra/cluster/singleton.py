@@ -10,6 +10,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ..behavior import Behavior, Behaviors, Stopped
@@ -61,6 +62,8 @@ class ClusterSingletonSettings:
         return self.role is None or self.role in cluster.self_member.roles
 
     def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
         if self.removal_margin < 0:
             raise ValueError("removal_margin must be >= 0")
         if self.hand_over_retry_interval <= 0 or self.singleton_identification_interval <= 0:
@@ -125,6 +128,10 @@ class OldestChanged:
     oldest: UniqueAddress | None
 
 
+def _matching_role(role: str | None, m: Member) -> bool:
+    return m.has_role(f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}") and (role is None or m.has_role(role))
+
+
 class OldestChangedTracker:
     """Members by age, and a queue of changes of the oldest, consumed one at a time by the
     manager."""
@@ -136,9 +143,7 @@ class OldestChangedTracker:
         self._changes: list[InitialOldestState | OldestChanged] = []
 
     def matching_role(self, m: Member) -> bool:
-        return m.has_role(f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}") and (
-            self.role is None or m.has_role(self.role)
-        )
+        return _matching_role(self.role, m)
 
     def handle_initial(self, members: Iterable[Member]) -> None:
         aged = [m for m in members if m.up_number != UP_NUMBER_UNSET and self.matching_role(m)]
@@ -972,7 +977,7 @@ def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
         instance: ActorRef[Any] | None = None
         buffer: deque[Any] = deque()
         identify_id = 0
-        matching = OldestChangedTracker(cluster.self_unique_address, settings.role).matching_role
+        matching = partial(_matching_role, settings.role)
         cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
 
         def identify_singleton() -> None:
@@ -1102,7 +1107,7 @@ class ClusterSingleton:
         cluster = Cluster(self.system)
         if settings.role is not None and settings.role not in cluster.self_roles:
             raise ValueError(
-                f"This cluster member [{cluster.self_address}] doesn't have the "
+                f"This cluster member [{cluster.self_address.root}] doesn't have the "
                 f"role [{settings.role}]"
             )
         root = self.system._system_root  # pyright: ignore[reportPrivateUsage]

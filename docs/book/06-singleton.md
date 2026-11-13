@@ -98,7 +98,7 @@ via 2552: 9 left, counted on 2552
 
 ## Roles
 
-To confine a singleton to some nodes, give the settings a role: `ClusterSingletonSettings().with_role("worker")`. The singleton then runs on the oldest member that has the role. A node without it starts only the proxy, which still reaches the singleton, and asking `_init_manager` for a role the node lacks raises `ValueError`, as Pekko's `require`.
+To confine a singleton to some nodes, give the settings a role: `ClusterSingletonSettings().with_role("worker")`. The singleton then runs on the oldest member that has the role. A node without it starts only the proxy, which still reaches the singleton.
 
 ## How it works
 

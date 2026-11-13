@@ -295,7 +295,7 @@ settings = ClusterSettings(
 - `KeepOldest(down_if_alone=True)`: keep the side with the oldest member, except that an oldest partitioned from two or more others downs itself.
 - `DownAll()`: down every node, the conservative choice.
 
-`KeepMajority`, `StaticQuorum` and `KeepOldest` take an optional `role`, Pekko's `keep-majority.role`, `static-quorum.role` and `keep-oldest.role`: the decision then counts only the members with that role, and downing applies to every member. With no member of the role on this side of the last known membership, the decision is to down all.
+`KeepMajority`, `StaticQuorum` and `KeepOldest` take an optional `role`, Pekko's `keep-majority.role`, `static-quorum.role` and `keep-oldest.role`: the decision then counts only the members with that role, and downing applies to every member. When no member at all has the role, `KeepMajority` and `KeepOldest` down all; `StaticQuorum` downs this side, since it cannot reach its quorum.
 
 ```python
 from ohra import ClusterSettings, KeepMajority, SplitBrainResolverSettings

@@ -507,7 +507,7 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         cluster = Cluster(ctx.system)
         if not settings.roles <= cluster.self_roles:
             raise ValueError(
-                f"This cluster member [{cluster.self_address}] with roles "
+                f"This cluster member [{cluster.self_address.root}] with roles "
                 f"[{', '.join(sorted(cluster.self_roles))}] doesn't have all the roles "
                 f"[{', '.join(sorted(settings.roles))}]"
             )

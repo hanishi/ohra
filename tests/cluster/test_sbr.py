@@ -651,3 +651,10 @@ def test_two_incarnations_at_one_address_order_by_uid():
     for m in (old, new):  # inserted oldest first: only the uid in the key keeps this order
         s.add(m)
     assert s.all_members == [old, new]
+
+
+def test_an_empty_role_means_no_role():
+    """Pekko's config default ``role = ""`` is none (roleOption)."""
+    assert KeepMajority(role="").role is None
+    assert StaticQuorum(1, role="").role is None
+    assert KeepOldest(role="").role is None

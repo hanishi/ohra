@@ -490,3 +490,9 @@ async def test_init_manager_on_a_node_without_the_role_raises():
         )
         with pytest.raises(ValueError, match=r"doesn't have the role \[worker\]"):
             ClusterSingleton(nodes[0])._init_manager(singleton)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_an_empty_role_means_no_role():
+    """Pekko's config default ``role = ""`` is none (roleOption)."""
+    assert ClusterSingletonSettings(role="").role is None
+    assert ClusterSingletonSettings().with_role("").role is None

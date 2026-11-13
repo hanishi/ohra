@@ -51,7 +51,7 @@ from ..core import (
     MemberUp,
 )
 from ..core import Subscribe as ClusterSubscribe
-from ..gossip import Member
+from ..gossip import DC_ROLE_PREFIX, Member
 from .coordinator import (
     BeginHandOff,
     BeginHandOffAck,
@@ -60,6 +60,7 @@ from .coordinator import (
     GracefulShutdownReq,
     HostShard,
     Register,
+    RegisterProxy,
     RegionStopped,
     RegisterAck,
     ShardHome,
@@ -121,11 +122,13 @@ def region_behavior(
     settings: ClusterShardingSettings,
     progress: _ExitingProgress,
     remember_entities_provider: DDataRememberEntitiesProvider | None = None,
+    proxy: bool = False,
 ) -> Behavior[Any]:
     """Pekko's ``ShardRegion``. With a ``remember_entities_provider``, its shards remember their
     entities in the provider's store and start them through the region's starter manager, and a
     shard that stops while not being handed off is started again after
-    ``shard_failure_backoff``."""
+    ``shard_failure_backoff``. A ``proxy`` (Pekko's ``proxyProps``, with no ``entityProps``)
+    hosts no shards: it registers with ``RegisterProxy`` and forwards to the shards' homes."""
 
     @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
@@ -161,6 +164,15 @@ def region_behavior(
         _log_passivation_strategy(log, type_name, passivation_strategy, settings.remember_entities)
 
         # --- coordinator location ----------------------------------------------------------------
+
+        # ShardRegion.scala 709-716: the members that may run the coordinator
+        target_dc_role = f"{DC_ROLE_PREFIX}default"
+        coordinator_role = settings.coordinator_singleton_role
+
+        def matching_coordinator_role(member: Member) -> bool:
+            return member.has_role(target_dc_role) and (
+                coordinator_role is None or member.has_role(coordinator_role)
+            )
 
         def coordinator_path(member: Member) -> str:
             manager = _manager_name(f"{type_name}Coordinator")
@@ -207,15 +219,16 @@ def region_behavior(
                 # the local singleton instance is not up yet: the next retry asks again
                 except LookupError:
                     continue
-                found.tell(Register(ctx.self))
+                # registrationMessage (1174-1175)
+                found.tell(RegisterProxy(ctx.self) if proxy else Register(ctx.self))
 
         # --- delivery ----------------------------------------------------------------------------
 
         def get_shard(shard: str) -> ActorRef[Any] | None:
             """ShardRegion.scala 1331-1370: the shard once it is initialized. On first use it is
-            spawned and starting, and None is returned until its ``ShardInitialized``. A region
-            always hosts shards here, never a proxy."""
-            if shard in starting_shards:
+            spawned and starting, and None is returned until its ``ShardInitialized``. A proxy has
+            no ``entityProps``, so it starts none."""
+            if shard in starting_shards or proxy:
                 return None
             ref = shards.get(shard)
             if ref is not None:
@@ -428,6 +441,8 @@ def region_behavior(
                         )
                     )
                 case MemberUp(member=m) | MemberLeft(member=m) | MemberExited(member=m):
+                    if not matching_coordinator_role(m):
+                        return Behaviors.same
                     change_members(
                         by_age(
                             [x for x in members_by_age if x.unique_address != m.unique_address]

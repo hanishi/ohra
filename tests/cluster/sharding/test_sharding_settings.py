@@ -147,10 +147,10 @@ async def test_the_first_init_spawns_the_sharding_replicator():
         sharding = ClusterSharding(system)
         sharding.init(entity(A))
         sharding.init(entity(B))
-        assert sharding._replicator is not None  # pyright: ignore[reportPrivateUsage]
+        replicator = sharding._replicators[None]  # pyright: ignore[reportPrivateUsage]
         root = f"ohra://c@127.0.0.1:{port}"
         found = system.resolve(root + "/system/sharding/replicator")
-        assert found is sharding._replicator  # pyright: ignore[reportPrivateUsage]
+        assert found is replicator
         parent = sharding._parent  # pyright: ignore[reportPrivateUsage]
         assert parent is not None
         assert list(parent.children).count("replicator") == 1

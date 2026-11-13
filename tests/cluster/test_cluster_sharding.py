@@ -634,6 +634,26 @@ async def test_a_role_on_the_coordinator_singleton_settings_is_ignored():
         assert await ask(ref(a, "x"), lambda r: Count(1, r), timeout=5) == 1
 
 
+async def test_a_coordinator_role_is_honoured_without_the_override():
+    """ClusterShardingSettings.scala 937-938: with coordinator-singleton-role-override off, the
+    coordinator runs only on members with its singleton settings' role, so a node without it
+    starts no manager and does not raise."""
+    fast = FAST_SHARDING.coordinator_singleton_settings
+    assert fast is not None
+    settings = replace(
+        FAST_SHARDING,
+        coordinator_singleton_override_role=False,
+        coordinator_singleton_settings=fast.with_role("ghost"),
+    )
+    p = free_port()
+    async with node(p, [p]) as a:
+        await eventually(lambda: all_up(a, 1), timeout=5)
+        start(a, settings=settings)
+        root = Cluster(a).self_address.root
+        with pytest.raises(LookupError):
+            a.resolve(f"{root}/system/singletonManagerCounterCoordinator")
+
+
 def ids_on_new_shards(count: int, taken: set[str]) -> list[str]:
     """``count`` entity ids, each on a shard of its own that is not in ``taken``."""
     ids: list[str] = []

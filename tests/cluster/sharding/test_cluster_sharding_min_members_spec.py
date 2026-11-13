@@ -94,3 +94,29 @@ async def test_use_all_nodes():
         stats = await stats_probe.expect_message_type(ClusterShardingStats, 6)
         assert set(stats.regions) == {Address("c", "127.0.0.1", p) for p in (p1, p2, p3)}
         assert sum(sum(s.stats.values()) for s in stats.regions.values()) == 3
+
+
+async def test_the_shard_roles_minimum_is_used_when_sharding_has_a_role():
+    """ShardCoordinator.scala 686-690: with a role, the coordinator waits for that role's
+    ``min_nr_of_members_of_role`` (1 when it has none), not ``min_nr_of_members``. The cluster
+    needs three members to come up; the one region on the role is then enough."""
+    p1, p2, p3 = free_port(), free_port(), free_port()
+    settings = replace(SETTINGS, role="backend")
+    async with AsyncExitStack() as stack:
+        nodes = [
+            await stack.enter_async_context(
+                node(
+                    p,
+                    [p1],
+                    min_nr_of_members=3,
+                    roles=frozenset({"backend"}) if p == p1 else frozenset[str](),
+                )
+            )
+            for p in (p1, p2, p3)
+        ]
+        await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=10)
+        first = nodes[0]
+        start(first, settings=settings)
+        replies = Node(first).probe()
+        ref(first, "a").tell(Count(1, replies.ref))
+        await replies.expect_message(1, 5)

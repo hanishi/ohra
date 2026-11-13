@@ -614,7 +614,7 @@ KEY = "Counter"
 async def stored_state(system: ActorSystem[Any], type_name: str) -> CoordinatorState:
     """What the coordinator wrote, read from sharding's own Replicator."""
     key = LWWRegisterKey[CoordinatorState](f"{type_name}CoordinatorState")
-    replicator = ClusterSharding(system)._replicator  # pyright: ignore[reportPrivateUsage]
+    replicator = ClusterSharding(system)._replicators[None]  # pyright: ignore[reportPrivateUsage]
     assert replicator is not None
     reply: Replicator.GetResponse[Register_] = await ask(
         replicator, lambda r: Replicator.Get(key, Replicator.ReadLocal(), r), timeout=2

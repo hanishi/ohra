@@ -38,6 +38,7 @@ class ClusterReceptionistSettings:
     def effective_replicator_settings(
         self, cluster_settings: ClusterSettings
     ) -> ReplicatorSettings:
-        """The receptionist's data is never durable (Pekko's ``withDurableKeys(Set.empty)``)."""
+        """The receptionist's data is never durable and has no role (Pekko's
+        ``withDurableKeys(Set.empty).withRole(None)``: cluster-typed reference.conf 30-34)."""
         base = self.replicator_settings or cluster_settings.distributed_data
-        return replace(base, durable_keys=frozenset())
+        return replace(base, durable_keys=frozenset(), roles=frozenset())

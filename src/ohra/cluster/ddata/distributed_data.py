@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ...behavior import Behavior, Behaviors
 from ...patterns import AskTimeoutError
+from ...remote.remoting import EmptyLocalActorRef
 from ...result import Failure, Success, Try
 from ...supervision import SupervisorStrategy
 from .key import Key
@@ -20,6 +22,8 @@ if TYPE_CHECKING:
     from ...system import ActorSystem
     from . import SelfUniqueAddress
 
+log = logging.getLogger(__name__)
+
 UNEXPECTED_ASK_TIMEOUT = 20.0
 """Pekko's ``replicator-message-adapter-unexpected-ask-timeout``, in seconds."""
 
@@ -30,6 +34,10 @@ class DistributedData:
     a cluster node raises RuntimeError."""
 
     replicator: ActorRef[Replicator.Command]
+    """The Replicator, or dead letters when ``is_terminated``."""
+    is_terminated: bool
+    """The cluster is terminated, or this node lacks a role the settings ask for: no Replicator
+    runs and ``replicator`` is dead letters."""
     self_unique_address: SelfUniqueAddress
 
     def __new__(cls, system: ActorSystem[Any]) -> DistributedData:
@@ -46,13 +54,29 @@ class DistributedData:
 
             cluster = Cluster(system)
             settings = cluster.settings.distributed_data
-            # typed actors stop on failure, Pekko's classic Replicator restarts
-            behavior = Behaviors.supervise(Replicator.behavior(settings)).on_failure(
-                SupervisorStrategy.restart()
-            )
             self = object.__new__(cls)
-            name = ReplicatorSettings.name_for(system, None)
-            self.replicator = system._system_root.spawn_child(behavior, name, None).ref  # pyright: ignore[reportPrivateUsage]
+            self.is_terminated = cluster.is_terminated or not settings.roles <= cluster.self_roles
+            if self.is_terminated:
+                if cluster.is_terminated:
+                    log.warning(
+                        "Replicator points to dead letters, because Cluster is terminated."
+                    )
+                else:
+                    log.warning(
+                        "Replicator points to dead letters. Make sure the cluster node has the "
+                        "proper role. Node has roles [%s], Distributed Data is configured for "
+                        "roles [%s].",
+                        ",".join(sorted(cluster.self_roles)),
+                        ",".join(sorted(settings.roles)),
+                    )
+                self.replicator = EmptyLocalActorRef(system, "/deadLetters")
+            else:
+                # typed actors stop on failure, Pekko's classic Replicator restarts
+                behavior = Behaviors.supervise(Replicator.behavior(settings)).on_failure(
+                    SupervisorStrategy.restart()
+                )
+                name = ReplicatorSettings.name_for(system, None)
+                self.replicator = system._system_root.spawn_child(behavior, name, None).ref  # pyright: ignore[reportPrivateUsage]
             self.self_unique_address = SelfUniqueAddress(cluster.self_unique_address)
             system.distributed_data = self
         return system.distributed_data

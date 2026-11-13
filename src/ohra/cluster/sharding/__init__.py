@@ -153,7 +153,7 @@ class ClusterSharding:
         if self._parent is None:
             self._parent = self.system._system_root.spawn_child(Behaviors.empty, "sharding", None)  # pyright: ignore[reportPrivateUsage]
         # ClusterSharding.scala 730-815: the guardian spawns one Replicator, for all entity types
-        wanted = settings.effective_replicator_settings(Cluster(self.system).settings)
+        wanted = settings.effective_replicator_settings(Cluster(self.system).settings, None)
         if self._replicator is None:
             self._replicator_settings = wanted
             self._replicator = self._parent.spawn_child(

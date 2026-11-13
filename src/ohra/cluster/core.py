@@ -1560,7 +1560,11 @@ class _CoreDaemon:
 
     @property
     def is_min_nr_of_members_fulfilled(self) -> bool:
-        return len(self.latest_gossip.members) >= self.settings.min_nr_of_members
+        members = self.latest_gossip.members
+        return len(members) >= self.settings.min_nr_of_members and all(
+            sum(1 for m in members if m.has_role(role)) >= n
+            for role, n in self.settings.min_nr_of_members_of_role.items()
+        )
 
     def leader_actions_on_convergence(self) -> None:
         gossip = self.latest_gossip

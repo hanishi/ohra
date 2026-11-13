@@ -93,8 +93,12 @@ via 2552: 9 left, counted on 2552
 > **Coming from Apache Pekko**
 >
 > - `ClusterSingleton(system).init(SingletonActor(behavior, "name"))`, `with_stop_message` and `ClusterSingletonSettings` are Pekko's, in snake_case, and `init` returns the proxy.
-> - The manager and the proxy are ports of ClusterSingletonManager and ClusterSingletonProxy, without the lease, roles and data centers.
+> - The manager and the proxy are ports of ClusterSingletonManager and ClusterSingletonProxy, without the lease and data centers.
 > - The proxy finds the instance by asking the manager on the oldest node, and keeps asking every `singleton_identification_interval` in place of remote DeathWatch. [Appendix B](appendix-deviations.md) has the details.
+
+## Roles
+
+To confine a singleton to some nodes, give the settings a role: `ClusterSingletonSettings().with_role("worker")`. The singleton then runs on the oldest member that has the role. A node without it starts only the proxy, which still reaches the singleton, and asking `_init_manager` for a role the node lacks raises `ValueError`, as Pekko's `require`.
 
 ## How it works
 

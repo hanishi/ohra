@@ -48,7 +48,7 @@
 | `Receptionist.Subscribe(key, subscriber)` | `ohra.receptionist.Subscribe(key, subscriber)`; the top-level `Subscribe` is the cluster's |
 | `Listing.serviceInstances(key)` / `allServiceInstances(key)` / `servicesWereAddedOrRemoved` | `listing.service_instances` / `all_service_instances` / `services_were_added_or_removed`, fields of `Listing[T]` |
 | `ClusterSingleton(system).init(SingletonActor(behavior, "name"))`, `withStopMessage`, `withSettings` | same, `with_stop_message`, `with_settings`; returns the proxy ref |
-| `ClusterSingletonSettings` / `ClusterSingletonManagerSettings` (`removal-margin`, `hand-over-retry-interval`, `min-number-of-hand-over-retries`, `singleton-identification-interval`, `buffer-size`) | `ClusterSingletonSettings` with the same fields in snake_case, seconds |
+| `ClusterSingletonSettings` / `ClusterSingletonManagerSettings` (`removal-margin`, `hand-over-retry-interval`, `min-number-of-hand-over-retries`, `singleton-identification-interval`, `buffer-size`, `role`) | `ClusterSingletonSettings` with the same fields in snake_case, seconds; `withRole`/`withNoRole` are `with_role`/`with_no_role`, and `role` is `str | None` |
 | `CoordinatedShutdown(system).addTask(phase, name)(task)` | `CoordinatedShutdown(system).add_task(phase, name, task)`; `add_actor_termination_task`, `run(reason)`, `shutdown_reason`, `timeout(phase)`, `total_timeout` |
 | `pekko.coordinated-shutdown.phases.<p>.timeout`, `default-phase-timeout` | `ActorSystem(..., shutdown=CoordinatedShutdownSettings(phase_timeouts={...}, default_phase_timeout=5.0))` |
 | `run-by-actor-system-terminate`, `run-by-jvm-shutdown-hook` | `CoordinatedShutdownSettings(run_by_actor_system_terminate=True, run_on_signals=(signal.SIGTERM, ...))` |

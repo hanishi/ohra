@@ -32,12 +32,15 @@ from ohra.cluster.core import Cluster, Down
 from ohra.cluster.ddata import LWWRegister, LWWRegisterKey, Replicator, SelfUniqueAddress
 from ohra.cluster.sharding import ClusterSharding, ClusterShardingSettings, shard_id_of
 from ohra.cluster.sharding.coordinator import (
+    BeginHandOff,
     CoordinatorState,
     GetShardHome,
+    GracefulShutdownReq,
     HostShard,
     RegionStopped,
     Register,
     RegisterAck,
+    RegisterProxy,
     ShardHome,
     ShardHomeAllocated,
     ShardHomes,
@@ -717,3 +720,126 @@ async def test_two_entity_types_keep_separate_states():
         assert set(second.shards) == {shard_id_of("y", 10)}
         assert all(r.endswith("/Counter") for r in first.regions)
         assert all(r.endswith("/Counter2") for r in second.regions)
+
+
+# --- region proxies (ShardCoordinator.scala 767-779, 1093-1103, 1249-1256, 1340, 1641) -----------
+
+
+async def allocated_to(
+    coordinator: ActorRef[Any], replicator: TestProbe[Any], shard: str, asker: TestProbe[Any]
+) -> None:
+    coordinator.tell(GetShardHome(shard, asker.ref))
+    update = await expect_update(replicator)
+    update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+    await asker.expect_message_type(ShardHome, 3)
+
+
+async def proxy_registered(
+    coordinator: ActorRef[Any], replicator: TestProbe[Any], proxy: TestProbe[Any]
+) -> None:
+    coordinator.tell(RegisterProxy(proxy.ref))
+    update = await expect_update(replicator)
+    update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+    await proxy.fish_for_message(
+        3,
+        lambda m: (
+            FishingOutcomes.complete()
+            if isinstance(m, RegisterAck)
+            else FishingOutcomes.continue_and_ignore()
+        ),
+    )
+
+
+async def test_a_proxy_registers_and_gets_the_current_shard_homes():
+    async with manual_node() as node:
+        replicator, r, p, asker = node.probe(), node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        coordinator.tell(RegisterProxy(p.ref))
+        update = await expect_update(replicator)
+        stored = update.modify(update.initial).value
+        assert stored.region_proxies == {p.ref.path: node.unique_address}
+        assert set(stored.regions) == {r.ref.path}
+        await p.expect_message(ShardHomes(((r.ref, ("1",)),)))
+        update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+        await p.expect_message(RegisterAck(coordinator))
+
+
+async def test_a_registered_proxy_is_acked_again_without_an_update():
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await proxy_registered(coordinator, replicator, p)
+        coordinator.tell(RegisterProxy(p.ref))
+        await p.expect_message(RegisterAck(coordinator))
+        await replicator.expect_no_message(0.1)
+
+
+async def test_a_proxy_asking_for_a_new_shard_gets_a_region_home():
+    async with manual_node() as node:
+        replicator, r, p = node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await proxy_registered(coordinator, replicator, p)
+        coordinator.tell(GetShardHome("2", p.ref))
+        update = await expect_update(replicator)
+        assert update.modify(update.initial).value.shards == {"2": r.ref.path}
+        update.reply_to.tell(Replicator.UpdateSuccess(update.key))
+        await p.expect_message(ShardHome("2", r.ref))
+        await r.expect_message(HostShard("2", coordinator))
+        await p.expect_no_message(0.1)  # a proxy never hosts a shard
+
+
+async def test_a_proxy_alone_gets_no_allocation():
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await proxy_registered(coordinator, replicator, p)
+        coordinator.tell(GetShardHome("1", p.ref))
+        await replicator.expect_no_message(0.1)
+        await p.expect_no_message(0.1)
+
+
+async def test_a_stopped_proxy_is_dropped():
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await proxy_registered(coordinator, replicator, p)
+        coordinator.tell(RegionStopped(p.ref.path))
+        update = await expect_update(replicator)
+        assert update.modify(update.initial).value.region_proxies == {}
+
+
+async def test_a_rebalance_asks_the_proxies_to_hand_off_too():
+    async with manual_node() as node:
+        replicator, r, p, asker = node.probe(), node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        await proxy_registered(coordinator, replicator, p)
+        coordinator.tell(GracefulShutdownReq(r.ref))
+        begin = await p.fish_for_message(
+            3,
+            lambda m: (
+                FishingOutcomes.complete()
+                if isinstance(m, BeginHandOff)
+                else FishingOutcomes.continue_and_ignore()
+            ),
+        )
+        assert cast(BeginHandOff, begin[-1]).shard == "1"
+
+
+async def test_a_proxy_registering_before_initialization_is_logged(
+    caplog: pytest.LogCaptureFixture,
+):
+    async with manual_node() as node:
+        replicator, p = node.probe(), node.probe()
+        with caplog.at_level(logging.DEBUG, logger="ohra.actor"):
+            coordinator = node.coordinator(replicator)
+            await expect_get(replicator)
+            coordinator.tell(RegisterProxy(p.ref))
+            await settle(node)
+        text = "ShardRegion proxy tried to register but ShardCoordinator not initialized yet"
+        assert levels(caplog, text) == ["DEBUG"]
+        await p.expect_no_message(0.1)

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
 from ...behavior import Behavior, Behaviors, StashBuffer
@@ -163,6 +163,17 @@ class ShardRegionTerminated:
 
 
 @dataclass(frozen=True)
+class ShardRegionProxyRegistered:
+    region_proxy: str
+    node: UniqueAddress
+
+
+@dataclass(frozen=True)
+class ShardRegionProxyTerminated:
+    region_proxy: str
+
+
+@dataclass(frozen=True)
 class ShardHomeAllocated:
     shard: str
     region: str
@@ -174,7 +185,12 @@ class ShardHomeDeallocated:
 
 
 type DomainEvent = (
-    ShardRegionRegistered | ShardRegionTerminated | ShardHomeAllocated | ShardHomeDeallocated
+    ShardRegionRegistered
+    | ShardRegionProxyRegistered
+    | ShardRegionTerminated
+    | ShardRegionProxyTerminated
+    | ShardHomeAllocated
+    | ShardHomeDeallocated
 )
 
 
@@ -183,12 +199,14 @@ class CoordinatorState:
     """ShardCoordinator.State (ShardCoordinator.scala 455-521): shard -> region path, and region
     path -> its shards. Regions are keyed by path so a local and a remote ref to the same region
     compare equal. It is the value of the coordinator's LWWRegister, so it travels on the wire.
-    Actor paths carry no uid here, so ``region_nodes`` records each region's node.
-    ``unallocated_shards`` is only used if remembered entities is enabled."""
+    Actor paths carry no uid here, so ``region_nodes`` records each region's node, and
+    ``region_proxies`` each proxy's. ``unallocated_shards`` is only used if remembered entities is
+    enabled."""
 
     shards: dict[str, str]
     regions: dict[str, tuple[str, ...]]
     region_nodes: dict[str, UniqueAddress]
+    region_proxies: dict[str, UniqueAddress] = field(default_factory=dict[str, UniqueAddress])
     unallocated_shards: frozenset[str] = frozenset()
     remember_entities: bool = False
     EMPTY: ClassVar[CoordinatorState]
@@ -201,9 +219,8 @@ class CoordinatorState:
 
     @property
     def is_empty(self) -> bool:
-        """isEmpty (481-482): ohra has no region proxies here, and unallocated shards do not
-        count."""
-        return not self.shards and not self.regions
+        """isEmpty (481-482): unallocated shards do not count."""
+        return not self.shards and not self.regions and not self.region_proxies
 
     def updated(self, event: DomainEvent) -> CoordinatorState:
         match event:
@@ -214,6 +231,17 @@ class CoordinatorState:
                     self,
                     regions={**self.regions, region: ()},
                     region_nodes={**self.region_nodes, region: node},
+                )
+            case ShardRegionProxyRegistered(proxy, node):
+                if proxy in self.region_proxies:
+                    raise ValueError(f"Region proxy {proxy} already registered: {self}")
+                return replace(self, region_proxies={**self.region_proxies, proxy: node})
+            case ShardRegionProxyTerminated(proxy):
+                if proxy not in self.region_proxies:
+                    raise ValueError(f"Terminated region proxy {proxy} not registered: {self}")
+                return replace(
+                    self,
+                    region_proxies={p: n for p, n in self.region_proxies.items() if p != proxy},
                 )
             case ShardRegionTerminated(region):
                 if region not in self.regions:
@@ -274,6 +302,14 @@ CoordinatorState.EMPTY = CoordinatorState({}, {}, {})
 @dataclass(frozen=True)
 class Register:
     region: ActorRef[Any]
+
+
+@dataclass(frozen=True)
+class RegisterProxy:
+    """A proxy-only region registers so, until it gets ``RegisterAck`` (ShardCoordinator.scala
+    357-360)."""
+
+    region_proxy: ActorRef[Any]
 
 
 @dataclass(frozen=True)
@@ -344,6 +380,7 @@ class RegionStopped:
 
 for _cls in (
     Register,
+    RegisterProxy,
     RegisterAck,
     GetShardHome,
     ShardHome,
@@ -659,7 +696,7 @@ def coordinator_behavior(
             def on_signal(_ctx: ActorContext[Any], sig: Signal) -> Behavior[Any]:
                 if sig is PostStop or sig is PreRestart:
                     # what their DeathWatch of the coordinator would tell them: they register again
-                    for path in alive_regions:
+                    for path in (*alive_regions, *state.region_proxies):
                         if path in refs:
                             refs[path].tell(CoordinatorStopped(ctx.self))
                 return Behaviors.same
@@ -789,6 +826,13 @@ def coordinator_behavior(
                                 "initialized yet: [%s]",
                                 type_name,
                                 region.path,
+                            )
+                        case RegisterProxy(proxy):
+                            log.debug(
+                                "%s: ShardRegion proxy tried to register but ShardCoordinator not "
+                                "initialized yet: [%s]",
+                                type_name,
+                                proxy.path,
                             )
                         case _RememberEntitiesStoreStopped():
                             # receiveTerminated (1950-1954)
@@ -921,6 +965,19 @@ def coordinator_behavior(
                     alive_regions.add(path)
                     if is_local_actor(region):
                         ctx.watch_with(region, RegionStopped(path))
+                # 1189-1195: the proxies alike
+                for path in list(state.region_proxies):
+                    if state.region_proxies[path] not in members:
+                        region_proxy_terminated(path)  # not part of cluster
+                        continue
+                    try:
+                        proxy = ctx.system.resolve(path)
+                    except LookupError:
+                        region_proxy_terminated(path)
+                        continue
+                    refs[path] = proxy
+                    if is_local_actor(proxy):
+                        ctx.watch_with(proxy, RegionStopped(path))
                 # Let the quick Terminated messages be processed before starting to reply to
                 # GetShardHome
                 ctx.timers.start_single_timer("state-initialized", _StateInitialized(), 0.5)
@@ -1190,6 +1247,8 @@ def coordinator_behavior(
                     match msg:
                         case Register(region):
                             register(region)
+                        case RegisterProxy(proxy):
+                            register_proxy(proxy)
                         case GetShardHome(shard, reply_to):
                             get_shard_home(shard, reply_to)
                         case ShardStarted(shard):
@@ -1214,7 +1273,11 @@ def coordinator_behavior(
                         case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
                             on_rebalance_message(msg)
                         case RegionStopped(path):
-                            region_terminated(path)
+                            # receiveTerminated (1093-1103): a region, else a proxy
+                            if path in state.region_proxies:
+                                region_proxy_terminated(path)
+                            else:
+                                region_terminated(path)
                         case _DelayedShardRegionTerminated(path):
                             region_terminated(path)
                         case _Terminate():
@@ -1299,6 +1362,32 @@ def coordinator_behavior(
                         allocate_shard_homes_for_remember_entities()
 
                     update(ShardRegionRegistered(path, node), registered)
+
+            def register_proxy(proxy: ActorRef[Any]) -> None:
+                """active's RegisterProxy (767-779). Its node is recorded as a region's is (D5),
+                and a local proxy is watched; a remote one is seen through its RegionStopped and
+                its member's removal."""
+                path = proxy.path
+                member = member_for(proxy)
+                if member is None or member.status not in _OF_INTEREST:
+                    return
+                log.debug("%s: ShardRegion proxy registered: [%s]", type_name, path)
+                # we don't have to wait for updated state for this
+                inform_about_current_shards(proxy)
+                if path in state.region_proxies:
+                    refs[path] = proxy
+                    proxy.tell(RegisterAck(ctx.self))
+                    return
+
+                def registered(evt: ShardRegionProxyRegistered) -> None:
+                    nonlocal state
+                    state = state.updated(evt)
+                    refs[path] = proxy
+                    if is_local_actor(proxy):
+                        ctx.watch_with(proxy, RegionStopped(path))
+                    proxy.tell(RegisterAck(ctx.self))
+
+                update(ShardRegionProxyRegistered(path, member.unique_address), registered)
 
             def inform_about_current_shards(ref: ActorRef[Any]) -> None:
                 homes = tuple(
@@ -1420,6 +1509,21 @@ def coordinator_behavior(
 
                 update(ShardRegionTerminated(path), terminated)
 
+            def region_proxy_terminated(path: str) -> None:
+                """regionProxyTerminated (1249-1256)."""
+                for worker in rebalance_workers.values():
+                    worker.tell(_RegionTerminatedForWorker(path))
+                if path not in state.region_proxies:
+                    return
+                log.debug("%s: ShardRegion proxy terminated: [%s]", type_name, path)
+
+                def terminated(evt: ShardRegionProxyTerminated) -> None:
+                    nonlocal state
+                    state = state.updated(evt)
+                    refs.pop(path, None)
+
+                update(ShardRegionProxyTerminated(path), terminated)
+
             def terminate() -> None:
                 """Pekko's Terminate: stop at once, unless the local region still has shards to
                 hand off."""
@@ -1447,6 +1551,9 @@ def coordinator_behavior(
                         )
                     else:
                         region_terminated(path)
+                # a proxy has no shards to keep: no margin, as Pekko's regionProxyTerminated
+                for path in [p for p, n in state.region_proxies.items() if n == m.unique_address]:
+                    region_proxy_terminated(path)
 
             # --- rebalance and hand-off ----------------------------------------------------------
 
@@ -1498,7 +1605,10 @@ def coordinator_behavior(
                 if from_region not in refs:
                     return
                 rebalance_in_progress[shard] = []
-                regions = {r: refs[r] for r in alive_regions if r in refs}
+                # 1340: the regions and the proxies
+                regions = {
+                    r: refs[r] for r in (*alive_regions, *state.region_proxies) if r in refs
+                }
                 worker = ctx.spawn_anonymous(
                     _rebalance_worker(
                         type_name,

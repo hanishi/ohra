@@ -15,6 +15,7 @@ from ..cluster.sharding import (
     GetShardRegionState,
     shard_id_of,
 )
+from ..remote import Address
 from ..patterns import AskTimeoutError, ask
 from .http import Response, json_response
 
@@ -40,7 +41,7 @@ def member_json(m: Member) -> dict[str, object]:
         "node": m.address.root,
         "nodeUid": m.unique_address.uid,
         "status": _STATUS_NAMES[m.status],
-        "roles": [],
+        "roles": sorted(m.roles),
     }
 
 
@@ -54,7 +55,15 @@ def members_json(cluster: Cluster) -> dict[str, object]:
         if r.status == "unreachable":
             observers.setdefault(r.subject.address.root, []).append(r.observer.address.root)
     up = [m for m in state.members if m.status == "up"]
-    oldest = min(up, key=lambda m: (m.up_number, m.address)) if up else None
+
+    def age(m: Member) -> tuple[int, Address]:
+        return (m.up_number, m.address)
+
+    oldest = min(up, key=age) if up else None
+    oldest_per_role = {
+        role: min((m for m in up if role in m.roles), key=age).address.root
+        for role in sorted({r for m in up for r in m.roles})
+    }
     return {
         "selfNode": cluster.self_address.root,
         "members": [member_json(m) for m in state.members],
@@ -63,7 +72,7 @@ def members_json(cluster: Cluster) -> dict[str, object]:
         ],
         "leader": state.leader.root if state.leader is not None else None,
         "oldest": oldest.address.root if oldest is not None else None,
-        "oldestPerRole": {},
+        "oldestPerRole": oldest_per_role,
     }
 
 

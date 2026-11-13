@@ -94,7 +94,7 @@ removed: 2551
 > - The membership protocol is a port of Pekko's `ClusterCoreDaemon`: the same gossip, vector clocks, convergence rule, leader, member lifecycle and phi-accrual failure detector.
 > - `ClusterSettings(seed_nodes=...)` replaces `pekko.cluster.seed-nodes` and the other `pekko.cluster` settings, as fields in snake_case with durations in seconds.
 > - `Cluster(system).manager`, `subscriptions`, `state` and `self_member` are the extension's members. `Subscribe` always sends the current state as events first, and `member.status` is a string such as `"up"` or `"weakly_up"`.
-> - The cluster has one data center and no roles, and the split-brain resolver is off until `downing=` is set, as in Pekko with no downing provider. [Appendix B](appendix-deviations.md) lists what else is left out.
+> - The cluster has one data center, named `default`, and roles as in Pekko, and the split-brain resolver is off until `downing=` is set, as in Pekko with no downing provider. [Appendix B](appendix-deviations.md) lists what else is left out.
 
 ## How it works
 
@@ -159,6 +159,83 @@ async def main() -> None:
 ```
 
 `listener` is any `Behavior[MemberEvent]`; it receives `MemberJoined`, `MemberUp`, `MemberLeft`, `MemberExited`, `MemberPreparingForShutdown`, `MemberReadyForShutdown`, `MemberRemoved(member, previous_status)` and, under `ReachabilityEvent`, `UnreachableMember` / `ReachableMember`; `LeaderChanged`, `SelfUp`, `SelfRemoved` and `ClusterShuttingDown` (published once, when the cluster extension stops, before the final removal events) arrive when subscribing to `ClusterDomainEvent`, as do the internal `SeenChanged` and `ReachabilityChanged`, which fire on most gossip rounds, so a listener for every event should match what it wants and ignore the rest. The first seed node forms the cluster alone once the other seeds have not answered within `seed_node_timeout`; any other node asks every seed and joins the first to answer, and a node with no seed nodes waits for a `Join(address)` or `JoinSeedNodes(...)` command. All settings are `ClusterSettings` fields with Pekko's defaults in seconds (`gossip_interval`, `heartbeat_interval`, `acceptable_heartbeat_pause`, `failure_detector_threshold`, `monitored_by_nr_of_members`, `allow_weakly_up_members`, ...). A member that rejoins from a restarted process is a new incarnation: the old one is marked terminated and removed before the new one is let in. `terminate()`, or leaving the `async with`, stops a node gracefully through the [coordinated shutdown](02-actor-system.md#coordinated-shutdown): it leaves, hands over, and only then stops. Actors on different nodes find each other through the [Receptionist](02-actor-system.md#receptionist).
+
+### Roles
+
+A role names what a node is for, such as `backend` or `frontend`, so that a feature can be confined to some of the nodes. Roles are set in `ClusterSettings(roles=frozenset({"backend"}))`, which takes a set of strings (a bare `str` raises `TypeError`). They are fixed for the life of the node and travel in the join, so every member's roles are known to every node. These are cluster roles; they are not the roles of the multi-node test kit (`RoleName`, [chapter 12](12-testing.md)), which name the nodes of a spec, as Pekko overloads the word too.
+
+```python
+import asyncio
+
+from ohra import (
+    ActorSystem,
+    Address,
+    Behavior,
+    Behaviors,
+    Cluster,
+    ClusterDomainEvent,
+    ClusterSettings,
+    RoleLeaderChanged,
+    Subscribe,
+)
+
+SEEDS = (Address("shop", "127.0.0.1", 2551),)
+
+
+def watcher() -> Behavior[ClusterDomainEvent]:
+    @Behaviors.receive_message
+    def on_event(event: ClusterDomainEvent) -> Behavior[ClusterDomainEvent]:
+        match event:
+            case RoleLeaderChanged(role=role, leader=leader):
+                print("leader of", role, "is", leader.port if leader else None)
+            case _:
+                pass
+        return Behaviors.same
+
+    return on_event
+
+
+async def main() -> None:
+    settings = ClusterSettings(
+        seed_nodes=SEEDS,
+        roles=frozenset({"backend"}),
+        min_nr_of_members_of_role={"backend": 1},
+    )
+    async with ActorSystem(
+        watcher(), "shop", address=("127.0.0.1", 2551), cluster=settings
+    ) as system:
+        cluster = Cluster(system)
+        cluster.subscriptions.tell(Subscribe(system, ClusterDomainEvent))
+        print(sorted(cluster.self_roles))
+        while cluster.self_member.status != "up":
+            await asyncio.sleep(0.1)
+        print(cluster.self_member.has_role("backend"), cluster.state.role_leader("backend"))
+        await asyncio.sleep(0.3)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+It prints, with a node that is its own backend and so its own role leader:
+
+```
+['backend', 'dc-default']
+leader of backend is 2551
+leader of dc-default is 2551
+True Address(name='shop', host='127.0.0.1', port=2551)
+leader of backend is None
+leader of dc-default is None
+```
+
+- **`dc-default`** is on every member, as in Pekko, where the data center is a role named `dc-<name>`. There is one data center, `default`, so a role of your own must not start with `dc-`; `ClusterSettings` raises `ValueError` if it does. `Cluster(system).self_roles` is this node's roles with `dc-default`, and `Member.roles`, `Member.has_role(role)` and `Member.data_center` read the same for any member.
+- **`min_nr_of_members_of_role={"backend": 1}`** makes the leader wait until that many members with the role have joined before it moves any member Up, as `pekko.cluster.role.<name>.min-nr-of-members` does.
+- **`role_leader(role)`** is the first reachable member with the role in address order, found the way the leader is: `Cluster(system).state.role_leader("backend")`, or `state.role_leader_map` for every role, and `state.all_roles` for the roles in the cluster. Each time one changes, the subscribers of `ClusterDomainEvent` get `RoleLeaderChanged(role, leader)`, right after `LeaderChanged`. `leader` is `None` when no member has the role any more, which is what the last two lines show: the node is leaving.
+- **Exiting members** are gossiped to the two oldest members and to the two oldest of each of their roles, so that the node that takes over a role's work hears of the departure first.
+
+> **Coming from Apache Pekko**
+>
+> - `pekko.cluster.roles` and `pekko.cluster.role.<name>.min-nr-of-members` are the two `ClusterSettings` fields. `selfRoles`, `roles`, `hasRole`, `dataCenter`, `roleLeader`, `roleLeaderMap` and `allRoles` are snake_case. [Appendix B](appendix-deviations.md) lists the differences.
 
 ### Full cluster shutdown
 

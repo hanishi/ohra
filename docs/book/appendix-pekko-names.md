@@ -29,10 +29,12 @@
 | `ActorRefResolver.resolveActorRef(path)` | `system.resolve(path)`: a local ref, or a `RemoteRef` for another node |
 | serialization bindings and manifests | `@remotable` on a frozen dataclass; self-describing JSON with `$type` and `$ref` |
 | `pekko.cluster.seed-nodes` and the other `pekko.cluster.*` settings | `ActorSystem(..., cluster=ClusterSettings(seed_nodes=(Address(name, host, port), ...), ...))`; the failure detector settings are `ClusterSettings` fields in seconds |
+| `pekko.cluster.roles`, `pekko.cluster.role.<name>.min-nr-of-members` | `ClusterSettings(roles=frozenset({...}), min_nr_of_members_of_role={...})` |
+| `Cluster(system).selfRoles`, `Member.roles`, `hasRole`, `dataCenter` | `self_roles`, `roles`, `has_role`, `data_center` |
 | `Cluster(system).manager ! Join(addr)` / `JoinSeedNodes` / `Leave` / `Down` | `Cluster(system).manager.tell(Join(addr))`, same names |
 | `Cluster(system).subscriptions ! Subscribe(ref, classOf[MemberEvent])`, `Unsubscribe`, `GetCurrentState` | `Cluster(system).subscriptions.tell(Subscribe(ref, MemberEvent))`; initial state always arrives as events |
 | `Cluster(system).selfMember / state / selfUniqueAddress / isTerminated` | `self_member`, `state`, `self_unique_address`, `is_terminated` |
-| `MemberEvent`, `ReachabilityEvent`, `LeaderChanged`, `SelfUp`, `SelfRemoved`, `CurrentClusterState` | same; `MemberRemoved(member, previous_status)` |
+| `MemberEvent`, `ReachabilityEvent`, `LeaderChanged`, `RoleLeaderChanged`, `SelfUp`, `SelfRemoved`, `CurrentClusterState` | same; `MemberRemoved(member, previous_status)`; `CurrentClusterState.roleLeaderMap / roleLeader / allRoles` are `role_leader_map`, `role_leader`, `all_roles` |
 | `MemberStatus.Joining / WeaklyUp / Up / Leaving / Exiting / Down / Removed` | `member.status` is the string `"joining"`, `"weakly_up"`, ... |
 | `MemberStatus.PreparingForShutdown / ReadyForShutdown` | `"preparing_for_shutdown"`, `"ready_for_shutdown"` |
 | `MemberPreparingForShutdown`, `MemberReadyForShutdown` | same names |

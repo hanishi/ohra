@@ -99,7 +99,7 @@ class ClusterSettings:
         if any(r.startswith(DC_ROLE_PREFIX) for r in self.roles):
             raise ValueError(
                 f"Roles must not start with '{DC_ROLE_PREFIX}' as that is reserved for the "
-                "cluster data center feature"
+                "cluster self-data-center setting"
             )
         for role, n in self.min_nr_of_members_of_role.items():
             if n <= 0:

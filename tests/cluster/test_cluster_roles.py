@@ -4,6 +4,7 @@ ClusterReadView (a member not in the state is a removed one with the self roles)
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -16,6 +17,9 @@ from ohra.remote.serialization import Serialization
 from ..util import eventually, free_port
 from .test_cluster import cluster_node
 
+MSG = (
+    "Roles must not start with 'dc-' as that is reserved for the cluster self-data-center setting"
+)
 NODE = UniqueAddress("127.0.0.1", 1, 11, "s")
 
 
@@ -32,7 +36,7 @@ def test_configured_roles_are_kept_with_the_data_center_role():
 
 @pytest.mark.parametrize("role", ["dc-default", "dc-blue"])
 def test_a_role_starting_with_dc_is_rejected(role: str):
-    with pytest.raises(ValueError, match="Roles must not start with 'dc-' as that is reserved"):
+    with pytest.raises(ValueError, match=re.escape(MSG)):
         ClusterSettings(roles=frozenset({role}))
 
 

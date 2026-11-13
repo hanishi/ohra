@@ -1,15 +1,15 @@
 """The cluster extension and its core daemon at ``/system/cluster``, as Pekko's Cluster,
 ClusterCoreDaemon, the seed node processes and ClusterDomainEventPublisher, folded into one actor.
-Every function below is the Scala one of the same name, minus data centers, roles, app versions and
+Every function below is the Scala one of the same name, minus data centers, app versions and
 config compatibility."""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from ..behavior import Behavior, Behaviors
 from ..context import ActorContext
@@ -29,6 +29,7 @@ from .failure_detector import (
 from .reachability import Reachability
 from .gossip import (
     ALLOWED_TO_PREPARE_TO_SHUTDOWN,
+    DC_ROLE_PREFIX,
     PREPARE_FOR_SHUTDOWN_STATES,
     REMOVE_UNREACHABLE_WITH_MEMBER_STATUS,
     UP_NUMBER_UNSET,
@@ -46,6 +47,9 @@ from .vector_clock import VectorClock
 if TYPE_CHECKING:
     from ..system import ActorSystem
     from .sbr import SplitBrainResolverSettings
+
+
+SELF_DATA_CENTER: Final = "default"
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,9 @@ class ClusterSettings:
     allow_weakly_up_members: float | None = 7.0
     """Move Joining members to WeaklyUp after this long without convergence; None disables it."""
     min_nr_of_members: int = 1
+    roles: frozenset[str] = frozenset()
+    """Pekko's pekko.cluster.roles; must not start with ``dc-``, which is reserved."""
+    min_nr_of_members_of_role: Mapping[str, int] = field(default_factory=dict[str, int])
     prune_gossip_tombstones_after: float = 86400.0
     gossip_different_view_probability: float = 0.8
     reduce_gossip_different_view_probability: int = 400
@@ -86,6 +93,17 @@ class ClusterSettings:
     """Pekko's pekko.cluster.typed.receptionist settings."""
 
     def __post_init__(self) -> None:
+        if isinstance(self.roles, str):
+            raise TypeError("roles must be a frozenset of str, not a str")
+        object.__setattr__(self, "roles", frozenset(self.roles))
+        if any(r.startswith(DC_ROLE_PREFIX) for r in self.roles):
+            raise ValueError(
+                f"Roles must not start with '{DC_ROLE_PREFIX}' as that is reserved for the "
+                "cluster self-data-center setting"
+            )
+        for role, n in self.min_nr_of_members_of_role.items():
+            if n <= 0:
+                raise ValueError(f"min_nr_of_members_of_role[{role!r}] must be > 0")
         positive = (
             "seed_node_timeout", "retry_unsuccessful_join_after", "gossip_interval",
             "leader_actions_interval", "unreachable_nodes_reaper_interval", "heartbeat_interval",
@@ -109,6 +127,11 @@ class ClusterSettings:
             raise ValueError("gossip_different_view_probability must be in (0, 1]")
         if self.allow_weakly_up_members is not None and self.allow_weakly_up_members < 0:
             raise ValueError("allow_weakly_up_members must be >= 0 or None")
+
+    @property
+    def self_roles(self) -> frozenset[str]:
+        """The configured roles and the data center role, as Pekko's ClusterSettings.roles."""
+        return self.roles | {DC_ROLE_PREFIX + SELF_DATA_CENTER}
 
     @property
     def effective_down_removal_margin(self) -> float:
@@ -224,6 +247,12 @@ class LeaderChanged(ClusterDomainEvent):
 
 
 @dataclass(frozen=True)
+class RoleLeaderChanged(ClusterDomainEvent):
+    role: str
+    leader: Address | None
+
+
+@dataclass(frozen=True)
 class SeenChanged(ClusterDomainEvent):
     """Internal, as Pekko's: the set of nodes that have seen the current gossip, or convergence,
     changed."""
@@ -245,6 +274,16 @@ class CurrentClusterState:
     unreachable: frozenset[Member]
     seen_by: frozenset[Address]
     leader: Address | None
+    role_leader_map: Mapping[str, Address | None] = field(
+        default_factory=dict[str, Address | None]
+    )
+
+    def role_leader(self, role: str) -> Address | None:
+        return self.role_leader_map.get(role)
+
+    @property
+    def all_roles(self) -> frozenset[str]:
+        return frozenset(self.role_leader_map)
 
 
 @dataclass(frozen=True)
@@ -312,6 +351,7 @@ class JoinNode:
     """Pekko's internal ``Join(node)``, named apart from the ``Join(address)`` command."""
 
     node: UniqueAddress
+    roles: frozenset[str]
     reply_to: ActorRef[Welcome]
 
 
@@ -552,7 +592,15 @@ class Cluster:
 
     @property
     def self_member(self) -> Member:
-        return self._membership_state.self_member
+        state = self._membership_state
+        gossip = state.latest_gossip
+        if any(m.unique_address == self.self_unique_address for m in gossip.members):
+            return state.self_member
+        return Member(self.self_unique_address, UP_NUMBER_UNSET, "removed", self.self_roles)
+
+    @property
+    def self_roles(self) -> frozenset[str]:
+        return self.settings.self_roles
 
     @property
     def state(self) -> CurrentClusterState:
@@ -598,7 +646,12 @@ def _current_state(state: MembershipState) -> CurrentClusterState:
         unreachable=unreachable,
         seen_by=frozenset(n.address for n in gossip.seen_by),
         leader=leader.address if leader is not None else None,
+        role_leader_map={r: _address_of(state.role_leader(r)) for r in gossip.all_roles},
     )
+
+
+def _address_of(node: UniqueAddress | None) -> Address | None:
+    return node.address if node is not None else None
 
 
 def diff_member_events(old: MembershipState, new: MembershipState) -> list[MemberEvent]:
@@ -670,6 +723,15 @@ def diff_leader(old: MembershipState, new: MembershipState) -> list[LeaderChange
     return []
 
 
+def diff_role_leader(old: MembershipState, new: MembershipState) -> list[RoleLeaderChanged]:
+    roles = old.latest_gossip.all_roles | new.latest_gossip.all_roles
+    return [
+        RoleLeaderChanged(r, _address_of(new.role_leader(r)))
+        for r in sorted(roles)
+        if new.role_leader(r) != old.role_leader(r)
+    ]
+
+
 def diff_seen(old: MembershipState, new: MembershipState) -> list[SeenChanged]:
     if new is old:
         return []
@@ -704,6 +766,8 @@ def publish_diff(
     for e in diff_reachable(old, new):
         pub(e)
     for e in diff_leader(old, new):
+        pub(e)
+    for e in diff_role_leader(old, new):
         pub(e)
     for e in diff_seen(old, new):
         pub(e)
@@ -916,8 +980,8 @@ class _CoreDaemon:
                     "Received InitJoin message from [%s] to [%s]", reply_to.path, self.self_address
                 )
                 self.init_join(reply_to)
-            case JoinNode(node, reply_to):
-                self.joining(node, reply_to)
+            case JoinNode(node, roles, reply_to):
+                self.joining(node, roles, reply_to)
             case Down(address):
                 self.downing(address)
             case Leave(address):
@@ -1124,14 +1188,18 @@ class _CoreDaemon:
         self.stop_seed_node_process()
         if address == self.self_address:
             behavior = self.become_initialized()
-            self.joining(self.self_unique_address, None)
+            self.joining(self.self_unique_address, self.settings.self_roles, None)
             return behavior
         deadline = self.loop.time() + self.settings.retry_unsuccessful_join_after
         self.log.debug("Trying to join [%s]", address)
-        self.cluster_core(address).tell(JoinNode(self.self_unique_address, self.ctx.self))
+        self.cluster_core(address).tell(
+            JoinNode(self.self_unique_address, self.settings.self_roles, self.ctx.self)
+        )
         return self.trying_to_join(address, deadline)
 
-    def joining(self, node: UniqueAddress, reply_to: ActorRef[Welcome] | None) -> None:
+    def joining(
+        self, node: UniqueAddress, roles: frozenset[str], reply_to: ActorRef[Welcome] | None
+    ) -> None:
         if self.preparing_for_shutdown:  # ClusterDaemon.scala 861, 954-956
             self.log.info("Ignoring join request from [%s] as preparing for shutdown", node)
             return
@@ -1171,19 +1239,29 @@ class _CoreDaemon:
                     self.downing(existing.address)
             else:
                 self.failure_detector.remove(node.address)
+                roles_text = ", ".join(sorted(roles))
                 new_gossip = self.latest_gossip.with_member(
-                    Member(node, UP_NUMBER_UNSET, "joining")
-                ).with_member(Member(self.self_unique_address, UP_NUMBER_UNSET, "joining"))
+                    Member(node, UP_NUMBER_UNSET, "joining", roles)
+                ).with_member(
+                    Member(
+                        self.self_unique_address,
+                        UP_NUMBER_UNSET,
+                        "joining",
+                        self.settings.self_roles,
+                    )
+                )
                 self.update_latest_gossip(new_gossip)
                 if node == self.self_unique_address:
                     self.log.info(
-                        "Node [%s] is JOINING itself and forming new cluster", node.address
+                        "Node [%s] is JOINING itself (with roles [%s]) and forming new cluster",
+                        node.address,
+                        roles_text,
                     )
                     if not local_members:
                         # important for deterministic oldest when bootstrapping
                         self.leader_actions()
                 else:
-                    self.log.info("Node [%s] is JOINING", node.address)
+                    self.log.info("Node [%s] is JOINING, roles [%s]", node.address, roles_text)
                     if reply_to is not None:
                         reply_to.tell(Welcome(self.self_unique_address, self.latest_gossip))
                 self.publish_membership_state()
@@ -1514,7 +1592,11 @@ class _CoreDaemon:
 
     @property
     def is_min_nr_of_members_fulfilled(self) -> bool:
-        return len(self.latest_gossip.members) >= self.settings.min_nr_of_members
+        members = self.latest_gossip.members
+        return len(members) >= self.settings.min_nr_of_members and all(
+            sum(1 for m in members if m.has_role(role)) >= n
+            for role, n in self.settings.min_nr_of_members_of_role.items()
+        )
 
     def leader_actions_on_convergence(self) -> None:
         gossip = self.latest_gossip
@@ -1580,7 +1662,15 @@ class _CoreDaemon:
             self.gossip_exiting_members_to_oldest([m for m in changed if m.status == "exiting"])
 
     def gossip_exiting_members_to_oldest(self, exiting: list[Member]) -> None:
-        for m in self.membership_state.gossip_targets_for_exiting_members(exiting):
+        targets = self.membership_state.gossip_targets_for_exiting_members(exiting)
+        if targets:
+            self.log.debug(
+                "Gossip exiting members [%s] to the two oldest (per role) [%s] "
+                "(singleton optimization).",
+                ", ".join(str(m.address) for m in exiting),
+                ", ".join(str(m.address) for m in targets),
+            )
+        for m in targets:
             self.gossip_to(m.unique_address)
 
     def move_joining_to_weakly_up(self) -> None:

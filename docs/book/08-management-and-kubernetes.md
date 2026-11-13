@@ -115,7 +115,7 @@ The rest of this chapter has the Kubernetes side: the permissions, the probes, a
 `Management(system).start()` binds a small HTTP/1.1 server, port 7626 by default, written on the standard library. It serves three groups of routes:
 
 - **Health checks** for Kubernetes probes. `/ready` answers 200 once every readiness check passes, and on a cluster node that includes being Up or WeaklyUp. `/alive` and `/startup` work the same way with their own checks.
-- **Read-only cluster routes.** `/cluster/members` lists the membership with the leader and the oldest member. `/cluster/shards/{type}` lists this node's shards and their entity counts.
+- **Read-only cluster routes.** `/cluster/members` lists the membership with the leader and the oldest member. Each member has `"roles"`, a sorted list such as `["backend", "dc-default"]`, and `"oldestPerRole"` maps each role of the Up members to the oldest Up member with it. `/cluster/shards/{type}` lists this node's shards and their entity counts.
 - **`/bootstrap/seed-nodes`**, which tells a probing peer which cluster this node belongs to, if any.
 
 **Discovery.** `KubernetesApiServiceDiscovery` lists the pods labelled `app=<service>` through the API server, using the pod's service-account token and CA, and returns each Running pod's IP and its port named `management`. `ConfigServiceDiscovery` is a fixed list for local runs.

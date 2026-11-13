@@ -37,12 +37,14 @@ from ohra.remote import Address, UniqueAddress
 from ..util import eventually, free_port
 from .test_cluster import FAST, all_up, cluster_node, crash, probe, unreachable_ports, view
 
+DC = frozenset({"dc-default"})
+
 A = UniqueAddress("127.0.0.1", 1, 11, "s")
 B = UniqueAddress("127.0.0.1", 2, 22, "s")
 
 
 def up(node: UniqueAddress, n: int) -> Member:
-    return Member(node, 0, "joining").copy_up(n)
+    return Member(node, 0, "joining", DC).copy_up(n)
 
 
 def state(*members: Member) -> MembershipState:

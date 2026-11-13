@@ -7,12 +7,14 @@ import hashlib
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Final, Literal
 
 from ..remote import Address, UniqueAddress
 from ..remote.serialization import remotable
 from .reachability import Reachability
 from .vector_clock import VectorClock
+
+DC_ROLE_PREFIX: Final = "dc-"
 
 type MemberStatus = Literal[
     "joining",
@@ -98,6 +100,7 @@ class Member:
     unique_address: UniqueAddress
     up_number: int
     status: MemberStatus
+    roles: frozenset[str]
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Member) and other.unique_address == self.unique_address
@@ -111,6 +114,17 @@ class Member:
     @property
     def address(self) -> Address:
         return self.unique_address.address
+
+    def has_role(self, role: str) -> bool:
+        return role in self.roles
+
+    @property
+    def data_center(self) -> str:
+        """The suffix of the ``dc-`` role, as Pekko's Member.dataCenter; every member has one."""
+        for role in self.roles:
+            if role.startswith(DC_ROLE_PREFIX):
+                return role[3:]
+        raise ValueError(f"Member [{self}] has no data center role")
 
     def is_older_than(self, other: Member) -> bool:
         if self.up_number == other.up_number:
@@ -132,7 +146,7 @@ class Member:
 
 
 def removed_placeholder(node: UniqueAddress) -> Member:
-    return Member(node, UP_NUMBER_UNSET, "removed")
+    return Member(node, UP_NUMBER_UNSET, "removed", frozenset({f"{DC_ROLE_PREFIX}N/A"}))
 
 
 def highest_priority_of(m1: Member, m2: Member) -> Member:
@@ -177,6 +191,10 @@ class Gossip:
     @staticmethod
     def empty() -> Gossip:
         return Gossip()
+
+    @property
+    def all_roles(self) -> frozenset[str]:
+        return frozenset(r for m in self.members for r in m.roles)
 
     # --- members ---------------------------------------------------------------------------------
 
@@ -383,16 +401,25 @@ class MembershipState:
             self.members, key=lambda m: 0 if m.up_number == UP_NUMBER_UNSET else m.up_number
         )
 
+    def role_leader(self, role: str) -> UniqueAddress | None:
+        return self.leader_of(m for m in self.members if m.has_role(role))
+
     def gossip_targets_for_exiting_members(self, exiting: Iterable[Member]) -> set[Member]:
-        """The two oldest members, where singletons and shard coordinators live, as Pekko's
-        optimization."""
-        if not any(True for _ in exiting):
+        """The two oldest members, and the two oldest of each role of the exiting ones, where
+        singletons and shard coordinators live, as Pekko's optimization."""
+        exiting = list(exiting)
+        if not exiting:
             return set()
+        roles = {r for m in exiting for r in m.roles if not r.startswith(DC_ROLE_PREFIX)}
         by_age = sorted(
             self.members,
             key=lambda m: (m.up_number, (m.unique_address.host, m.unique_address.port)),
         )
-        return set(by_age[:2])
+        targets = set(by_age[:2])
+        for role in roles:
+            with_role = [m for m in by_age if m.has_role(role)]
+            targets.update(with_role[:2])
+        return targets
 
 
 class GossipTargetSelector:

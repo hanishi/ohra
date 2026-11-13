@@ -19,6 +19,8 @@ from ohra.cluster.sharding import (
 )
 from ohra.remote import Address, UniqueAddress
 
+DC = frozenset({"dc-default"})
+
 A = UniqueAddress("127.0.0.1", 1, 11, "c")
 B = UniqueAddress("127.0.0.1", 2, 22, "c")
 C = UniqueAddress("127.0.0.1", 3, 33, "c")
@@ -26,7 +28,7 @@ RA, RB, RC = (f"ohra://c@127.0.0.1:{p}/system/sharding/T" for p in (1, 2, 3))
 
 
 def member(node: UniqueAddress, up_number: int, status: MemberStatus = "up") -> Member:
-    return Member(node, up_number, status)
+    return Member(node, up_number, status, DC)
 
 
 MEMBERS = {RA: member(A, 1), RB: member(B, 2), RC: member(C, 3)}
@@ -116,7 +118,7 @@ def test_rebalance_is_skipped_while_in_progress_or_not_a_good_time():
         )
         == frozenset()
     )
-    joining = (member(A, 1), member(B, 2), Member(C, 2**31 - 1, "joining"))
+    joining = (member(A, 1), member(B, 2), Member(C, 2**31 - 1, "joining", DC))
     assert (
         strategy.rebalance(allocations, MEMBERS, frozenset(), cluster_state(members=joining))
         == frozenset()

@@ -24,6 +24,9 @@ from ..cluster.test_cluster_sharding import start as start_sharding
 from ..util import eventually, free_port
 
 
+DC = frozenset({"dc-default"})
+
+
 async def test_cluster_members_json():
     p1, p2 = sorted((free_port(), free_port()))
     async with AsyncExitStack() as stack:
@@ -41,10 +44,10 @@ async def test_cluster_members_json():
             f"ohra://c@127.0.0.1:{p1}",
             f"ohra://c@127.0.0.1:{p2}",
         ]
-        assert all(m["status"] == "Up" and m["roles"] == [] for m in doc["members"])
+        assert all(m["status"] == "Up" and m["roles"] == ["dc-default"] for m in doc["members"])
         assert (
             doc["unreachable"] == []
-            and doc["oldestPerRole"] == {}
+            and doc["oldestPerRole"] == {"dc-default": f"ohra://c@127.0.0.1:{p1}"}
             and doc["oldest"] == f"ohra://c@127.0.0.1:{p1}"
         )
         one = json.loads(
@@ -52,6 +55,24 @@ async def test_cluster_members_json():
         )
         assert one["node"] == f"ohra://c@127.0.0.1:{p2}" and isinstance(one["nodeUid"], int)
         assert (await get(uri + "/cluster/members/ohra://c@127.0.0.1:1", timeout=2))[0] == 404
+
+
+async def test_cluster_members_json_reports_roles():
+    p1, p2 = sorted((free_port(), free_port()))
+    first, second = f"ohra://c@127.0.0.1:{p1}", f"ohra://c@127.0.0.1:{p2}"
+    async with AsyncExitStack() as stack:
+        a = await stack.enter_async_context(
+            cluster_node("c", p1, [p1], roles=frozenset({"frontend"}))
+        )
+        b = await stack.enter_async_context(
+            cluster_node("c", p2, [p1], roles=frozenset({"backend"}))
+        )
+        await eventually(lambda: all_up(a, 2) and all_up(b, 2), timeout=5)
+        uri = await Management(a).start()
+        doc = json.loads((await get(uri + "/cluster/members", timeout=2))[1])
+        roles = {m["node"]: m["roles"] for m in doc["members"]}
+        assert roles == {first: ["dc-default", "frontend"], second: ["backend", "dc-default"]}
+        assert doc["oldestPerRole"] == {"dc-default": first, "frontend": first, "backend": second}
 
 
 async def test_a_member_address_may_be_percent_encoded():
@@ -113,6 +134,6 @@ async def test_mutating_routes_are_405():
 
 
 def test_member_json_names_the_shutdown_statuses_as_pekko():
-    a = Member(UniqueAddress("127.0.0.1", 1, 11, "s"), 1, "preparing_for_shutdown")
+    a = Member(UniqueAddress("127.0.0.1", 1, 11, "s"), 1, "preparing_for_shutdown", DC)
     assert member_json(a)["status"] == "PreparingForShutdown"
     assert member_json(replace(a, status="ready_for_shutdown"))["status"] == "ReadyForShutdown"

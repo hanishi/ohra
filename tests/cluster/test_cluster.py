@@ -57,6 +57,8 @@ from ohra.remote.serialization import Json
 
 from ..util import eventually, free_port
 
+DC = frozenset({"dc-default"})
+
 FAST: dict[str, Any] = dict(
     gossip_interval=0.02,
     leader_actions_interval=0.02,
@@ -498,7 +500,7 @@ def test_gossip_speedup_uses_integer_division_as_pekko():
     nodes = [UniqueAddress("127.0.0.1", p, p, "c") for p in (1, 2, 3)]
     gossip = Gossip.empty()
     for i, n in enumerate(nodes, start=1):
-        gossip = gossip.with_member(Member(n, i, "up"))
+        gossip = gossip.with_member(Member(n, i, "up", DC))
     # 1 seen of 3: 1 < 3 // 2 is false
     assert is_gossip_speedup_needed(gossip.seen(nodes[0])) is False
     assert is_gossip_speedup_needed(gossip) is True
@@ -719,7 +721,7 @@ def test_publish_diff_emits_seen_and_reachability_changes_last():
     from ohra.cluster.reachability import Reachability
 
     a, b = UniqueAddress("127.0.0.1", 1, 1, "c"), UniqueAddress("127.0.0.1", 2, 2, "c")
-    g = Gossip.empty().with_member(Member(a, 1, "up")).with_member(Member(b, 2, "up"))
+    g = Gossip.empty().with_member(Member(a, 1, "up", DC)).with_member(Member(b, 2, "up", DC))
     old = MembershipState(g.seen(a), a)
     new = MembershipState(
         g.seen(a).seen(b).with_reachability(Reachability.empty().unreachable(a, b)), a

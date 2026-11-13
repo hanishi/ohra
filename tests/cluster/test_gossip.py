@@ -20,13 +20,15 @@ from ohra.cluster.gossip import leader_status_key
 from ohra.remote import Address, UniqueAddress
 from ohra.remote.serialization import Serialization
 
+DC = frozenset({"dc-default"})
+
 A = UniqueAddress("127.0.0.1", 1, 11, "s")
 B = UniqueAddress("127.0.0.1", 2, 22, "s")
 C = UniqueAddress("127.0.0.1", 3, 33, "s")
 
 
 def up(node: UniqueAddress, n: int) -> Member:
-    return Member(node, 0, "joining").copy_up(n)
+    return Member(node, 0, "joining", DC).copy_up(n)
 
 
 def test_address_ordering_and_parsing():
@@ -37,19 +39,19 @@ def test_address_ordering_and_parsing():
 
 
 def test_member_transitions_follow_the_table():
-    m = Member(A, 0, "joining")
+    m = Member(A, 0, "joining", DC)
     assert m.with_status("up").status == "up"
     with pytest.raises(ValueError):
         m.with_status("up").with_status("joining")
     assert up(A, 1).is_older_than(up(B, 2))
     assert not up(B, 2).is_older_than(up(A, 1))
     assert up(A, 1).is_older_than(up(B, 1))  # same age: lower address is older
-    assert Member(A, 0, "joining") == up(A, 7)  # equality by unique address only
+    assert Member(A, 0, "joining", DC) == up(A, 7)  # equality by unique address only
 
 
 def test_highest_priority_of():
     assert highest_priority_of(up(A, 1), up(A, 1).with_status("down")).status == "down"
-    assert highest_priority_of(Member(A, 0, "joining"), up(A, 1)).status == "up"
+    assert highest_priority_of(Member(A, 0, "joining", DC), up(A, 1)).status == "up"
     assert (
         highest_priority_of(
             up(A, 1).with_status("leaving"), up(A, 1).with_status("leaving").with_status("exiting")
@@ -63,14 +65,14 @@ def test_gossip_merge_is_union_with_highest_priority():
     g1 = (
         Gossip.empty()
         .with_member(up(A, 1))
-        .with_member(Member(B, 0, "joining"))
+        .with_member(Member(B, 0, "joining", DC))
         .increment(vclock_name(A))
     )
     g2 = (
         Gossip.empty()
         .with_member(up(A, 1))
         .with_member(up(B, 2))
-        .with_member(Member(C, 0, "joining"))
+        .with_member(Member(C, 0, "joining", DC))
     )
     g2 = g2.increment(vclock_name(B)).seen(B)
     assert g1.version.compare(g2.version) == "concurrent"
@@ -112,15 +114,15 @@ def test_convergence_rules():
         )
         is True
     )
-    with_joiner = base.with_member(Member(C, 0, "joining")).seen(A).seen(B)
+    with_joiner = base.with_member(Member(C, 0, "joining", DC)).seen(A).seen(B)
     # a Joining member need not have seen it
     assert MembershipState(with_joiner, A).convergence(frozenset()) is True
     # ... unless nobody is Up or Leaving yet: then Joining and WeaklyUp members must have seen it
     # too (firstMemberInDc)
     only_joiners = (
         Gossip.empty()
-        .with_member(Member(A, 0, "joining"))
-        .with_member(Member(B, 0, "weakly_up"))
+        .with_member(Member(A, 0, "joining", DC))
+        .with_member(Member(B, 0, "weakly_up", DC))
         .seen(A)
     )
     assert MembershipState(only_joiners, A).convergence(frozenset()) is False
@@ -130,7 +132,7 @@ def test_convergence_rules():
 def test_leader_is_first_reachable_member_with_a_leader_status():
     g = (
         Gossip.empty()
-        .with_member(Member(A, 0, "joining"))
+        .with_member(Member(A, 0, "joining", DC))
         .with_member(up(B, 1))
         .with_member(up(C, 2))
     )
@@ -138,7 +140,7 @@ def test_leader_is_first_reachable_member_with_a_leader_status():
     assert MembershipState(g.with_reachability(g.reachability.unreachable(C, B)), C).leader == C
     assert MembershipState(g.mark_as_down(g.member(B)), C).leader == C
     # nobody Up yet: lowest
-    assert MembershipState(Gossip.empty().with_member(Member(A, 0, "joining")), A).leader == A
+    assert MembershipState(Gossip.empty().with_member(Member(A, 0, "joining", DC)), A).leader == A
     assert MembershipState(g, B).youngest_member == up(C, 2)
 
 
@@ -210,19 +212,21 @@ def test_shutdown_statuses_count_for_convergence():
     both = g.seen(A).seen(B)
     assert MembershipState(both, A).convergence(frozenset()) is True
     # a Joining member need not have seen it: preparing counts as a convergence status
-    assert MembershipState(both.with_member(Member(C, 0, "joining")), A).convergence(frozenset())
+    assert MembershipState(both.with_member(Member(C, 0, "joining", DC)), A).convergence(
+        frozenset()
+    )
 
 
 def test_shutdown_statuses_are_leader_statuses():
     g = (
         Gossip.empty()
-        .with_member(Member(A, 0, "joining"))
+        .with_member(Member(A, 0, "joining", DC))
         .with_member(replace(up(B, 1), status="preparing_for_shutdown"))
         .with_member(replace(up(C, 2), status="ready_for_shutdown"))
     )
     assert MembershipState(g, A).leader == B
     members = [
-        Member(A, 0, "joining"),
+        Member(A, 0, "joining", DC),
         replace(up(C, 2), status="preparing_for_shutdown"),
         replace(up(B, 1), status="ready_for_shutdown"),
     ]

@@ -41,8 +41,11 @@ from ohra.remote import Address, UniqueAddress
 # --- fixtures (TestAddresses.scala and StrategySetup) --------------------------------------------
 
 
+DC = frozenset({"dc-default"})
+
+
 def member(host: str, up_number: int) -> Member:
-    return Member(UniqueAddress(host, 7355, 0, "sys"), up_number, "up")
+    return Member(UniqueAddress(host, 7355, 0, "sys"), up_number, "up", DC)
 
 
 # E is the oldest
@@ -50,7 +53,7 @@ A, B, C, D, E, F, G = (member(h, n) for h, n in zip("abcdefg", (5, 4, 3, 2, 1, 5
 
 
 def joining(m: Member) -> Member:
-    return Member(m.unique_address, UP_NUMBER_UNSET, "joining")
+    return Member(m.unique_address, UP_NUMBER_UNSET, "joining", DC)
 
 
 def leaving(m: Member) -> Member:
@@ -611,8 +614,8 @@ def test_double_decision_becomes_down_all():
 def test_two_incarnations_at_one_address_order_by_uid():
     """Pekko's Member.ordering is by UniqueAddress: address, then uid."""
     old, new = (
-        Member(UniqueAddress("a", 7355, 1, "sys"), 1, "up"),
-        Member(UniqueAddress("a", 7355, 2, "sys"), 2, "up"),
+        Member(UniqueAddress("a", 7355, 1, "sys"), 1, "up", DC),
+        Member(UniqueAddress("a", 7355, 2, "sys"), 2, "up", DC),
     )
     s = _DowningStrategy(B.unique_address, KeepMajority())
     for m in (old, new):  # inserted oldest first: only the uid in the key keeps this order

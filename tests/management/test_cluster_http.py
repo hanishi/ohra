@@ -24,6 +24,9 @@ from ..cluster.test_cluster_sharding import start as start_sharding
 from ..util import eventually, free_port
 
 
+DC = frozenset({"dc-default"})
+
+
 async def test_cluster_members_json():
     p1, p2 = sorted((free_port(), free_port()))
     async with AsyncExitStack() as stack:
@@ -113,6 +116,6 @@ async def test_mutating_routes_are_405():
 
 
 def test_member_json_names_the_shutdown_statuses_as_pekko():
-    a = Member(UniqueAddress("127.0.0.1", 1, 11, "s"), 1, "preparing_for_shutdown")
+    a = Member(UniqueAddress("127.0.0.1", 1, 11, "s"), 1, "preparing_for_shutdown", DC)
     assert member_json(a)["status"] == "PreparingForShutdown"
     assert member_json(replace(a, status="ready_for_shutdown"))["status"] == "ReadyForShutdown"

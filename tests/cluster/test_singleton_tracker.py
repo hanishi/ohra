@@ -14,6 +14,8 @@ from ohra.cluster.singleton import (
 )
 from ohra.remote import UniqueAddress
 
+DC = frozenset({"dc-default"})
+
 A = UniqueAddress("127.0.0.1", 1, 11, "c")
 B = UniqueAddress("127.0.0.1", 2, 22, "c")
 C = UniqueAddress("127.0.0.1", 3, 33, "c")
@@ -21,7 +23,7 @@ D = UniqueAddress("127.0.0.1", 4, 44, "c")
 
 
 def member(node: UniqueAddress, up_number: int, status: MemberStatus = "up") -> Member:
-    return Member(node, up_number, status)
+    return Member(node, up_number, status, DC)
 
 
 def test_retry_arithmetic_follows_pekko():

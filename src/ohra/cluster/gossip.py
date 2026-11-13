@@ -98,6 +98,7 @@ class Member:
     unique_address: UniqueAddress
     up_number: int
     status: MemberStatus
+    roles: frozenset[str]
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Member) and other.unique_address == self.unique_address
@@ -111,6 +112,17 @@ class Member:
     @property
     def address(self) -> Address:
         return self.unique_address.address
+
+    def has_role(self, role: str) -> bool:
+        return role in self.roles
+
+    @property
+    def data_center(self) -> str:
+        """The suffix of the ``dc-`` role, as Pekko's Member.dataCenter; every member has one."""
+        for role in self.roles:
+            if role.startswith("dc-"):
+                return role[3:]
+        raise ValueError(f"Member [{self}] has no data center role")
 
     def is_older_than(self, other: Member) -> bool:
         if self.up_number == other.up_number:
@@ -132,7 +144,7 @@ class Member:
 
 
 def removed_placeholder(node: UniqueAddress) -> Member:
-    return Member(node, UP_NUMBER_UNSET, "removed")
+    return Member(node, UP_NUMBER_UNSET, "removed", frozenset({"dc-N/A"}))
 
 
 def highest_priority_of(m1: Member, m2: Member) -> Member:

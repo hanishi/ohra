@@ -48,6 +48,9 @@ from .test_replicator_pruning import (
 from .test_replicator_subscriptions import manual_node
 
 
+DC = frozenset({"dc-default"})
+
+
 def probe_store(probe: TestProbe[Any]) -> Callable[[], Behavior[DurableStore.Command]]:
     """A store that forwards every message to the probe."""
 
@@ -191,7 +194,7 @@ async def test_the_replicator_stops_when_its_own_node_is_removed_while_loading()
 
     async with with_store() as (node, store_probe):
         await store_probe.receive_message()
-        me = Member(node.self_address.unique_address, 1, "removed")
+        me = Member(node.self_address.unique_address, 1, "removed", DC)
         cast(ActorRef[Any], node.replicator).tell(_ClusterEvent(MemberRemoved(me, "exiting")))
         watcher: TestProbe[Any] = node.probe()
         await watcher.expect_terminated(node.replicator)

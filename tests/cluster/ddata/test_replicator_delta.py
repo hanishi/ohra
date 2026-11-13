@@ -54,6 +54,8 @@ from .test_replicator_durable import with_store
 from .test_replicator_local import Node, update_counter
 from .test_replicator_subscriptions import manual_node
 
+DC = frozenset({"dc-default"})
+
 GOSSIP = 1.0
 TICK = max(GOSSIP / 5, 0.2)
 SETTINGS = ReplicatorSettings(gossip_interval=GOSSIP, notify_subscribers_interval=0.1)
@@ -109,7 +111,7 @@ async def propagate(
     """Send a DeltaPropagation; ``known``: the cluster has told the Replicator of the sender first
     (it ignores a SendingSystemUid message from a node that is no member)."""
     if known:
-        wire(node).tell(_ClusterEvent(MemberUp(Member(from_node, 1, "up"))))
+        wire(node).tell(_ClusterEvent(MemberUp(Member(from_node, 1, "up", DC))))
     probe: TestProbe[WriteAck | WriteNack | DeltaNack] = node.probe()
     wire(node).tell(DeltaPropagation(from_node, reply, deltas, probe.ref))
     return probe
@@ -165,7 +167,7 @@ async def with_peer(settings: ReplicatorSettings = SETTINGS) -> AsyncGenerator[P
                 Behaviors.receive_message(forward), "ddataReplicator", None
             )
             address = UniqueAddress("127.0.0.1", port, 7, "ddata")
-            member = Member(address, 1, "up")
+            member = Member(address, 1, "up", DC)
             wire(node).tell(_ClusterEvent(MemberUp(member)))
             replicas: TestProbe[Replicator.ReplicaCount] = node.probe()
 
@@ -364,7 +366,7 @@ async def test_deltas_from_a_removed_node_are_dropped():
     async with manual_node(SETTINGS) as (node, _):
         base = await seeded(node, other, 2)
         gone = UniqueAddress("localhost", 3, 97, "Sys")
-        member = Member(gone, 1, "removed")
+        member = Member(gone, 1, "removed", DC)
         wire(node).tell(_ClusterEvent(MemberRemoved(member, "exiting")))
         delta = Delta(DataEnvelope(delta_of(base, gone, "c")), 1, 1)
         replies = await propagate(node, gone, {KEY.id: delta})

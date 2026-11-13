@@ -505,6 +505,12 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
         from .aggregators import read_aggregator, write_aggregator
 
         cluster = Cluster(ctx.system)
+        if not settings.roles <= cluster.self_roles:
+            raise ValueError(
+                f"This cluster member [{cluster.self_address.root}] with roles "
+                f"[{', '.join(sorted(cluster.self_roles))}] doesn't have all the roles "
+                f"[{', '.join(sorted(settings.roles))}]"
+            )
         self_address = cluster.self_address
         self_unique_address = cluster.self_unique_address
         self_from_system_uid = self_unique_address.uid
@@ -1366,16 +1372,21 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                 if not has_subscriber(key) and key not in new_subscribers:
                     subscription_keys.pop(key, None)
 
+        def matching_role(m: Member) -> bool:
+            return settings.roles <= m.roles
+
         def receive_member_joining(m: Member) -> None:
-            if m.address != self_address:
+            if matching_role(m) and m.address != self_address:
                 joining_nodes.add(m.unique_address)
 
         def receive_member_weakly_up(m: Member) -> None:
-            if m.address != self_address:
+            if matching_role(m) and m.address != self_address:
                 weakly_up_nodes.add(m.unique_address)
                 joining_nodes.discard(m.unique_address)
 
         def receive_member_up(m: Member) -> None:
+            if not matching_role(m):
+                return
             if m not in leader:  # Pekko's TreeSet: the member is already there
                 insort(leader, m, key=leader_status_key)
             if m.address != self_address:
@@ -1386,12 +1397,14 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
                     insort(members_by_age, m, key=_age)
 
         def receive_member_exiting(m: Member) -> None:
-            if m.address != self_address:
+            if matching_role(m) and m.address != self_address:
                 exiting_nodes.add(m.unique_address)
 
         def receive_member_removed(m: Member) -> Behavior[_Msg]:
             if m.address == self_address:
                 return Behaviors.stopped()
+            if not matching_role(m):
+                return Behaviors.same
             ctx.log.debug("adding removed node [%s] from MemberRemoved", m.unique_address)
             # remove by unique address: the ordering may have changed, as it is based on status
             if m in leader:  # members are equal by unique address
@@ -1408,16 +1421,20 @@ def _replicator(settings: ReplicatorSettings) -> Behavior[_Msg]:
             return Behaviors.same
 
         def receive_other_member_event(m: Member) -> None:
+            if not matching_role(m):
+                return
             # replace: the ordering may have changed, as it is based on status
             if m in leader:  # members are equal by unique address
                 leader.remove(m)
             insort(leader, m, key=leader_status_key)
 
         def receive_unreachable(m: Member) -> None:
-            unreachable.add(m.unique_address)
+            if matching_role(m):
+                unreachable.add(m.unique_address)
 
         def receive_reachable(m: Member) -> None:
-            unreachable.discard(m.unique_address)
+            if matching_role(m):
+                unreachable.discard(m.unique_address)
 
         def receive_clock_tick() -> None:
             nonlocal previous_clock_time, all_reachable_clock_time

@@ -1,6 +1,6 @@
 """Apache Pekko's Cluster Singleton: one instance of an actor on the oldest member, handed over
 when that member leaves, reached through a proxy on every node. ClusterSingletonManager.scala and
-ClusterSingletonProxy.scala, ported state for state, without lease, roles or data centers. While
+ClusterSingletonProxy.scala, ported state for state, without lease or data centers. While
 the cluster prepares for full shutdown, the manager hands nothing over and starts no instance, as
 Pekko's preparingForFullShutdown."""
 
@@ -10,6 +10,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ..behavior import Behavior, Behaviors, Stopped
@@ -30,10 +31,11 @@ from .core import (
     MemberReadyForShutdown,
     MemberRemoved,
     MemberUp,
+    SELF_DATA_CENTER,
     SelfUp,
 )
 from .core import Subscribe as ClusterSubscribe
-from .gossip import UP_NUMBER_UNSET, Member
+from .gossip import DC_ROLE_PREFIX, UP_NUMBER_UNSET, Member
 
 if TYPE_CHECKING:
     from ..system import ActorSystem
@@ -48,8 +50,20 @@ class ClusterSingletonSettings:
     min_number_of_hand_over_retries: int = 15
     singleton_identification_interval: float = 1.0
     buffer_size: int = 1000
+    role: str | None = None
+
+    def with_role(self, role: str) -> ClusterSingletonSettings:
+        return replace(self, role=role)
+
+    def with_no_role(self) -> ClusterSingletonSettings:
+        return replace(self, role=None)
+
+    def should_run_manager(self, cluster: Cluster) -> bool:
+        return self.role is None or self.role in cluster.self_member.roles
 
     def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
         if self.removal_margin < 0:
             raise ValueError("removal_margin must be >= 0")
         if self.hand_over_retry_interval <= 0 or self.singleton_identification_interval <= 0:
@@ -114,17 +128,25 @@ class OldestChanged:
     oldest: UniqueAddress | None
 
 
+def _matching_role(role: str | None, m: Member) -> bool:
+    return m.has_role(f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}") and (role is None or m.has_role(role))
+
+
 class OldestChangedTracker:
     """Members by age, and a queue of changes of the oldest, consumed one at a time by the
     manager."""
 
-    def __init__(self, self_unique_address: UniqueAddress) -> None:
+    def __init__(self, self_unique_address: UniqueAddress, role: str | None = None) -> None:
         self.self_unique_address = self_unique_address
+        self.role = role
         self.members_by_age: list[Member] = []
         self._changes: list[InitialOldestState | OldestChanged] = []
 
+    def matching_role(self, m: Member) -> bool:
+        return _matching_role(self.role, m)
+
     def handle_initial(self, members: Iterable[Member]) -> None:
-        aged = [m for m in members if m.up_number != UP_NUMBER_UNSET]
+        aged = [m for m in members if m.up_number != UP_NUMBER_UNSET and self.matching_role(m)]
         self.members_by_age = _by_age(aged)
         self_up_number = next(
             (m.up_number for m in aged if m.unique_address == self.self_unique_address),
@@ -135,6 +157,8 @@ class OldestChangedTracker:
         self._changes.append(InitialOldestState(tuple(m.unique_address for m in oldest), safe))
 
     def add(self, member: Member) -> None:
+        if not self.matching_role(member):
+            return
         self._track_change(
             lambda: _by_age(
                 [m for m in self.members_by_age if m.unique_address != member.unique_address]
@@ -143,6 +167,8 @@ class OldestChangedTracker:
         )
 
     def remove(self, member: Member) -> None:
+        if not self.matching_role(member):
+            return
         self._track_change(
             lambda: [m for m in self.members_by_age if m.unique_address != member.unique_address]
         )
@@ -418,7 +444,7 @@ class _Manager:
         handling."""
         match event:
             case SelfUp(current_cluster_state=state) if self.tracker is None:
-                self.tracker = OldestChangedTracker(self.self_unique_address)
+                self.tracker = OldestChangedTracker(self.self_unique_address, self.settings.role)
                 self.tracker.handle_initial(state.members)
                 self.get_next_oldest_changed()
             case MemberUp(member=m) if self.tracker is not None:
@@ -951,6 +977,7 @@ def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
         instance: ActorRef[Any] | None = None
         buffer: deque[Any] = deque()
         identify_id = 0
+        matching = partial(_matching_role, settings.role)
         cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
 
         def identify_singleton() -> None:
@@ -981,7 +1008,7 @@ def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
         def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             nonlocal instance
             match msg:
-                case MemberUp(member=m):
+                case MemberUp(member=m) if matching(m):
                     track_change(
                         lambda: _by_age(
                             [x for x in members_by_age if x.unique_address != m.unique_address]
@@ -990,7 +1017,7 @@ def _proxy(name: str, settings: ClusterSingletonSettings) -> Behavior[Any]:
                     )
                 case MemberRemoved(member=m) if m.unique_address == cluster.self_unique_address:
                     return Behaviors.stopped()
-                case MemberExited(member=m) | MemberRemoved(member=m):
+                case MemberExited(member=m) | MemberRemoved(member=m) if matching(m):
                     track_change(
                         lambda: [x for x in members_by_age if x.unique_address != m.unique_address]
                     )
@@ -1059,7 +1086,11 @@ class ClusterSingleton:
         existing = self._proxies.get(singleton.name)
         if existing is not None:
             return existing
-        settings = self._init_manager(singleton)
+        settings = (
+            singleton.settings if singleton.settings is not None else ClusterSingletonSettings()
+        )
+        if settings.should_run_manager(Cluster(self.system)):
+            self._init_manager(singleton)
         root = self.system._system_root  # pyright: ignore[reportPrivateUsage]
         proxy = root.spawn_child(
             _proxy(singleton.name, settings), _proxy_name(singleton.name), None
@@ -1073,6 +1104,12 @@ class ClusterSingleton:
         settings = (
             singleton.settings if singleton.settings is not None else ClusterSingletonSettings()
         )
+        cluster = Cluster(self.system)
+        if settings.role is not None and settings.role not in cluster.self_roles:
+            raise ValueError(
+                f"This cluster member [{cluster.self_address.root}] doesn't have the "
+                f"role [{settings.role}]"
+            )
         root = self.system._system_root  # pyright: ignore[reportPrivateUsage]
         progress = _ExitingProgress()
         manager = root.spawn_child(

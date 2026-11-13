@@ -1,10 +1,10 @@
-"""Pekko's ReplicatorSettings with the defaults of ``pekko.cluster.distributed-data``, in seconds,
-minus roles (which come with the feature that uses them)."""
+"""Pekko's ReplicatorSettings with the defaults of ``pekko.cluster.distributed-data``, in
+seconds."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from ...behavior import Behavior
@@ -28,6 +28,8 @@ class ReplicatorSettings:
 
     name: str = "ddataReplicator"
     """The name of the Replicator actor, under /system."""
+    roles: frozenset[str] = frozenset()
+    """Only members with every one of these roles are replicas; none: every member is."""
     gossip_interval: float = 2.0
     notify_subscribers_interval: float = 0.5
     max_delta_elements: int = 500
@@ -64,6 +66,9 @@ class ReplicatorSettings:
     keys; Pekko's ``durable.store-actor-class``."""
 
     def __post_init__(self) -> None:
+        if isinstance(self.roles, str):
+            raise TypeError("roles must be a frozenset of str, not a str")
+        object.__setattr__(self, "roles", frozenset(self.roles))
         for name in (
             "gossip_interval",
             "notify_subscribers_interval",
@@ -84,6 +89,18 @@ class ReplicatorSettings:
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
+
+    def with_role(self, role: str | None) -> ReplicatorSettings:
+        """Pekko's withRole: None or ``""`` means no role."""
+        return replace(self, roles=frozenset({role}) if role else frozenset())
+
+    def with_roles(self, *roles: str) -> ReplicatorSettings:
+        return replace(self, roles=frozenset(roles))
+
+    @property
+    def role(self) -> str | None:
+        """Pekko's ``roles.headOption``: any one of the roles."""
+        return next(iter(self.roles), None)
 
     def is_durable(self, key: str) -> bool:
         """Pekko's isDurable: an exact key, or a ``prefix*`` entry the key starts with."""

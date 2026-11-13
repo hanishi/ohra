@@ -224,6 +224,8 @@ class ClusterShardingSettings:
             )
         else:
             base = self.distributed_data
+        # no role yet: PR 3 sets sharding's role here (ClusterSharding.scala 739-748 withRole)
+        base = replace(base, roles=frozenset())
         if not self.remember_entities:
             return replace(base, durable_keys=frozenset())
         if self.distributed_data is None:

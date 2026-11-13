@@ -2,7 +2,7 @@
 reachability have been stable for ``stable_after`` and then downs one side of a partition by a
 strategy. Ported from
 ``cluster/.../sbr/{SplitBrainResolver,DowningStrategy,SplitBrainResolverProvider}.scala`` without
-roles, data centers, the lease-majority strategy and quarantine."""
+data centers, the lease-majority strategy and quarantine."""
 
 from __future__ import annotations
 
@@ -52,26 +52,41 @@ __all__ = [
 @dataclass(frozen=True)
 class KeepMajority:
     """Down the unreachable side when this side is the majority, else this side; ties keep the
-    lowest address."""
+    lowest address. With ``role`` only the members with that role are counted."""
+
+    role: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
 
 
 @dataclass(frozen=True)
 class StaticQuorum:
-    """Keep this side when it has at least ``quorum_size`` members, else down it."""
+    """Keep this side when it has at least ``quorum_size`` members, else down it. With ``role``
+    only the members with that role are counted."""
 
     quorum_size: int
+    role: str | None = None
 
     def __post_init__(self) -> None:
         if self.quorum_size < 1:
             raise ValueError("quorum_size must be >= 1")
+        if self.role == "":
+            object.__setattr__(self, "role", None)
 
 
 @dataclass(frozen=True)
 class KeepOldest:
     """Keep the side with the oldest member; with ``down_if_alone`` an oldest partitioned from
-    everyone downs itself."""
+    everyone downs itself. With ``role`` only the members with that role are considered."""
 
     down_if_alone: bool = True
+    role: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
 
 
 @dataclass(frozen=True)
@@ -145,7 +160,8 @@ _DOWN_OR_EXITING = frozenset({"down", "exiting"})
 class _DowningStrategy:
     """Pekko's abstract DowningStrategy with its concrete ``decide`` chosen by ``config``: the
     members, the unreachable set, the reachability table and the seen set, as the resolver feeds
-    them in."""
+    them in. A strategy's ``role`` limits what ``decide`` counts, through the ``*_with_role``
+    views; downing still applies to every member."""
 
     def __init__(self, self_unique_address: UniqueAddress, config: DowningStrategy) -> None:
         self.self_unique_address = self_unique_address
@@ -155,6 +171,10 @@ class _DowningStrategy:
         self._seen_by: frozenset[Address] = frozenset()
         # sorted: by address, or by age for KeepOldest (Pekko's ageOrdering)
         self._all_members: list[Member] = []
+
+    @property
+    def role(self) -> str | None:
+        return None if isinstance(self.config, DownAll) else self.config.role
 
     # --- members ---------------------------------------------------------------------------------
 
@@ -239,6 +259,30 @@ class _DowningStrategy:
             if self.is_unreachable(m)
         ]
 
+    def _with_role(self, ms: list[Member]) -> list[Member]:
+        role = self.role
+        return ms if role is None else [m for m in ms if m.has_role(role)]
+
+    def members_with_role(
+        self, including_possibly_up: bool = False, excluding_possibly_exiting: bool = False
+    ) -> list[Member]:
+        """``members`` filtered on the strategy's role; only the decisions use it."""
+        return self._with_role(self.members(including_possibly_up, excluding_possibly_exiting))
+
+    def reachable_members_with_role(
+        self, including_possibly_up: bool = False, excluding_possibly_exiting: bool = False
+    ) -> list[Member]:
+        return self._with_role(
+            self.reachable_members(including_possibly_up, excluding_possibly_exiting)
+        )
+
+    def unreachable_members_with_role(
+        self, including_possibly_up: bool = False, excluding_possibly_exiting: bool = False
+    ) -> list[Member]:
+        return self._with_role(
+            self.unreachable_members(including_possibly_up, excluding_possibly_exiting)
+        )
+
     # --- reachability and seen -------------------------------------------------------------------
 
     @property
@@ -318,7 +362,7 @@ class _DowningStrategy:
     def is_too_many_members(self) -> bool:
         return (
             isinstance(self.config, StaticQuorum)
-            and len(self.members()) > self.config.quorum_size * 2 - 1
+            and len(self.members_with_role()) > self.config.quorum_size * 2 - 1
         )
 
     def _decide_static_quorum(self, quorum_size: int) -> Decision:
@@ -326,7 +370,10 @@ class _DowningStrategy:
             return DownAllDecision()
         if self.has_indirectly_connected:
             return DownIndirectlyConnected()
-        if len(self.members()) - len(self.unreachable_members()) >= quorum_size:
+        if (
+            len(self.members_with_role()) - len(self.unreachable_members_with_role())
+            >= quorum_size
+        ):
             return DownUnreachable()
         return DownReachable()
 
@@ -337,11 +384,13 @@ class _DowningStrategy:
     def _decide_keep_majority(self) -> Decision:
         if self.has_indirectly_connected:
             return DownIndirectlyConnected()
-        ms = self.members()
+        ms = self.members_with_role()
         if not ms:
             return DownAllDecision()
         decision = self._majority_decision(
-            len(self.reachable_members()), len(self.unreachable_members()), ms[0]
+            len(self.reachable_members_with_role()),
+            len(self.unreachable_members_with_role()),
+            ms[0],
         )
         if isinstance(decision, DownUnreachable):
             if isinstance(
@@ -361,14 +410,18 @@ class _DowningStrategy:
         """A membership change at the same time as the partition: count as few as possible on this
         side (no Joining, no Leaving) and as many as possible on the other (Joining included,
         Leaving included)."""
-        ms = self.members(including_possibly_up=False, excluding_possibly_exiting=True)
+        ms = self.members_with_role(including_possibly_up=False, excluding_possibly_exiting=True)
         if not ms:
             return DownAllDecision()
         this_side = len(
-            self.reachable_members(including_possibly_up=False, excluding_possibly_exiting=True)
+            self.reachable_members_with_role(
+                including_possibly_up=False, excluding_possibly_exiting=True
+            )
         )
         other_side = len(
-            self.unreachable_members(including_possibly_up=True, excluding_possibly_exiting=False)
+            self.unreachable_members_with_role(
+                including_possibly_up=True, excluding_possibly_exiting=False
+            )
         )
         return self._majority_decision(this_side, other_side, ms[0])
 
@@ -378,15 +431,15 @@ class _DowningStrategy:
     def _decide_keep_oldest(self, down_if_alone: bool) -> Decision:
         if self.has_indirectly_connected:
             return DownIndirectlyConnected()
-        ms = self.members()
+        ms = self.members_with_role()
         if not ms:
             return DownAllDecision()
         oldest_is_reachable = not self.is_unreachable(ms[0])
         decision = self._oldest_decision(
             down_if_alone,
             oldest_is_reachable,
-            len(self.reachable_members()),
-            len(self.unreachable_members()),
+            len(self.reachable_members_with_role()),
+            len(self.unreachable_members_with_role()),
         )
         if isinstance(decision, DownUnreachable):
             if isinstance(
@@ -416,16 +469,20 @@ class _DowningStrategy:
         """Exclude Leaving on this side (may be Exiting on the other); with down_if_alone count
         Joining and WeaklyUp too, since they may be Up on the other side and flip the alone
         test."""
-        ms = self.members(including_possibly_up=False, excluding_possibly_exiting=True)
+        ms = self.members_with_role(including_possibly_up=False, excluding_possibly_exiting=True)
         if not ms:
             return DownAllDecision()
         oldest_is_reachable = not self.is_unreachable(ms[0])
         including_possibly_up = down_if_alone
         reachable = len(
-            self.reachable_members(including_possibly_up, excluding_possibly_exiting=True)
+            self.reachable_members_with_role(
+                including_possibly_up, excluding_possibly_exiting=True
+            )
         )
         unreachable = len(
-            self.unreachable_members(including_possibly_up, excluding_possibly_exiting=True)
+            self.unreachable_members_with_role(
+                including_possibly_up, excluding_possibly_exiting=True
+            )
         )
         return self._oldest_decision(down_if_alone, oldest_is_reachable, reachable, unreachable)
 
@@ -662,7 +719,7 @@ class _Resolver:
                 "add more than [%d] (quorum-size * 2 - 1) "
                 "members to the cluster. If the exceeded cluster size remains when a SBR "
                 "decision is needed it will down all nodes.",
-                len(self.strategy.members()),
+                len(self.strategy.members_with_role()),
                 q,
                 q * 2 - 1,
             )

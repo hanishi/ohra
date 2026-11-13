@@ -26,6 +26,7 @@ from ohra import (
     ask,
     remotable,
 )
+from ohra.cluster.singleton import _manager_name  # pyright: ignore[reportPrivateUsage]
 from ohra.cluster.core import Cluster, Down, Leave, MemberRemoved, Subscribe
 from ohra.ref import FunctionRef
 from ohra.remote import Address
@@ -427,3 +428,71 @@ async def test_init_without_a_cluster_raises():
     async with ActorSystem(Behaviors.ignore, "plain") as system:
         with pytest.raises(RuntimeError):
             ClusterSingleton(system)
+
+
+# ClusterSingletonManagerSpec: the singleton on role worker, an observer without it
+
+
+async def roles_cluster(stack: AsyncExitStack) -> tuple[list[ActorSystem[Any]], list[int], Log]:
+    ports = [free_port() for _ in range(3)]
+    workers = {"roles": frozenset({"worker"})}
+    nodes = [
+        await stack.enter_async_context(node(p, [ports[0]], **({} if i == 0 else workers)))
+        for i, p in enumerate(ports)
+    ]
+    await eventually(lambda: all(all_up(n, 3) for n in nodes), timeout=5)
+    return nodes, ports, []
+
+
+def start_worker(n: ActorSystem[Any], log: Log, port: int) -> ActorRef[Hit | Crash]:
+    return start(n, log, port, FAST_SINGLETON.with_role("worker"))
+
+
+async def test_singleton_with_a_role_runs_on_the_oldest_member_with_the_role():
+    async with AsyncExitStack() as stack:
+        nodes, ports, log = await roles_cluster(stack)
+        proxies = [start_worker(n, log, p) for n, p in zip(nodes, ports, strict=True)]
+        assert await ask(proxies[0], Hit, timeout=3) == 1
+        assert starts(log) == [next(p for p in ports_by_age(nodes[0]) if p != ports[0])]
+
+
+async def test_a_node_without_the_role_starts_no_manager():
+    async with AsyncExitStack() as stack:
+        nodes, ports, log = await roles_cluster(stack)
+        proxies = [start_worker(n, log, p) for n, p in zip(nodes, ports, strict=True)]
+        assert await ask(proxies[0], Hit, timeout=3) == 1
+        observer, worker = nodes[0], nodes[1]
+        with pytest.raises(LookupError):
+            observer.resolve(
+                f"{Cluster(observer).self_address.root}/system/{_manager_name('counter')}"
+            )
+        worker.resolve(f"{Cluster(worker).self_address.root}/system/{_manager_name('counter')}")
+
+
+async def test_singleton_with_a_role_moves_to_the_next_member_with_the_role():
+    async with AsyncExitStack() as stack:
+        nodes, ports, log = await roles_cluster(stack)
+        proxies = [start_worker(n, log, p) for n, p in zip(nodes, ports, strict=True)]
+        assert await ask(proxies[0], Hit, timeout=3) == 1
+        first, second = [p for p in ports_by_age(nodes[0]) if p != ports[0]]
+        leaver = next(n for n, p in zip(nodes, ports, strict=True) if p == first)
+        Cluster(leaver).manager.tell(Leave(Address("c", "127.0.0.1", first)))
+        await asyncio.wait_for(leaver.when_terminated(), timeout=5)
+        await eventually(lambda: starts(log) == [first, second], timeout=5)
+        assert await ask(proxies[0], Hit, timeout=3) == 1
+
+
+async def test_init_manager_on_a_node_without_the_role_raises():
+    async with AsyncExitStack() as stack:
+        nodes, ports, log = await roles_cluster(stack)
+        singleton = SingletonActor(counter(log, ports[0]), "other").with_settings(
+            FAST_SINGLETON.with_role("worker")
+        )
+        with pytest.raises(ValueError, match=r"doesn't have the role \[worker\]"):
+            ClusterSingleton(nodes[0])._init_manager(singleton)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_an_empty_role_means_no_role():
+    """Pekko's config default ``role = ""`` is none (roleOption)."""
+    assert ClusterSingletonSettings(role="").role is None
+    assert ClusterSingletonSettings().with_role("").role is None

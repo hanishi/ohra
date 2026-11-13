@@ -171,12 +171,27 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
 
 `pytest examples/distributed_data/test_counter.py examples/distributed_data/test_replicator.py` prints `5 passed`.
 
+## Roles
+
+By default every member is a replica. `ReplicatorSettings(roles=...)`, or `with_role("backend")`, limits the replicas to the members that have every one of the roles: the consistency levels count only them, and gossip and deltas go only to them. A node without the roles gets dead letters: `DistributedData(system).is_terminated` is true and its `replicator` accepts messages and drops them. The cluster receptionist's and sharding's Replicators have no role.
+
+```python
+from ohra.cluster import ClusterSettings
+from ohra.cluster.ddata import ReplicatorSettings
+
+settings = ClusterSettings(
+    roles=frozenset({"backend"}),
+    distributed_data=ReplicatorSettings().with_role("backend"),
+)
+assert settings.distributed_data.roles == {"backend"}
+```
+
 > **Coming from Apache Pekko**
 >
 > - The API is cluster-typed's `DistributedData` and `Replicator` in snake_case: `Replicator.Update`, `Get`, `Delete`, `Subscribe` and their responses are nested in `Replicator`, and the consistency levels are dataclasses, `Replicator.WriteLocal()` and `Replicator.ReadMajority(timeout=3.0)`. Timeouts are seconds.
 > - `Update(key, initial, writeConsistency, replyTo)(modify)` is `Update(key, initial, write_consistency, reply_to, modify)`, with `modify` as its last field. The types' symbolic operators are named methods taking the node: `c :+ 1` is `c.increment(node, 1)`.
 > - The settings are `ReplicatorSettings`, a field of `ClusterSettings` (`distributed_data=`), not HOCON under `pekko.cluster.distributed-data`.
-> - Roles are not here: every member is a replica. Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
+> - Subscribers must be on the Replicator's own node. [Appendix B](appendix-deviations.md) has the full list.
 
 ## Samples
 

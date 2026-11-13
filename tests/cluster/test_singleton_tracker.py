@@ -95,3 +95,18 @@ def test_retry_counts_use_the_resolved_removal_margin():
     s = ClusterSingletonSettings(hand_over_retry_interval=1.0)
     assert s.max_hand_over_retries_for(20.0) == 23 and s.max_take_over_retries_for(20.0) == 20
     assert s.max_hand_over_retries_for(0.0) == 15
+
+
+def test_tracker_with_a_role_ignores_members_without_it():
+    worker = frozenset({"dc-default", "worker"})
+    tracker = OldestChangedTracker(C, role="worker")
+    tracker.handle_initial([member(A, 1), Member(B, 2, "up", worker)])
+    assert [m.unique_address for m in tracker.members_by_age] == [B]
+    tracker.add(member(D, 3))
+    tracker.remove(member(A, 1))
+    assert [m.unique_address for m in tracker.members_by_age] == [B]
+
+
+def test_settings_with_role_and_with_no_role():
+    assert ClusterSingletonSettings().with_role("worker").role == "worker"
+    assert ClusterSingletonSettings().with_role("worker").with_no_role().role is None

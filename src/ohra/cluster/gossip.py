@@ -1,5 +1,5 @@
 """Members, Gossip and MembershipState, as Gossip.scala, Member.scala and MembershipState.scala,
-for one data center without roles."""
+for one data center."""
 
 from __future__ import annotations
 

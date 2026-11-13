@@ -247,6 +247,12 @@ class LeaderChanged(ClusterDomainEvent):
 
 
 @dataclass(frozen=True)
+class RoleLeaderChanged(ClusterDomainEvent):
+    role: str
+    leader: Address | None
+
+
+@dataclass(frozen=True)
 class SeenChanged(ClusterDomainEvent):
     """Internal, as Pekko's: the set of nodes that have seen the current gossip, or convergence,
     changed."""
@@ -268,6 +274,16 @@ class CurrentClusterState:
     unreachable: frozenset[Member]
     seen_by: frozenset[Address]
     leader: Address | None
+    role_leader_map: Mapping[str, Address | None] = field(
+        default_factory=dict[str, Address | None]
+    )
+
+    def role_leader(self, role: str) -> Address | None:
+        return self.role_leader_map.get(role)
+
+    @property
+    def all_roles(self) -> frozenset[str]:
+        return frozenset(self.role_leader_map)
 
 
 @dataclass(frozen=True)
@@ -630,7 +646,12 @@ def _current_state(state: MembershipState) -> CurrentClusterState:
         unreachable=unreachable,
         seen_by=frozenset(n.address for n in gossip.seen_by),
         leader=leader.address if leader is not None else None,
+        role_leader_map={r: _address_of(state.role_leader(r)) for r in gossip.all_roles},
     )
+
+
+def _address_of(node: UniqueAddress | None) -> Address | None:
+    return node.address if node is not None else None
 
 
 def diff_member_events(old: MembershipState, new: MembershipState) -> list[MemberEvent]:
@@ -702,6 +723,15 @@ def diff_leader(old: MembershipState, new: MembershipState) -> list[LeaderChange
     return []
 
 
+def diff_role_leader(old: MembershipState, new: MembershipState) -> list[RoleLeaderChanged]:
+    roles = old.latest_gossip.all_roles | new.latest_gossip.all_roles
+    return [
+        RoleLeaderChanged(r, _address_of(new.role_leader(r)))
+        for r in sorted(roles)
+        if new.role_leader(r) != old.role_leader(r)
+    ]
+
+
 def diff_seen(old: MembershipState, new: MembershipState) -> list[SeenChanged]:
     if new is old:
         return []
@@ -736,6 +766,8 @@ def publish_diff(
     for e in diff_reachable(old, new):
         pub(e)
     for e in diff_leader(old, new):
+        pub(e)
+    for e in diff_role_leader(old, new):
         pub(e)
     for e in diff_seen(old, new):
         pub(e)
@@ -1630,7 +1662,15 @@ class _CoreDaemon:
             self.gossip_exiting_members_to_oldest([m for m in changed if m.status == "exiting"])
 
     def gossip_exiting_members_to_oldest(self, exiting: list[Member]) -> None:
-        for m in self.membership_state.gossip_targets_for_exiting_members(exiting):
+        targets = self.membership_state.gossip_targets_for_exiting_members(exiting)
+        if targets:
+            self.log.debug(
+                "Gossip exiting members [%s] to the two oldest (per role) [%s] "
+                "(singleton optimization).",
+                ", ".join(str(m.address) for m in exiting),
+                ", ".join(str(m.address) for m in targets),
+            )
+        for m in targets:
             self.gossip_to(m.unique_address)
 
     def move_joining_to_weakly_up(self) -> None:

@@ -190,6 +190,10 @@ class Gossip:
     def empty() -> Gossip:
         return Gossip()
 
+    @property
+    def all_roles(self) -> frozenset[str]:
+        return frozenset(r for m in self.members for r in m.roles)
+
     # --- members ---------------------------------------------------------------------------------
 
     def with_member(self, member: Member) -> Gossip:
@@ -395,16 +399,25 @@ class MembershipState:
             self.members, key=lambda m: 0 if m.up_number == UP_NUMBER_UNSET else m.up_number
         )
 
+    def role_leader(self, role: str) -> UniqueAddress | None:
+        return self.leader_of(m for m in self.members if m.has_role(role))
+
     def gossip_targets_for_exiting_members(self, exiting: Iterable[Member]) -> set[Member]:
-        """The two oldest members, where singletons and shard coordinators live, as Pekko's
-        optimization."""
-        if not any(True for _ in exiting):
+        """The two oldest members, and the two oldest of each role of the exiting ones, where
+        singletons and shard coordinators live, as Pekko's optimization."""
+        exiting = list(exiting)
+        if not exiting:
             return set()
+        roles = {r for m in exiting for r in m.roles if not r.startswith("dc-")}
         by_age = sorted(
             self.members,
             key=lambda m: (m.up_number, (m.unique_address.host, m.unique_address.port)),
         )
-        return set(by_age[:2])
+        targets = set(by_age[:2])
+        for role in roles:
+            with_role = [m for m in by_age if m.has_role(role)]
+            targets.update(with_role[:2])
+        return targets
 
 
 class GossipTargetSelector:

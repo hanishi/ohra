@@ -245,3 +245,32 @@ def test_shutdown_statuses_cross_the_wire():
     decoded = Serialization.decode(data, lambda p: pytest.fail(p))
     assert isinstance(decoded, Gossip)
     assert [m.status for m in decoded.members] == ["preparing_for_shutdown", "ready_for_shutdown"]
+
+
+def exiting_state(*members: Member) -> MembershipState:
+    return MembershipState(Gossip(members=tuple(sorted(members))), A)
+
+
+def test_two_oldest_are_targets_for_an_exiting_member():
+    # in reverse address order, as Pekko's MembershipStateSpec
+    a1, a2, a3, a4 = (
+        Member(UniqueAddress("h", p, p, "s"), n, "up", DC)
+        for n, p in zip((1, 2, 3, 4), (4, 3, 2, 1))
+    )
+    a1_exiting = replace(a1, status="exiting")
+    state = exiting_state(a1_exiting, a2, a3, a4)
+    assert state.gossip_targets_for_exiting_members([a1_exiting]) == {a1_exiting, a2}
+
+
+def test_two_oldest_per_role_are_targets_for_exiting_members():
+    def m(port: int, n: int, status: str, *roles: str) -> Member:
+        return Member(UniqueAddress("h", port, port, "s"), n, status, DC | set(roles))  # type: ignore[arg-type]
+
+    a1, a2, a3, a4 = (m(p, n, "up") for p, n in ((4, 1), (3, 2), (2, 3), (1, 4)))
+    a5 = m(15, 5, "exiting", "role1", "role2")
+    a6 = m(16, 6, "exiting", "role1", "role3")
+    a7 = m(17, 7, "exiting", "role1")
+    a8 = m(18, 8, "exiting", "role1")
+    a9 = m(19, 9, "exiting", "role2")
+    state = exiting_state(a1, a2, a3, a4, a5, a6, a7, a8, a9)
+    assert state.gossip_targets_for_exiting_members([a5, a6]) == {a1, a2, a5, a6, a9}

@@ -7,12 +7,14 @@ import hashlib
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Final, Literal
 
 from ..remote import Address, UniqueAddress
 from ..remote.serialization import remotable
 from .reachability import Reachability
 from .vector_clock import VectorClock
+
+DC_ROLE_PREFIX: Final = "dc-"
 
 type MemberStatus = Literal[
     "joining",
@@ -120,7 +122,7 @@ class Member:
     def data_center(self) -> str:
         """The suffix of the ``dc-`` role, as Pekko's Member.dataCenter; every member has one."""
         for role in self.roles:
-            if role.startswith("dc-"):
+            if role.startswith(DC_ROLE_PREFIX):
                 return role[3:]
         raise ValueError(f"Member [{self}] has no data center role")
 
@@ -144,7 +146,7 @@ class Member:
 
 
 def removed_placeholder(node: UniqueAddress) -> Member:
-    return Member(node, UP_NUMBER_UNSET, "removed", frozenset({"dc-N/A"}))
+    return Member(node, UP_NUMBER_UNSET, "removed", frozenset({f"{DC_ROLE_PREFIX}N/A"}))
 
 
 def highest_priority_of(m1: Member, m2: Member) -> Member:
@@ -408,7 +410,7 @@ class MembershipState:
         exiting = list(exiting)
         if not exiting:
             return set()
-        roles = {r for m in exiting for r in m.roles if not r.startswith("dc-")}
+        roles = {r for m in exiting for r in m.roles if not r.startswith(DC_ROLE_PREFIX)}
         by_age = sorted(
             self.members,
             key=lambda m: (m.up_number, (m.unique_address.host, m.unique_address.port)),

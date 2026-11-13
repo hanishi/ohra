@@ -1,6 +1,6 @@
 """The cluster extension and its core daemon at ``/system/cluster``, as Pekko's Cluster,
 ClusterCoreDaemon, the seed node processes and ClusterDomainEventPublisher, folded into one actor.
-Every function below is the Scala one of the same name, minus data centers, roles, app versions and
+Every function below is the Scala one of the same name, minus data centers, app versions and
 config compatibility."""
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from .failure_detector import (
 from .reachability import Reachability
 from .gossip import (
     ALLOWED_TO_PREPARE_TO_SHUTDOWN,
+    DC_ROLE_PREFIX,
     PREPARE_FOR_SHUTDOWN_STATES,
     REMOVE_UNREACHABLE_WITH_MEMBER_STATUS,
     UP_NUMBER_UNSET,
@@ -48,7 +49,6 @@ if TYPE_CHECKING:
     from .sbr import SplitBrainResolverSettings
 
 
-DC_ROLE_PREFIX: Final = "dc-"
 SELF_DATA_CENTER: Final = "default"
 
 

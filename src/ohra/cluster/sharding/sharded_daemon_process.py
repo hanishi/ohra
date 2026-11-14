@@ -1,20 +1,25 @@
 """Pekko's ShardedDaemonProcessId.scala, ShardedDaemonProcessState.scala (the state, its key and
 ``initialState``), ShardedDaemonProcessSettings.scala and the ``sharded-daemon-process`` section
 of reference.conf: the entity ids, the replicated scaling state and the settings of a sharded
-daemon process. Then ShardedDaemonProcessImpl.scala: the ``ShardedDaemonProcess`` extension."""
+daemon process. Then ShardedDaemonProcessCommand.scala, ``verifyRevisionBeforeStarting`` and
+ShardedDaemonProcessImpl.scala: the ``ShardedDaemonProcess`` extension."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, ClassVar, Final, override
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast, override
 
-from ...behavior import Behavior
+from ...behavior import Behavior, Behaviors
+from ...context import ActorContext
+from ...patterns import Done, StatusReply
+from ...ref import ActorRef
 from ...remote.serialization import Serialization
 from ..ddata.distributed_data import DistributedData
 from ..ddata.key import Key
 from ..ddata.replicated_data import ReplicatedData
+from ..ddata.replicator import Replicator
 from ..singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .message_extractor import ShardingMessageExtractor
 from .shard import ClusterShardingSettings, Entity, EntityContext, EntityTypeKey, ShardingEnvelope
@@ -135,6 +140,38 @@ Serialization.register(ShardedDaemonProcessStateKey, "ShardedDaemonProcess.State
 
 
 @dataclass(frozen=True)
+class ChangeNumberOfProcesses:
+    """Rescale the daemon process to ``new_number_of_processes``. The reply comes once every
+    worker of the old revision has stopped, which may take a long time."""
+
+    new_number_of_processes: int
+    reply_to: ActorRef[StatusReply[Done]]
+
+
+@dataclass(frozen=True)
+class GetNumberOfProcesses:
+    reply_to: ActorRef[NumberOfProcesses]
+
+
+@dataclass(frozen=True)
+class NumberOfProcesses:
+    """Pekko's ``NumberOfProcesses`` and its ``GetNumberOfProcessesReply``. ``started`` is when the
+    change to this number began, in epoch seconds; ``revision`` goes up by one each rescale."""
+
+    number_of_processes: int
+    started: float
+    rescale_in_progress: bool
+    revision: int
+
+
+type ShardedDaemonProcessCommand = ChangeNumberOfProcesses | GetNumberOfProcesses
+
+Serialization.register(ChangeNumberOfProcesses, "ShardedDaemonProcess.ChangeNumberOfProcesses")
+Serialization.register(GetNumberOfProcesses, "ShardedDaemonProcess.GetNumberOfProcesses")
+Serialization.register(NumberOfProcesses, "ShardedDaemonProcess.NumberOfProcesses")
+
+
+@dataclass(frozen=True)
 class ShardedDaemonProcessSettings:
     """Intervals are in seconds. ``role`` limits the nodes the processes run on."""
 
@@ -174,6 +211,88 @@ class ShardedDaemonProcessContext:
     revision: int
 
 
+def verify_revision_before_starting[T](
+    behavior_factory: Callable[[ShardedDaemonProcessContext], Behavior[T]],
+) -> Callable[[ShardedDaemonProcessContext], Behavior[T]]:
+    """``verifyRevisionBeforeStarting`` (83-145): the worker asks the local replicator for the
+    state and starts only if its revision is the latest. Messages before the reply are
+    unhandled."""
+
+    def create(sdp_context: ShardedDaemonProcessContext) -> Behavior[T]:
+        def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+            revision = sdp_context.revision
+            if revision == -1:
+                ctx.log.debug(
+                    "%s: Ping from old non-rescaling node during rolling upgrade, not starting "
+                    "worker [%s]",
+                    sdp_context.name,
+                    sdp_context.process_number,
+                )
+                return Behaviors.stopped()
+            key = ShardedDaemonProcessStateKey(sdp_context.name)
+            ctx.log.debug(
+                "%s: Deferred start of worker to verify its revision [%s] is the latest",
+                sdp_context.name,
+                revision,
+            )
+            # the reply can't be turned into T anyway, so no adapter
+            DistributedData(ctx.system).replicator.tell(
+                Replicator.Get(key, Replicator.ReadLocal(), ctx.self)
+            )
+
+            @Behaviors.receive_message
+            def receive(msg: Any) -> Behavior[Any]:
+                match msg:
+                    case Replicator.GetSuccess(
+                        key=k, data=ShardedDaemonProcessState() as state
+                    ) if k == key:
+                        if state.revision == revision:
+                            ctx.log.info(
+                                "%s: Starting Sharded Daemon Process [%s] out of a total [%s] "
+                                "(revision [%s])",
+                                sdp_context.name,
+                                sdp_context.process_number,
+                                sdp_context.total_processes,
+                                revision,
+                            )
+                            return behavior_factory(sdp_context)
+                        ctx.log.warning(
+                            "%s: Tried to start an old revision of worker ([%s] but latest "
+                            "revision is [%s], started at %s)",
+                            sdp_context.name,
+                            sdp_context.revision,
+                            state.revision,
+                            state.started,
+                        )
+                        return Behaviors.stopped()
+                    case Replicator.NotFound(key=k) if k == key:
+                        if revision == ShardedDaemonProcessState.START_REVISION:
+                            # no state yet but the initial revision, safe
+                            ctx.log.info(
+                                "%s: Starting Sharded Daemon Process [%s] out of a total [%s] "
+                                "(revision [%s] and no state found)",
+                                sdp_context.name,
+                                sdp_context.process_number,
+                                sdp_context.total_processes,
+                                revision,
+                            )
+                            return behavior_factory(sdp_context)
+                        ctx.log.error(
+                            "%s: Tried to start revision [%s] of worker but no ddata state found",
+                            sdp_context.name,
+                            sdp_context.revision,
+                        )
+                        return Behaviors.stopped()
+                    case _:
+                        return Behaviors.unhandled
+
+            return receive
+
+        return cast(Behavior[T], Behaviors.setup(setup))
+
+    return create
+
+
 def _sharding_settings(
     settings: ShardedDaemonProcessSettings, number_of_instances: int
 ) -> ClusterShardingSettings:
@@ -204,10 +323,52 @@ class ShardedDaemonProcess:
         settings: ShardedDaemonProcessSettings | None = None,
         stop_message: T | None = None,
     ) -> None:
-        """``internalInitWithContext`` (135-210), for a fixed set of processes. ``stop_message``
-        is what a process gets when its shard is handed off, instead of being stopped outright."""
+        """For a fixed set of processes. ``stop_message`` is what a process gets when its shard is
+        handed off, instead of being stopped outright."""
         if number_of_instances < 1:
             raise ValueError(f"number_of_instances must be >= 1, got {number_of_instances}")
+        self._init_with_context(
+            name,
+            number_of_instances,
+            lambda c: behavior_factory(c.process_number),
+            settings,
+            stop_message,
+            supports_rescale=False,
+        )
+
+    def init_with_context[T](
+        self,
+        name: str,
+        initial_number_of_instances: int,
+        behavior_factory: Callable[[ShardedDaemonProcessContext], Behavior[T]],
+        settings: ShardedDaemonProcessSettings | None = None,
+        stop_message: T | None = None,
+    ) -> ActorRef[ShardedDaemonProcessCommand]:
+        """A set of processes that can be rescaled through the returned ref. Each process gets its
+        context, and starts only once it has checked its revision is the latest."""
+        if initial_number_of_instances < 1:
+            raise ValueError(
+                f"initial_number_of_instances must be >= 1, got {initial_number_of_instances}"
+            )
+        return self._init_with_context(
+            name,
+            initial_number_of_instances,
+            behavior_factory,
+            settings,
+            stop_message,
+            supports_rescale=True,
+        )
+
+    def _init_with_context[T](
+        self,
+        name: str,
+        number_of_instances: int,
+        behavior_factory: Callable[[ShardedDaemonProcessContext], Behavior[T]],
+        settings: ShardedDaemonProcessSettings | None,
+        stop_message: T | None,
+        supports_rescale: bool,
+    ) -> ActorRef[ShardedDaemonProcessCommand]:
+        """``internalInitWithContext`` (135-210)."""
         # imported here: the package and the coordinator's module import this one
         from . import ClusterSharding
         from .sharded_daemon_process_coordinator import sharded_daemon_process_coordinator
@@ -218,7 +379,12 @@ class ShardedDaemonProcess:
 
         def create(ctx: EntityContext[T]) -> Behavior[T]:
             decoded_id = decode_entity_id(ctx.entity_id, number_of_instances)
-            return behavior_factory(decoded_id.process_number)
+            sd_context = ShardedDaemonProcessContext(
+                decoded_id.process_number, decoded_id.total_count, name, decoded_id.revision
+            )
+            if supports_rescale:
+                return verify_revision_before_starting(behavior_factory)(sd_context)
+            return behavior_factory(sd_context)
 
         entity = (
             Entity(entity_type_key, create)
@@ -243,4 +409,6 @@ class ShardedDaemonProcess:
             f"ShardedDaemonProcessCoordinator-{name}",
         ).with_settings(singleton_settings)
 
-        ClusterSingleton(self.system).init(singleton)
+        return cast(
+            ActorRef[ShardedDaemonProcessCommand], ClusterSingleton(self.system).init(singleton)
+        )

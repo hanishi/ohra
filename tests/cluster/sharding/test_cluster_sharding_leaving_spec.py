@@ -36,6 +36,9 @@ Differences from the Scala:
   leaving nodes is a TestProbe on each leaving system watching its region.
 - The Scala asserts on each remaining node in parallel; here one node after the other, in the
   same ``await_assert``.
+- ``expectMsgType[ActorRef]`` in "initialize shards" is a ping with the test kit's
+  ``single_expect_default`` (3 s); the 1 s of ``expectMsgType[ActorRef](1.second)`` is the
+  ping's timeout in "recover after leaving coordinator node".
 - The ``within`` bounds (20, 15 s) are the ``eventually`` and ``await_assert`` timeouts below.
 - ``startPersistenceIfNeeded`` is for the persistence mode only.
 """
@@ -127,9 +130,9 @@ def start_sharding(system: ActorSystem[Any], settings: ClusterShardingSettings) 
     return ClusterSharding(system).init(entity)
 
 
-async def ping(system: ActorSystem[Any], entity_id: str) -> LvLocated:
+async def ping(system: ActorSystem[Any], entity_id: str, timeout: float = 1.0) -> LvLocated:
     ref = ClusterSharding(system).entity_ref_for(ENTITY, entity_id)
-    return await ask(ref, LvPing, timeout=1.0)
+    return await ask(ref, LvPing, timeout=timeout)
 
 
 def partition(system: ActorSystem[Any], blocked_port: int) -> None:
@@ -170,7 +173,9 @@ async def test_cluster_sharding_ddata_mode_with_leaving_member():
         first, second, third, fourth, fifth = systems
 
         # initialize shards (132)
-        original = {str(n): await ping(first, str(n)) for n in range(1, 11)}
+        # expectMsgType's default, single-expect-default: the first ping waits for the coordinator
+        expect_default = TestKitSettings().single_expect_default_dilated
+        original = {str(n): await ping(first, str(n), expect_default) for n in range(1, 11)}
         assert any(located.port in {ports[0], ports[1]} for located in original.values())
 
         # recover after leaving coordinator node (146)

@@ -89,6 +89,14 @@ __all__ = [
 ]
 
 
+def _replicator_name(role: str | None) -> str:
+    """ClusterSharding.scala 755-758: ``replicator``, or the role URL-encoded as Java's
+    ``URLEncoder`` does (``*`` kept, ``~`` encoded) and ``Replicator``."""
+    if role is None:
+        return "replicator"
+    return quote_plus(role, safe="*").replace("~", "%7E") + "Replicator"
+
+
 def _remember_entities_provider(
     name: str, settings: ClusterShardingSettings, replicator: ActorRef[Replicator.Command]
 ) -> DDataRememberEntitiesProvider:
@@ -157,21 +165,35 @@ class ClusterSharding:
         cluster = Cluster(self.system)
         host_shard = settings.should_host_shard(cluster)
         host_coordinator = settings.should_host_coordinator(cluster)
-        provider: DDataRememberEntitiesProvider | None = None
         # a proxy that runs no coordinator needs no store (internalStart 321-333)
-        if settings.remember_entities and (host_shard or host_coordinator):
-            # ClusterSharding.scala 774-777: must run Replicator for DDataRememberEntities on both
-            # shard and coordinator roles (if different)
-            role = settings.role if settings.role == settings.coordinator_singleton_role else None
+        remember = settings.remember_entities and (host_shard or host_coordinator)
+        # ClusterSharding.scala 774-777: must run Replicator for DDataRememberEntities on both
+        # shard and coordinator roles (if different)
+        store_role = (
+            settings.role if settings.role == settings.coordinator_singleton_role else None
+        )
+        region_name = name if host_shard else f"{name}Proxy"
+        # Pekko's actorOf fails on a taken name midway; here nothing starts
+        roles = {store_role} if remember else set[str | None]()
+        if host_coordinator:
+            roles.add(settings.coordinator_singleton_role)
+        new = [_replicator_name(r) for r in roles if r not in self._replicators]
+        for child in [region_name, *new]:
+            if child in parent.children or [region_name, *new].count(child) > 1:
+                raise ValueError(
+                    f"Entity type [{name}] cannot start: /system/sharding/{child} is taken"
+                )
+        provider: DDataRememberEntitiesProvider | None = None
+        if remember:
             provider = _remember_entities_provider(
-                name, settings, self._replicator(name, role, settings)
+                name, settings, self._replicator(name, store_role, settings)
             )
         if host_coordinator:
             self._start_coordinator(name, settings, provider)
         progress = _ExitingProgress()
         if host_shard:
             region = parent.spawn_child(
-                region_behavior(entity, settings, progress, provider), name, None
+                region_behavior(entity, settings, progress, provider), region_name, None
             )
         else:
             # internalStart (321-333), startProxy and StartProxy (880-905)
@@ -181,7 +203,7 @@ class ClusterSharding:
             )
             region = parent.spawn_child(
                 region_behavior(entity, settings, progress, None, proxy=True),
-                f"{name}Proxy",
+                region_name,
                 None,
             )
         CoordinatedShutdown(self.system).add_task(
@@ -211,8 +233,9 @@ class ClusterSharding:
                     existing.path,
                 )
             return existing
-        child = "replicator" if role is None else f"{quote_plus(role)}Replicator"
-        ref = self._parent.spawn_child(Replicator.behavior(wanted), child, None).ref
+        ref = self._parent.spawn_child(
+            Replicator.behavior(wanted), _replicator_name(role), None
+        ).ref
         self._replicators[role] = ref
         self._replicator_settings[role] = wanted
         return ref

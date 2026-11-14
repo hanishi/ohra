@@ -44,11 +44,14 @@ from ohra import (
     remotable,
 )
 from ohra.cluster.core import Cluster, Down
+from ohra.cluster.sharding import _replicator_name  # pyright: ignore[reportPrivateUsage]
+from ohra.cluster.sharding.coordinator import HostShard
 from ohra.remote import Address
 
 from ...util import eventually, free_port
 from ..test_cluster import all_up, unreachable_ports
 from ..test_cluster_sharding import FAST_SHARDING, crash, node
+from .test_ddata_shard_coordinator import Node
 
 
 @remotable
@@ -101,7 +104,8 @@ async def test_proxy_should_be_found():
         init(b)
         proxy = init(f)
         assert proxy.path == f"{root(f)}/system/sharding/myTypeProxy"
-        assert f.resolve(f"{root(f)}/system/sharding/myTypeProxy").path.endswith("Proxy")
+        path = f"{root(f)}/system/sharding/myTypeProxy"
+        assert f.resolve(path).path == path
 
 
 async def test_shard_region_and_coordinator_should_be_found():
@@ -114,7 +118,7 @@ async def test_shard_region_and_coordinator_should_be_found():
         init(f)
         assert region.path.endswith("/system/sharding/myType")
         manager = "/system/singletonManagermyTypeCoordinator"
-        assert b.resolve(f"{root(b)}{manager}").path.endswith("Coordinator")
+        assert b.resolve(f"{root(b)}{manager}").path == f"{root(b)}{manager}"
         with pytest.raises(LookupError):
             f.resolve(f"{root(f)}{manager}")
 
@@ -169,14 +173,16 @@ async def test_the_replicators_are_one_per_role():
         b = await stack.enter_async_context(backend(pb, pb))
         await eventually(lambda: all_up(b, 1), timeout=5)
         init(b)
-        assert b.resolve(f"{root(b)}/system/sharding/backendReplicator")
+        path = f"{root(b)}/system/sharding/backendReplicator"
+        assert b.resolve(path).path == path
         with pytest.raises(LookupError):
             b.resolve(f"{root(b)}/system/sharding/replicator")
         spaced = await stack.enter_async_context(node(pr, [pr], roles=frozenset({"back end"})))
         await eventually(lambda: all_up(spaced, 1), timeout=5)
         init(spaced, replace(FAST_SHARDING, role="back end"))
         # Java's URLEncoder, as Pekko's replicator name
-        assert spaced.resolve(f"{root(spaced)}/system/sharding/back+endReplicator")
+        path = f"{root(spaced)}/system/sharding/back+endReplicator"
+        assert spaced.resolve(path).path == path
 
 
 SPLIT = replace(
@@ -198,7 +204,7 @@ async def test_a_node_without_the_coordinator_role_runs_no_coordinator():
         init(s, SPLIT)
         manager = "/system/singletonManagermyTypeCoordinator"
         assert proxy.path.endswith("myTypeProxy")
-        assert c.resolve(f"{root(c)}{manager}")
+        assert c.resolve(f"{root(c)}{manager}").path == f"{root(c)}{manager}"
         with pytest.raises(LookupError):
             s.resolve(f"{root(s)}{manager}")
         assert await ask_where(s, "1") == ps
@@ -221,3 +227,60 @@ async def test_a_proxy_with_no_coordinator_warns_about_the_roles(caplog: pytest.
         )
         with caplog.at_level(logging.WARNING):
             await eventually(lambda: expected in caplog.messages, timeout=3)
+
+
+async def test_an_entity_type_named_like_a_role_replicator_starts_nothing():
+    """An ``init`` whose region would take the name of a Replicator it starts fails before it
+    starts anything: no coordinator manager is left without its region."""
+    p = free_port()
+    async with backend(p, p) as b:
+        await eventually(lambda: all_up(b, 1), timeout=5)
+        key = EntityTypeKey[ProxyWhere]("backendReplicator")
+        with pytest.raises(ValueError, match="backendReplicator"):
+            ClusterSharding(b).init(Entity(key, lambda e: where(e, p)).with_settings(BACKEND))
+        with pytest.raises(LookupError):
+            b.resolve(f"{root(b)}/system/singletonManagerbackendReplicatorCoordinator")
+        with pytest.raises(LookupError):
+            b.resolve(f"{root(b)}/system/sharding/backendReplicator")
+
+
+async def test_an_entity_type_named_like_a_proxy_starts_nothing():
+    """A type named ``<other type>Proxy`` beside that proxy fails before it starts anything."""
+    p = free_port()
+    async with node(p, [p]) as f:
+        await eventually(lambda: all_up(f, 1), timeout=5)
+        init(f)  # myType's proxy, /system/sharding/myTypeProxy
+        key = EntityTypeKey[ProxyWhere]("myTypeProxy")
+        with pytest.raises(ValueError, match="myTypeProxy"):
+            ClusterSharding(f).init(
+                Entity(key, lambda e: where(e, p)).with_settings(FAST_SHARDING)
+            )
+        with pytest.raises(LookupError):
+            f.resolve(f"{root(f)}/system/singletonManagermyTypeProxyCoordinator")
+
+
+def test_a_role_is_url_encoded_as_javas_url_encoder():
+    """Java's URLEncoder keeps ``*`` and encodes ``~``, where Python's ``quote_plus`` does the
+    reverse."""
+    assert _replicator_name("a b*c~d") == "a+b*c%7EdReplicator"
+    assert _replicator_name(None) == "replicator"
+
+
+async def test_a_proxy_told_to_host_a_shard_fails_and_does_not_ack_it(
+    caplog: pytest.LogCaptureFixture,
+):
+    """ShardRegion.scala 1366-1367: a proxy has no ``entityProps``, so ``getShard`` throws."""
+    p = free_port()
+    async with node(p, [p]) as f:
+        await eventually(lambda: all_up(f, 1), timeout=5)
+        proxy = init(f)
+        acks = Node(f).probe()
+        text = "Shard must not be allocated to a proxy only ShardRegion"
+        with caplog.at_level(logging.WARNING):
+            proxy.tell(HostShard("1", acks.ref))
+            await eventually(lambda: any(text in failure(r) for r in caplog.records), timeout=3)
+        await acks.expect_no_message(0.2)
+
+
+def failure(record: logging.LogRecord) -> str:
+    return record.getMessage() + (str(record.exc_info[1]) if record.exc_info else "")

@@ -50,6 +50,7 @@ from ..core import (
     MemberRemoved,
     MemberUp,
 )
+from ..core import SELF_DATA_CENTER
 from ..core import Subscribe as ClusterSubscribe
 from ..gossip import DC_ROLE_PREFIX, Member
 from .coordinator import (
@@ -168,7 +169,7 @@ def region_behavior(
         # --- coordinator location ----------------------------------------------------------------
 
         # ShardRegion.scala 709-716: the members that may run the coordinator
-        target_dc_role = f"{DC_ROLE_PREFIX}default"
+        target_dc_role = f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}"
         coordinator_role = settings.coordinator_singleton_role
 
         def matching_coordinator_role(member: Member) -> bool:
@@ -282,11 +283,13 @@ def region_behavior(
             """ShardRegion.scala 1331-1370: the shard once it is initialized. On first use it is
             spawned and starting, and None is returned until its ``ShardInitialized``. A proxy has
             no ``entityProps``, so it starts none."""
-            if shard in starting_shards or proxy:
+            if shard in starting_shards:
                 return None
             ref = shards.get(shard)
             if ref is not None:
                 return ref
+            if proxy:
+                raise RuntimeError("Shard must not be allocated to a proxy only ShardRegion")
             log.debug("%s: Starting shard [%s] in region", type_name, shard)
             ref = ctx.spawn(
                 shard_behavior(

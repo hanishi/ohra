@@ -38,7 +38,13 @@ from ...result import Failure, Success, Try
 from ...signals import PostStop, PreRestart, Signal, Terminated
 from ...supervision import SupervisorStrategy
 from ...util.message_buffer import MessageBufferMap
-from ..core import MemberEvent, MemberPreparingForShutdown, MemberReadyForShutdown, Subscribe
+from ..core import (
+    SELF_DATA_CENTER,
+    MemberEvent,
+    MemberPreparingForShutdown,
+    MemberReadyForShutdown,
+    Subscribe,
+)
 from ..ddata.replicator import Replicator
 from ..gossip import DC_ROLE_PREFIX
 from ..ddata.settings import ReplicatorSettings
@@ -257,7 +263,8 @@ class ClusterShardingSettings:
         else:
             base = self.distributed_data
         base = replace(
-            base, roles=frozenset({f"{DC_ROLE_PREFIX}default"} | ({role} if role else set()))
+            base,
+            roles=frozenset({f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}"} | ({role} if role else set())),
         )
         if not self.remember_entities:
             return replace(base, durable_keys=frozenset())

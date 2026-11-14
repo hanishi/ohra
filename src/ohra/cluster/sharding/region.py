@@ -69,6 +69,7 @@ from .coordinator import (
     ShardStarted,
     by_age,
     _is_at,  # pyright: ignore[reportPrivateUsage]
+    StopShards,
 )
 from ..singleton import _manager_name  # pyright: ignore[reportPrivateUsage]
 
@@ -644,6 +645,10 @@ def region_behavior(
                     deliver_start_entity(msg)
                 case SetActiveEntityLimit():
                     deliver_to_all_shards(msg)
+                case StopShards():
+                    # deliverCoordinatorCommand (962-964)
+                    if coordinator is not None:
+                        coordinator.tell(msg)
                 case _ if entity.message_extractor is not None:
                     # Pekko Typed's ExtractorAdapter: a message of the extractor's own, which
                     # goes on as the envelope of its entity id and unwrapped message

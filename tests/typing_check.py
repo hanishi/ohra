@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from ohra.cluster.sharding import ShardStopped
 from ohra import (
     ActorContext,
     ActorRef,
@@ -19,6 +20,7 @@ from ohra import (
     RemoteRef,
     ShardingEnvelope,
     StartEntity,
+    StopShards,
     ActorSystem,
     Behavior,
     Behaviors,
@@ -162,6 +164,7 @@ def cluster_sharding_region_takes_the_region_messages(
     system: ActorSystem[Any],
     stats: ActorRef[ShardRegionStats],
     cluster: ActorRef[ClusterShardingStats],
+    stopped: ActorRef[ShardStopped],
 ) -> None:
     key = EntityTypeKey[Ping]("Ping")
     region = ClusterSharding(system).init(Entity(key, lambda _e: _b))
@@ -171,6 +174,8 @@ def cluster_sharding_region_takes_the_region_messages(
     region.tell(SetActiveEntityLimit(10))
     region.tell(StartEntity("a"))
     region.tell(ShardingEnvelope("a", "not a ping"))  # type: ignore[arg-type]
+    region.tell(StopShards(frozenset({"1"}), stopped))
+    region.tell(StopShards(frozenset({"1"}), stats))  # type: ignore[arg-type]
     del envelopes
 
 

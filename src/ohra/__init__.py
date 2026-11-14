@@ -104,6 +104,7 @@ from .cluster.sharding import (
     ShardingMessageExtractor,
     ShardRegionStats,
     StartEntity,
+    StopShards,
 )
 from .cluster.sbr import (
     DownAll,
@@ -367,6 +368,7 @@ __all__ = [
     "StashBuffer",
     "StashOverflowError",
     "StartEntity",
+    "StopShards",
     "Store",
     "Subscribe",
     "Success",

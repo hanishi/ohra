@@ -23,6 +23,7 @@ from .coordinator import (
     ShardHomeDeallocated,
     ShardRegionRegistered,
     ShardRegionTerminated,
+    StopShards,
     coordinator_behavior,
     _Terminate,  # pyright: ignore[reportPrivateUsage]
 )
@@ -95,6 +96,7 @@ __all__ = [
     "ShardingEnvelope",
     "ShardingMessageExtractor",
     "StartEntity",
+    "StopShards",
     "shard_id_of",
 ]
 
@@ -157,6 +159,7 @@ class ClusterSharding:
         | GetShardRegionStats
         | GetClusterShardingStats
         | SetActiveEntityLimit
+        | StopShards
     ]: ...
     @overload
     def init[M](
@@ -168,12 +171,13 @@ class ClusterSharding:
         | GetShardRegionStats
         | GetClusterShardingStats
         | SetActiveEntityLimit
+        | StopShards
     ]: ...
     def init[M](self, entity: Entity[M]) -> ActorRef[Any]:
         """The region of the entity type on this node, as Pekko Typed's ``init``. It takes the
         envelopes, ``StartEntity``, and the region queries and ``SetActiveEntityLimit`` that
-        Pekko's region takes as its own messages; with ``Entity.with_message_extractor``, the
-        extractor's messages too."""
+        Pekko's region takes as its own messages, and ``StopShards``, which it passes to the
+        coordinator; with ``Entity.with_message_extractor``, the extractor's messages too."""
         name = entity.type_key.name
         if name == "replicator":
             raise ValueError(

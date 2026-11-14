@@ -31,9 +31,16 @@ from ohra.cluster import ClusterSettings
 from ohra.cluster.core import Cluster, Down, MemberRemoved
 from ohra.cluster.gossip import Member
 from ohra.cluster.ddata import LWWRegister, LWWRegisterKey, Replicator, SelfUniqueAddress
-from ohra.cluster.sharding import ClusterSharding, ClusterShardingSettings, shard_id_of
+from ohra.cluster.sharding import (
+    ClusterSharding,
+    ClusterShardingSettings,
+    HandOff,
+    ShardStopped,
+    shard_id_of,
+)
 from ohra.cluster.sharding.coordinator import (
     BeginHandOff,
+    BeginHandOffAck,
     CoordinatorState,
     GetShardHome,
     GracefulShutdownReq,
@@ -48,6 +55,7 @@ from ohra.cluster.sharding.coordinator import (
     ShardRegionProxyRegistered,
     ShardRegionRegistered,
     ShardStarted,
+    StopShards,
     _Terminate,  # pyright: ignore[reportPrivateUsage]
     coordinator_behavior,
 )
@@ -883,3 +891,136 @@ async def test_a_proxy_registering_before_initialization_is_logged(
         text = "ShardRegion proxy tried to register but ShardCoordinator not initialized yet"
         assert levels(caplog, text) == ["DEBUG"]
         await p.expect_no_message(0.1)
+
+
+# --- StopShards (ShardCoordinator.scala 1112-1170, 850-862) -----------------------------------
+
+
+async def begin_hand_off(region: TestProbe[Any], shard: str) -> BeginHandOff:
+    begin = await region.fish_for_message(
+        3,
+        lambda m: (
+            FishingOutcomes.complete()
+            if isinstance(m, BeginHandOff) and m.shard == shard
+            else FishingOutcomes.continue_and_ignore()
+        ),
+    )
+    return cast(BeginHandOff, begin[-1])
+
+
+async def hand_off(region: TestProbe[Any], shard: str) -> None:
+    """Answer the rebalance worker as a region hosting ``shard``: ack BeginHandOff, then stop the
+    shard on HandOff."""
+    begin = await begin_hand_off(region, shard)
+    begin.reply_to.tell(BeginHandOffAck(shard, region.ref))
+    handoff = await region.expect_message_type(HandOff, 3)
+    handoff.reply_to.tell(ShardStopped(shard))
+
+
+async def test_stop_shards_acks_shards_that_are_not_allocated():
+    async with manual_node() as node:
+        replicator, r, stopper = node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        coordinator.tell(StopShards(frozenset({"9"}), stopper.ref))
+        await stopper.expect_message(ShardStopped("9"))
+
+
+async def test_stop_shards_hands_off_a_running_shard_and_acks_it(
+    caplog: pytest.LogCaptureFixture,
+):
+    async with manual_node() as node:
+        replicator, r, asker, stopper = node.probe(), node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        with caplog.at_level(logging.INFO, logger="ohra.actor"):
+            coordinator.tell(StopShards(frozenset({"1"}), stopper.ref))
+            await hand_off(r, "1")
+            await stopper.expect_message(ShardStopped("1"))
+        update = await expect_update(replicator)
+        assert "1" not in update.modify(update.initial).value.shards
+        assert levels(caplog, "Explicitly stopping shards [1] (request id [") == ["INFO"]
+        assert levels(
+            caplog,
+            "Starting shutting down shards [1] due to region shutting down or explicit "
+            "stopping of shards.",
+        ) == ["INFO"]
+
+
+async def test_two_requesters_on_one_shard_are_both_acked():
+    async with manual_node() as node:
+        replicator, r, asker = node.probe(), node.probe(), node.probe()
+        first, second = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        coordinator.tell(StopShards(frozenset({"1"}), first.ref))
+        coordinator.tell(StopShards(frozenset({"1"}), second.ref))
+        await hand_off(r, "1")
+        await first.expect_message(ShardStopped("1"))
+        await second.expect_message(ShardStopped("1"))
+
+
+async def test_stop_shards_of_a_rebalancing_shard_acks_when_it_completes():
+    async with manual_node() as node:
+        replicator, r, asker, stopper = node.probe(), node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        coordinator.tell(GracefulShutdownReq(r.ref))
+        begin = await begin_hand_off(r, "1")
+        coordinator.tell(StopShards(frozenset({"1"}), stopper.ref))
+        await settle(node)
+        await r.expect_no_message(0.1)  # no second hand-off of the shard
+        begin.reply_to.tell(BeginHandOffAck("1", r.ref))
+        handoff = await r.expect_message_type(HandOff, 3)
+        handoff.reply_to.tell(ShardStopped("1"))
+        await stopper.expect_message(ShardStopped("1"))
+
+
+async def test_a_failed_hand_off_does_not_ack_stop_shards():
+    async with manual_node() as node:
+        replicator, r, asker, stopper = node.probe(), node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        coordinator.tell(StopShards(frozenset({"1"}), stopper.ref))
+        await begin_hand_off(r, "1")  # never acked
+        assert node.manual is not None
+        await node.manual.time_passes(SETTINGS.handoff_timeout)
+        await stopper.expect_no_message(0.1)
+
+
+async def test_stop_shards_times_out_with_pekkos_log(caplog: pytest.LogCaptureFixture):
+    async with manual_node() as node:
+        replicator, r, asker, stopper = node.probe(), node.probe(), node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        await registered(coordinator, replicator, r)
+        await allocated_to(coordinator, replicator, "1", asker)
+        with caplog.at_level(logging.INFO, logger="ohra.actor"):
+            coordinator.tell(StopShards(frozenset({"1"}), stopper.ref))
+            await begin_hand_off(r, "1")
+            assert node.manual is not None
+            await node.manual.time_passes(SETTINGS.handoff_timeout)
+        records = [r.getMessage() for r in caplog.records]
+        assert any(
+            m.startswith("Counter: Stop shard request [")
+            and m.endswith("] timed out for shards [1]")
+            for m in records
+        )
+
+
+async def test_stop_shards_without_regions_warns(caplog: pytest.LogCaptureFixture):
+    async with manual_node() as node:
+        replicator, stopper = node.probe(), node.probe()
+        coordinator = await active(node, replicator)
+        with caplog.at_level(logging.WARNING, logger="ohra.actor"):
+            coordinator.tell(StopShards(frozenset({"1"}), stopper.ref))
+            await settle(node)
+        text = (
+            "Explicit stop shards of shards [1] ignored (no known regions or sharding shutting "
+            "down)"
+        )
+        assert levels(caplog, text) == ["WARNING"]
+        await stopper.expect_no_message(0.1)

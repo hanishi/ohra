@@ -174,6 +174,28 @@ def cluster_sharding_region_takes_the_region_messages(
     del envelopes
 
 
+def extracted_region_takes_its_messages(system: ActorSystem[Any], ping: Ping) -> None:
+    from ohra import ExtractedEntity, ShardingMessageExtractor
+
+    def ping_id(msg: Ping) -> str:
+        return "a"
+
+    def str_id(msg: str) -> str:
+        return msg
+
+    key = EntityTypeKey[Ping]("Ping")
+    extractor = ShardingMessageExtractor.no_envelope(10, None, ping_id)
+    entity = Entity(key, lambda _e: _b).with_message_extractor(extractor).with_role("r")
+    kept: ExtractedEntity[Ping, Ping] = entity
+    region = ClusterSharding(system).init(entity)
+    region.tell(ping)
+    region.tell(StartEntity("a"))
+    region.tell("not a ping")  # type: ignore[arg-type]
+    str_extractor = ShardingMessageExtractor.no_envelope(10, None, str_id)
+    Entity(key, lambda _e: _b).with_message_extractor(str_extractor)  # type: ignore[arg-type]
+    del kept
+
+
 def persistence_is_typed() -> None:
     from ohra.persistence import InMemoryStore
 

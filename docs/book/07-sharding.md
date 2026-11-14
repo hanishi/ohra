@@ -82,7 +82,7 @@ When a node leaves, its shards move to the others, and their entities start agai
 > **Coming from Apache Pekko**
 >
 > - `ClusterSharding(system).init(Entity(key, create))`, `entity_ref_for`, `EntityTypeKey`, `EntityContext`, `ShardingEnvelope` and `Passivate` are Pekko's. `Entity` takes `create` as its second argument instead of a second argument list.
-> - The shard id is `crc32(id) % number_of_shards`, as `HashCodeMessageExtractor`, with Pekko's default of 1000 shards.
+> - The shard id is `crc32(id) % number_of_shards` by default, as `HashCodeMessageExtractor`, with Pekko's default of 1000 shards. `Entity.with_message_extractor` takes Pekko Typed's `ShardingMessageExtractor`.
 > - `Sharding.init` is the region on one node with no coordinator, for apps that run in one process.
 > - [Remembered entities](#remembered-entities) keep their ids in Distributed Data, as Pekko's `remember-entities-store = ddata`. There are no custom allocation strategies. [Appendix B](appendix-deviations.md) has the full list.
 
@@ -94,7 +94,7 @@ Sharding runs many small stateful actors, entities, each addressed by an id, wit
 - **A shard per shard id.** A shard is a child of the region that hosts it and owns the entities whose ids hash to it. It starts an entity on its first message and passivates it when idle.
 - **One coordinator per entity type,** run as a cluster singleton on the oldest node, or with a [role](#roles) the oldest node with the coordinator's role. It decides which region hosts each shard.
 
-An entity id maps to a shard id by `crc32(id) % number_of_shards`, 1000 by default. The hash is the same on every node, so every region computes the same shard for an id. Only the shard's location needs a decision.
+An entity id maps to a shard id by `crc32(id) % number_of_shards`, 1000 by default, unless a [message extractor](#message-extractors) says otherwise. The hash is the same on every node, so every region computes the same shard for an id. Only the shard's location needs a decision.
 
 ```mermaid
 sequenceDiagram
@@ -192,6 +192,58 @@ def start(system: ActorSystem[None]) -> None:
     )
     ClusterSharding(system).init(entity)
 ```
+
+#### Message extractors
+
+A region takes `ShardingEnvelope`s, and places an entity id on shard `crc32(id) % number_of_shards`, which is Pekko's `HashCodeMessageExtractor`. `Entity.with_message_extractor` swaps it for any `ShardingMessageExtractor[E, M]`: its `entity_id(message)` and `unwrap_message(message)` take apart the messages `E` sent to the region, and `shard_id(entity_id)` places every message, the envelopes, `StartEntity` and `entity_ref_for`'s included. The region's type then takes `E` too. `ShardingMessageExtractor.no_envelope(number_of_shards, stop_message, extract_entity_id)` is the one for messages that carry their own entity id, sent to the region as they are:
+
+```python
+from dataclasses import dataclass
+
+from ohra import (
+    ActorRef,
+    ActorSystem,
+    Behavior,
+    Behaviors,
+    ClusterSharding,
+    EntityContext,
+    Entity,
+    EntityTypeKey,
+    ShardingMessageExtractor,
+)
+from ohra.remote import remotable
+
+
+@remotable
+@dataclass(frozen=True)
+class Deposit:
+    account: str
+    amount: int
+    reply_to: ActorRef[int]
+
+
+def account(ctx: EntityContext[Deposit], balance: int = 0) -> Behavior[Deposit]:
+    @Behaviors.receive_message
+    def on_message(msg: Deposit) -> Behavior[Deposit]:
+        msg.reply_to.tell(balance + msg.amount)
+        return account(ctx, balance + msg.amount)
+
+    return on_message
+
+
+def account_id(msg: Deposit) -> str:
+    return msg.account
+
+
+ACCOUNT = EntityTypeKey[Deposit]("Account")
+
+
+def start_accounts(system: ActorSystem[None]) -> ActorRef[Deposit]:
+    extractor = ShardingMessageExtractor.no_envelope(100, None, account_id)
+    return ClusterSharding(system).init(Entity(ACCOUNT, account).with_message_extractor(extractor))
+```
+
+A shard id must be the same for an entity id on every node, so an extractor's `shard_id` must not depend on the node, nor on Python's salted `hash` of a string.
 
 #### Roles
 

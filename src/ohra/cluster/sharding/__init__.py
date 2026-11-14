@@ -5,7 +5,7 @@ sharding's own Replicator, as Pekko's DDataShardCoordinator."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 from urllib.parse import quote_plus
 
 from ...behavior import Behaviors
@@ -28,6 +28,11 @@ from .coordinator import (
 )
 from .region import _ExitingProgress, region_behavior  # pyright: ignore[reportPrivateUsage]
 from .remember_entities import DDataRememberEntitiesProvider
+from .message_extractor import (
+    HashCodeMessageExtractor,
+    HashCodeNoEnvelopeMessageExtractor,
+    ShardingMessageExtractor,
+)
 from .passivation_settings import PassivationStrategySettings
 from .shard import (
     ClusterShardingSettings,
@@ -37,6 +42,7 @@ from .shard import (
     EntityContext,
     EntityRef,
     EntityTypeKey,
+    ExtractedEntity,
     GetClusterShardingStats,
     GetShardRegionState,
     GetShardRegionStats,
@@ -67,10 +73,13 @@ __all__ = [
     "EntityContext",
     "EntityRef",
     "EntityTypeKey",
+    "ExtractedEntity",
     "GetClusterShardingStats",
     "GetShardRegionState",
     "GetShardRegionStats",
     "HandOff",
+    "HashCodeMessageExtractor",
+    "HashCodeNoEnvelopeMessageExtractor",
     "LeastShardAllocationStrategy",
     "Passivate",
     "PassivationStrategySettings",
@@ -84,6 +93,7 @@ __all__ = [
     "ShardStopped",
     "Sharding",
     "ShardingEnvelope",
+    "ShardingMessageExtractor",
     "StartEntity",
     "shard_id_of",
 ]
@@ -136,6 +146,19 @@ class ClusterSharding:
             system.cluster_sharding = self
         return system.cluster_sharding
 
+    @overload
+    def init[M, E](
+        self, entity: ExtractedEntity[M, E]
+    ) -> ActorRef[
+        E
+        | ShardingEnvelope[M]
+        | StartEntity
+        | GetShardRegionState
+        | GetShardRegionStats
+        | GetClusterShardingStats
+        | SetActiveEntityLimit
+    ]: ...
+    @overload
     def init[M](
         self, entity: Entity[M]
     ) -> ActorRef[
@@ -145,10 +168,12 @@ class ClusterSharding:
         | GetShardRegionStats
         | GetClusterShardingStats
         | SetActiveEntityLimit
-    ]:
+    ]: ...
+    def init[M](self, entity: Entity[M]) -> ActorRef[Any]:
         """The region of the entity type on this node, as Pekko Typed's ``init``. It takes the
         envelopes, ``StartEntity``, and the region queries and ``SetActiveEntityLimit`` that
-        Pekko's region takes as its own messages."""
+        Pekko's region takes as its own messages; with ``Entity.with_message_extractor``, the
+        extractor's messages too."""
         name = entity.type_key.name
         if name == "replicator":
             raise ValueError(

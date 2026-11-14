@@ -37,8 +37,12 @@ Differences from the Scala:
 - The Scala asserts on each remaining node in parallel; here one node after the other, in the
   same ``await_assert``.
 - ``expectMsgType[ActorRef]`` in "initialize shards" is a ping with the test kit's
-  ``single_expect_default`` (3 s); the 1 s of ``expectMsgType[ActorRef](1.second)`` is the
-  ping's timeout in "recover after leaving coordinator node".
+  ``single_expect_default`` dilated by the ``timefactor`` of 2 that Pekko's CI runs its
+  multi-node specs with (6 s). A Write that reaches a replicator before the replicator has
+  seen the writer join is ignored, as in Pekko, so the coordinator's first update can take
+  its whole ``updating_state_timeout`` (5 s) before the retry succeeds. The 1 s of
+  ``expectMsgType[ActorRef](1.second)`` is the ping's timeout in "recover after leaving
+  coordinator node".
 - The ``within`` bounds (20, 15 s) are the ``eventually`` and ``await_assert`` timeouts below.
 - ``startPersistenceIfNeeded`` is for the persistence mode only.
 """
@@ -173,8 +177,9 @@ async def test_cluster_sharding_ddata_mode_with_leaving_member():
         first, second, third, fourth, fifth = systems
 
         # initialize shards (132)
-        # expectMsgType's default, single-expect-default: the first ping waits for the coordinator
-        expect_default = TestKitSettings().single_expect_default_dilated
+        # expectMsgType's default at Pekko CI's timefactor 2: the first ping waits for the
+        # coordinator, whose first update can need one retry
+        expect_default = TestKitSettings(timefactor=2).single_expect_default_dilated
         original = {str(n): await ping(first, str(n), expect_default) for n in range(1, 11)}
         assert any(located.port in {ports[0], ports[1]} for located in original.values())
 

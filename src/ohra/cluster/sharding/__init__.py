@@ -36,7 +36,11 @@ from .message_extractor import (
 )
 from .passivation_settings import PassivationStrategySettings
 from .sharded_daemon_process import (
+    ChangeNumberOfProcesses,
+    GetNumberOfProcesses,
+    NumberOfProcesses,
     ShardedDaemonProcess,
+    ShardedDaemonProcessCommand,
     ShardedDaemonProcessContext,
     ShardedDaemonProcessSettings,
 )
@@ -70,6 +74,7 @@ if TYPE_CHECKING:
     from ...system import ActorSystem
 
 __all__ = [
+    "ChangeNumberOfProcesses",
     "ClusterSharding",
     "ClusterShardingSettings",
     "ClusterShardingStats",
@@ -81,12 +86,14 @@ __all__ = [
     "EntityTypeKey",
     "ExtractedEntity",
     "GetClusterShardingStats",
+    "GetNumberOfProcesses",
     "GetShardRegionState",
     "GetShardRegionStats",
     "HandOff",
     "HashCodeMessageExtractor",
     "HashCodeNoEnvelopeMessageExtractor",
     "LeastShardAllocationStrategy",
+    "NumberOfProcesses",
     "Passivate",
     "PassivationStrategySettings",
     "SetActiveEntityLimit",
@@ -98,6 +105,7 @@ __all__ = [
     "ShardRegionTerminated",
     "ShardStopped",
     "ShardedDaemonProcess",
+    "ShardedDaemonProcessCommand",
     "ShardedDaemonProcessContext",
     "ShardedDaemonProcessSettings",
     "Sharding",

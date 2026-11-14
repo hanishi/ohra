@@ -201,6 +201,13 @@ def extracted_region_takes_its_messages(system: ActorSystem[Any], ping: Ping) ->
     del kept
 
 
+def sharded_daemon_process_is_typed(system: ActorSystem[Any]) -> None:
+    from ohra import ShardedDaemonProcess
+
+    ShardedDaemonProcess(system).init("p", 2, lambda n: _b)
+    ShardedDaemonProcess(system).init("p", 2, lambda n: _b, stop_message="no")  # type: ignore[arg-type]
+
+
 def persistence_is_typed() -> None:
     from ohra.persistence import InMemoryStore
 

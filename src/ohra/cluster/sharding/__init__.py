@@ -35,6 +35,11 @@ from .message_extractor import (
     ShardingMessageExtractor,
 )
 from .passivation_settings import PassivationStrategySettings
+from .sharded_daemon_process import (
+    ShardedDaemonProcess,
+    ShardedDaemonProcessContext,
+    ShardedDaemonProcessSettings,
+)
 from .shard import (
     ClusterShardingSettings,
     ClusterShardingStats,
@@ -92,6 +97,9 @@ __all__ = [
     "ShardRegionStats",
     "ShardRegionTerminated",
     "ShardStopped",
+    "ShardedDaemonProcess",
+    "ShardedDaemonProcessContext",
+    "ShardedDaemonProcessSettings",
     "Sharding",
     "ShardingEnvelope",
     "ShardingMessageExtractor",

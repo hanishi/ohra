@@ -1,19 +1,26 @@
 """Pekko's ShardedDaemonProcessId.scala, ShardedDaemonProcessState.scala (the state, its key and
 ``initialState``), ShardedDaemonProcessSettings.scala and the ``sharded-daemon-process`` section
 of reference.conf: the entity ids, the replicated scaling state and the settings of a sharded
-daemon process."""
+daemon process. Then ShardedDaemonProcessImpl.scala: the ``ShardedDaemonProcess`` extension."""
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import ClassVar, Final, override
+from typing import TYPE_CHECKING, Any, ClassVar, Final, override
 
+from ...behavior import Behavior
 from ...remote.serialization import Serialization
+from ..ddata.distributed_data import DistributedData
 from ..ddata.key import Key
 from ..ddata.replicated_data import ReplicatedData
+from ..singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .message_extractor import ShardingMessageExtractor
-from .shard import ClusterShardingSettings, ShardingEnvelope
+from .shard import ClusterShardingSettings, Entity, EntityContext, EntityTypeKey, ShardingEnvelope
+
+if TYPE_CHECKING:
+    from ...system import ActorSystem
 
 SEPARATOR: Final = "|"
 
@@ -165,3 +172,73 @@ class ShardedDaemonProcessContext:
     total_processes: int
     name: str
     revision: int
+
+
+def _sharding_settings(
+    settings: ShardedDaemonProcessSettings, number_of_instances: int
+) -> ClusterShardingSettings:
+    """``internalInitWithContext`` (150-175): one shard per process, the daemon's role, and neither
+    remembered entities nor passivation."""
+    base = settings.sharding_settings or ClusterShardingSettings()
+    return replace(
+        base,
+        number_of_shards=number_of_instances,
+        role=settings.role if settings.role is not None else base.role,
+        remember_entities=False,
+    ).with_no_passivation_strategy()
+
+
+class ShardedDaemonProcess:
+    """``ShardedDaemonProcess(system).init(name, n, factory)`` keeps the processes ``factory(0)``
+    to ``factory(n - 1)`` running, each on one node of the cluster, as Pekko Typed's. It keeps no
+    state of its own: sharding and the singleton make a second ``init`` of a name a no-op."""
+
+    def __init__(self, system: ActorSystem[Any]) -> None:
+        self.system = system
+
+    def init[T](
+        self,
+        name: str,
+        number_of_instances: int,
+        behavior_factory: Callable[[int], Behavior[T]],
+        settings: ShardedDaemonProcessSettings | None = None,
+        stop_message: T | None = None,
+    ) -> None:
+        """``internalInitWithContext`` (135-210), for a fixed set of processes. ``stop_message``
+        is what a process gets when its shard is handed off, instead of being stopped outright."""
+        # imported here: the package and the coordinator's module import this one
+        from . import ClusterSharding
+        from .sharded_daemon_process_coordinator import sharded_daemon_process_coordinator
+
+        settings = settings or ShardedDaemonProcessSettings()
+        entity_type_key = EntityTypeKey[T](f"sharded-daemon-process-{name}")
+        sharding_settings = _sharding_settings(settings, number_of_instances)
+
+        def create(ctx: EntityContext[T]) -> Behavior[T]:
+            decoded_id = decode_entity_id(ctx.entity_id, number_of_instances)
+            return behavior_factory(decoded_id.process_number)
+
+        entity = (
+            Entity(entity_type_key, create)
+            .with_settings(sharding_settings)
+            .with_message_extractor(ShardedDaemonProcessIdExtractor[T]())
+        )
+        if stop_message is not None:
+            entity = entity.with_stop_message(stop_message)
+
+        sharding_ref = ClusterSharding(self.system).init(entity)
+
+        # started on all nodes even if using roles to be able to share the default replicator
+        DistributedData(self.system)
+
+        singleton_settings = ClusterSingletonSettings()
+        if settings.role is not None:
+            singleton_settings = singleton_settings.with_role(settings.role)
+        singleton = SingletonActor(
+            sharded_daemon_process_coordinator(
+                settings, sharding_settings, number_of_instances, name, sharding_ref
+            ),
+            f"ShardedDaemonProcessCoordinator-{name}",
+        ).with_settings(singleton_settings)
+
+        ClusterSingleton(self.system).init(singleton)

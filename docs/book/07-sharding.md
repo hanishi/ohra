@@ -90,9 +90,9 @@ When a node leaves, its shards move to the others, and their entities start agai
 
 Sharding runs many small stateful actors, entities, each addressed by an id, without the caller knowing where they live. Three kinds of actor do the work, all under `/system/sharding`:
 
-- **A region per entity type on every node.** It routes messages, hosts the shards assigned to this node and registers with the coordinator.
+- **A region per entity type on every node.** It routes messages, hosts the shards assigned to this node and registers with the coordinator. With a [role](#roles), a node without it gets a proxy-only region, which routes and hosts nothing.
 - **A shard per shard id.** A shard is a child of the region that hosts it and owns the entities whose ids hash to it. It starts an entity on its first message and passivates it when idle.
-- **One coordinator per entity type,** run as a cluster singleton on the oldest node. It decides which region hosts each shard.
+- **One coordinator per entity type,** run as a cluster singleton on the oldest node, or with a [role](#roles) the oldest node with the coordinator's role. It decides which region hosts each shard.
 
 An entity id maps to a shard id by `crc32(id) % number_of_shards`, 1000 by default. The hash is the same on every node, so every region computes the same shard for an id. Only the shard's location needs a decision.
 
@@ -119,7 +119,7 @@ sequenceDiagram
 
 **Rebalance and hand-off.** Every 10 seconds the coordinator compares shard counts and may move a few shards from the busiest region to the least busy. A move is a hand-off. The coordinator tells every region `BeginHandOff`, so they start buffering for that shard. Once all have acknowledged, it sends `HandOff` to the owner, whose shard stops its entities and reports `ShardStopped`. Then the shard is allocated afresh and the buffers drain to the new home. A leaving node does the same for all of its shards, in the `cluster-sharding-shutdown-region` phase.
 
-**After a crash.** The coordinator keeps its shard map in [Distributed Data](14-distributed-data.md), in an `LWWRegister` on sharding's own Replicator at `/system/sharding/replicator`. A new coordinator reads the map from a majority of the nodes before it answers anyone, and each change is written to a majority before it takes effect. With the defaults, every node of a cluster of up to eight takes part in each write, and of up to twelve in each read, so while a crashed node has not yet been removed, a new shard's allocation waits for it and is retried. A crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md). [Remembered entities](#remembered-entities) start there without waiting for a message.
+**After a crash.** The coordinator keeps its shard map in [Distributed Data](14-distributed-data.md), in an `LWWRegister` on sharding's own Replicator at `/system/sharding/replicator`, or `/system/sharding/<role>Replicator` with a [role](#roles). A new coordinator reads the map from a majority of the nodes before it answers anyone, and each change is written to a majority before it takes effect. With the defaults, every node of a cluster of up to eight takes part in each write, and of up to twelve in each read, so while a crashed node has not yet been removed, a new shard's allocation waits for it and is retried. A crashed node's shards are allocated again once it is removed. Their entities start fresh on the new node, which is why entities that must keep state use [persistence](03-persistence.md). [Remembered entities](#remembered-entities) start there without waiting for a message.
 
 ### Sharding in one process
 
@@ -154,7 +154,7 @@ Spawn `region` like any behavior, then `Sharding.entity_ref_for(region_ref, "car
 
 ### Sharding across nodes
 
-`ClusterSharding(system).init(Entity(key, create))` is `Sharding.init` for the whole cluster: the same entity type on every node, each entity living on exactly one of them. A ShardCoordinator, run as a cluster singleton, decides which node hosts each shard with Pekko's least-shard allocation; every node's region routes a message to the shard's home, local or remote, and buffers while the home is unknown. `entity_ref_for(key, id)` works on any node. Call `init` on every member: the first `init` starts sharding's Replicator, and a member without one never answers the coordinator's reads and writes, which with the defaults need every node of a small cluster, so the coordinator never gets its state and logs "Has ClusterSharding been started on all nodes?". When a node joins, the coordinator moves shards to it over the following rebalance intervals; when a node leaves, its region hands every shard off during the exiting phase before the node confirms its exit; when a node crashes, its shards are served again once it has been downed and removed, and not before, so no entity ever runs twice.
+`ClusterSharding(system).init(Entity(key, create))` is `Sharding.init` for the whole cluster: the same entity type on every node, each entity living on exactly one of them. A ShardCoordinator, run as a cluster singleton, decides which node hosts each shard with Pekko's least-shard allocation; every node's region routes a message to the shard's home, local or remote, and buffers while the home is unknown. `entity_ref_for(key, id)` works on any node. Call `init` on every member (on members outside a [role](#roles) it starts a proxy): the first `init` starts sharding's Replicator, and a member without one never answers the coordinator's reads and writes, which with the defaults need every node of a small cluster, so the coordinator never gets its state and logs "Has ClusterSharding been started on all nodes?". When a node joins, the coordinator moves shards to it over the following rebalance intervals; when a node leaves, its region hands every shard off during the exiting phase before the node confirms its exit; when a node crashes, its shards are served again once it has been downed and removed, and not before, so no entity ever runs twice.
 
 ```python
 from ohra import ClusterSharding, Entity, EntityTypeKey
@@ -192,6 +192,27 @@ def start(system: ActorSystem[None]) -> None:
     )
     ClusterSharding(system).init(entity)
 ```
+
+#### Roles
+
+Sharding can be confined to the members with a [role](05-cluster.md), as Pekko's `role` setting: `ClusterShardingSettings(role="backend")`, or `Entity.with_role("backend")`, which wins over the settings' role. Call `init` on every member as before. On a member with the role it starts the region, `/system/sharding/<type>`, which hosts shards. On any other member it starts a proxy-only region, `/system/sharding/<type>Proxy`, which hosts nothing and sends each message to the shard's home on a member with the role; `entity_ref_for` works the same on both. The coordinator runs on the oldest member with the role. With `coordinator_singleton_override_role=False` it runs on the role of `coordinator_singleton_settings` instead, which may be a different set of members; a member with that role but not the shard role runs the coordinator next to its proxy.
+
+```python
+from cart import CartCmd, cart
+from ohra import ActorSystem, ClusterSharding, Entity, EntityTypeKey
+
+CART = EntityTypeKey[CartCmd]("Cart")
+
+
+def start(system: ActorSystem[None]) -> None:
+    # on every member: carts live on "backend" members, the others get a proxy
+    entity = Entity(CART, lambda ctx: cart({})).with_role("backend")
+    ClusterSharding(system).init(entity)
+```
+
+Each role has its own Replicator for sharding's data: `/system/sharding/replicator` with no role, `/system/sharding/<role>Replicator` (the role URL-encoded) with one. An entity type whose name would take one of these names, or another type's proxy name, such as `backendReplicator` or `CartProxy`, makes `init` raise `ValueError` before it starts anything. It counts only the members of its role, so the members without the role need no Replicator and need not answer its reads and writes. With [remembered entities](#remembered-entities) and a coordinator role apart from the shard role, the stores use the role-less Replicator, as Pekko's do. Every member with either role runs it, but it counts every member of the cluster, the proxy-only ones too, which do not run it. Its majority reads and writes therefore need enough members with one of the two roles: with one `coordinator` member, one `shard` member and three others, a majority is three of five, only two can answer, and the coordinator cannot remember a new shard.
+
+The coordinator allocates no shard until enough regions have registered: `min_nr_of_members` of the cluster's settings, or with a role, that role's `min_nr_of_members_of_role` (1 when it names none), as Pekko's `minMembers`. A request for a shard's home before then is ignored, and the region asks again on its retry interval.
 
 ### Passivation strategies
 

@@ -86,6 +86,8 @@
 | `Shard.GetShardStats`, `ShardStats` | internal, in `shard.py`: `GetShardStats(reply_to)`, `ShardStats(shard_id, entity_count)` |
 | `pekko.cluster.sharding.use-lease`, `lease-retry-interval`; `ClusterShardingSettings.withLeaseSettings` | `ClusterShardingSettings.lease_settings`, a `LeaseUsageSettings`; `with_lease_settings(...)` |
 | `verbose-debug-logging`, `fail-on-invalid-entity-state-transition`, `entity-restart-backoff`, `shard-failure-backoff` | `ClusterShardingSettings.verbose_debug_logging`, `fail_on_invalid_entity_state_transition`, `entity_restart_backoff`, `shard_failure_backoff` |
+| `pekko.cluster.sharding.role`, `ClusterShardingSettings.withRole`, `coordinator-singleton-role-override`; typed `Entity.withRole` | `ClusterShardingSettings.role`, `with_role(...)` (`""` or `None` means none), `coordinator_singleton_override_role`; `Entity.with_role(...)`, which wins over the settings' role |
+| `ClusterSharding.startProxy(typeName, role, ...)`, `ShardCoordinator.Internal.RegisterProxy` | `ClusterSharding(system).init(...)` on a member without the role starts the proxy; `ohra.cluster.sharding.coordinator.RegisterProxy` |
 | `pekko.cluster.sharding.remember-entities`, `ClusterShardingSettings.withRememberEntities` | `ClusterShardingSettings.remember_entities`, `with_remember_entities(...)` |
 | `pekko.cluster.sharding.remember-entities-store = ddata` | `ClusterShardingSettings.remember_entities_store`, which is only `"ddata"` |
 | `entity-recovery-strategy`, `entity-recovery-constant-rate-strategy.frequency`, `number-of-entities` | `ClusterShardingSettings.entity_recovery_strategy` (`"all"` or `"constant"`), `entity_recovery_constant_rate_frequency`, `entity_recovery_constant_rate_number_of_entities` |

@@ -50,8 +50,9 @@ from ..core import (
     MemberRemoved,
     MemberUp,
 )
+from ..core import SELF_DATA_CENTER
 from ..core import Subscribe as ClusterSubscribe
-from ..gossip import Member
+from ..gossip import DC_ROLE_PREFIX, Member
 from .coordinator import (
     BeginHandOff,
     BeginHandOffAck,
@@ -60,6 +61,7 @@ from .coordinator import (
     GracefulShutdownReq,
     HostShard,
     Register,
+    RegisterProxy,
     RegionStopped,
     RegisterAck,
     ShardHome,
@@ -121,11 +123,13 @@ def region_behavior(
     settings: ClusterShardingSettings,
     progress: _ExitingProgress,
     remember_entities_provider: DDataRememberEntitiesProvider | None = None,
+    proxy: bool = False,
 ) -> Behavior[Any]:
     """Pekko's ``ShardRegion``. With a ``remember_entities_provider``, its shards remember their
     entities in the provider's store and start them through the region's starter manager, and a
     shard that stops while not being handed off is started again after
-    ``shard_failure_backoff``."""
+    ``shard_failure_backoff``. A ``proxy`` (Pekko's ``proxyProps``, with no ``entityProps``)
+    hosts no shards: it registers with ``RegisterProxy`` and forwards to the shards' homes."""
 
     @Behaviors.setup
     def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
@@ -145,6 +149,8 @@ def region_behavior(
         handing_off: set[ActorRef[Any]] = set()
         buffered = 0
         logged_full_buffer_warning = False
+        # ShardRegion.scala 658: counts the retries with buffered messages, to log less often
+        retry_count = 0
         next_registration_delay = max(0.1, settings.retry_interval / 8)
         graceful_shutdown_in_progress = False
         preparing_for_shutdown = False
@@ -161,6 +167,15 @@ def region_behavior(
         _log_passivation_strategy(log, type_name, passivation_strategy, settings.remember_entities)
 
         # --- coordinator location ----------------------------------------------------------------
+
+        # ShardRegion.scala 709-716: the members that may run the coordinator
+        target_dc_role = f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}"
+        coordinator_role = settings.coordinator_singleton_role
+
+        def matching_coordinator_role(member: Member) -> bool:
+            return member.has_role(target_dc_role) and (
+                coordinator_role is None or member.has_role(coordinator_role)
+            )
 
         def coordinator_path(member: Member) -> str:
             manager = _manager_name(f"{type_name}Coordinator")
@@ -201,25 +216,80 @@ def region_behavior(
             return selected
 
         def register() -> None:
-            for m in coordinator_selection():
+            """ShardRegion.scala 1124-1170."""
+            selected = coordinator_selection()
+            for m in selected:
                 try:
                     found = ctx.system.resolve(coordinator_path(m))
                 # the local singleton instance is not up yet: the next retry asks again
                 except LookupError:
                     continue
-                found.tell(Register(ctx.self))
+                # registrationMessage (1174-1175)
+                found.tell(RegisterProxy(ctx.self) if proxy else Register(ctx.self))
+            if not shard_buffers or retry_count < 5:
+                return
+            if selected:
+                oldest = members_by_age[0]
+                reachable = all(
+                    u.unique_address != oldest.unique_address for u in cluster.state.unreachable
+                )
+                coordinator_message = (
+                    f"Coordinator [{oldest}] is {'reachable' if reachable else 'unreachable'}."
+                )
+                paths = ", ".join(coordinator_path(m) for m in selected)
+                if buffered > 0:
+                    log.warning(
+                        "%s: Trying to register to coordinator at [%s], but no acknowledgement. "
+                        "Total [%d] buffered messages. [%s]",
+                        type_name,
+                        paths,
+                        buffered,
+                        coordinator_message,
+                    )
+                else:
+                    log.debug(
+                        "%s: Trying to register to coordinator at [%s], but no acknowledgement. "
+                        "No buffered messages yet. [%s]",
+                        type_name,
+                        paths,
+                        coordinator_message,
+                    )
+                return
+            # Members start off as "Removed"
+            possible_reason = (
+                "Has Cluster Sharding been started on every node and nodes been configured with "
+                "the correct role(s)?"
+                if cluster.self_member.status != "removed"
+                else "Probably, no seed-nodes configured and manual cluster or bootstrap join not "
+                "performed?"
+            )
+            if buffered > 0:
+                log.warning(
+                    "%s: No coordinator found to register. %s Total [%d] buffered messages.",
+                    type_name,
+                    possible_reason,
+                    buffered,
+                )
+            else:
+                log.debug(
+                    "%s: No coordinator found to register. %s No buffered messages yet.",
+                    type_name,
+                    possible_reason,
+                )
 
         # --- delivery ----------------------------------------------------------------------------
 
         def get_shard(shard: str) -> ActorRef[Any] | None:
             """ShardRegion.scala 1331-1370: the shard once it is initialized. On first use it is
-            spawned and starting, and None is returned until its ``ShardInitialized``. A region
-            always hosts shards here, never a proxy."""
+            spawned and starting, and None is returned until its ``ShardInitialized``. A proxy has
+            no ``entityProps``, so it starts none."""
             if shard in starting_shards:
                 return None
             ref = shards.get(shard)
             if ref is not None:
                 return ref
+            if proxy:
+                raise RuntimeError("Shard must not be allocated to a proxy only ShardRegion")
             log.debug("%s: Starting shard [%s] in region", type_name, shard)
             ref = ctx.spawn(
                 shard_behavior(
@@ -324,8 +394,8 @@ def region_behavior(
             buffered += 1
 
         def deliver_buffered(shard: str, receiver: ActorRef[Any]) -> None:
-            """ShardRegion.scala 1242-1260."""
-            nonlocal buffered, logged_full_buffer_warning
+            """ShardRegion.scala 1242-1263."""
+            nonlocal buffered, logged_full_buffer_warning, retry_count
             for msg in shard_buffers.pop(shard, ()):
                 buffered -= 1
                 if isinstance(msg, _RestartShard) and receiver.path != ctx.self.path:
@@ -338,6 +408,7 @@ def region_behavior(
                 else:
                     receiver.tell(msg)
             logged_full_buffer_warning = False
+            retry_count = 0
 
         def receive_shard_home(shard: str, region: ActorRef[Any]) -> None:
             nonlocal buffered
@@ -396,7 +467,7 @@ def region_behavior(
         @Behaviors.receive
         def active(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
             nonlocal coordinator, buffered, logged_full_buffer_warning
-            nonlocal graceful_shutdown_in_progress, preparing_for_shutdown
+            nonlocal graceful_shutdown_in_progress, preparing_for_shutdown, retry_count
             if isinstance(msg, StartEntity):
                 # Pekko Typed's StartEntity is the envelope the shard's deliverMessage takes
                 # (typed scaladsl ClusterSharding.scala 380-390)
@@ -428,6 +499,8 @@ def region_behavior(
                         )
                     )
                 case MemberUp(member=m) | MemberLeft(member=m) | MemberExited(member=m):
+                    if not matching_coordinator_role(m):
+                        return Behaviors.same
                     change_members(
                         by_age(
                             [x for x in members_by_age if x.unique_address != m.unique_address]
@@ -534,6 +607,9 @@ def region_behavior(
                     ):
                         del region_by_shard[shard]
                 case _Retry():
+                    # ShardRegion.scala 900-905: only on Retry, not on RegisterRetry
+                    if shard_buffers:
+                        retry_count += 1
                     if coordinator is None:
                         register()
                     else:

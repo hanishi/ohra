@@ -38,8 +38,15 @@ from ...result import Failure, Success, Try
 from ...signals import PostStop, PreRestart, Signal, Terminated
 from ...supervision import SupervisorStrategy
 from ...util.message_buffer import MessageBufferMap
-from ..core import MemberEvent, MemberPreparingForShutdown, MemberReadyForShutdown, Subscribe
+from ..core import (
+    SELF_DATA_CENTER,
+    MemberEvent,
+    MemberPreparingForShutdown,
+    MemberReadyForShutdown,
+    Subscribe,
+)
 from ..ddata.replicator import Replicator
+from ..gossip import DC_ROLE_PREFIX
 from ..ddata.settings import ReplicatorSettings
 from .entities import (
     Active,
@@ -62,7 +69,7 @@ from .passivation_settings import (
 from .remember_entities import DDataRememberEntitiesProvider, RememberEntitiesShardStore
 
 if TYPE_CHECKING:
-    from ..core import ClusterSettings
+    from ..core import Cluster, ClusterSettings
     from ..singleton import ClusterSingletonSettings
 
 
@@ -154,8 +161,16 @@ class ClusterShardingSettings:
     lease_settings: LeaseUsageSettings | None = None
     """The lease each shard acquires before it starts its entities, and how long it waits to
     retry a failed acquire (use-lease, lease-retry-interval); None means no lease."""
+    role: str | None = None
+    """Shards live only on members with this role; ``init`` on any other member starts a
+    proxy-only region (Pekko's role). ``""`` means none, as Pekko's ``roleOption``."""
+    coordinator_singleton_override_role: bool = True
+    """The coordinator runs on the members with ``role``, whatever role
+    ``coordinator_singleton_settings`` names (coordinator-singleton-role-override)."""
 
     def __post_init__(self) -> None:
+        if self.role == "":
+            object.__setattr__(self, "role", None)
         for name in (
             "retry_interval", "rebalance_interval", "handoff_timeout", "shard_start_timeout",
             "coordinator_failure_backoff", "shard_region_query_timeout",
@@ -197,6 +212,28 @@ class ClusterShardingSettings:
         if self.entity_recovery_constant_rate_number_of_entities < 1:
             raise ValueError("entity_recovery_constant_rate_number_of_entities must be >= 1")
 
+    def with_role(self, role: str | None) -> ClusterShardingSettings:
+        """Pekko's withRole: None or ``""`` means no role."""
+        return replace(self, role=role or None)
+
+    @property
+    def coordinator_singleton_role(self) -> str | None:
+        """ClusterShardingSettings.scala 937-938: the shard role under the override, else the
+        coordinator singleton settings' role."""
+        if self.coordinator_singleton_override_role:
+            return self.role
+        settings = self.coordinator_singleton_settings
+        return settings.role if settings is not None else None
+
+    def should_host_shard(self, cluster: Cluster) -> bool:
+        """927-928: this member runs the region, else only a proxy."""
+        return self.role is None or self.role in cluster.self_member.roles
+
+    def should_host_coordinator(self, cluster: Cluster) -> bool:
+        """932-933: this member runs the coordinator's singleton manager."""
+        role = self.coordinator_singleton_role
+        return role is None or role in cluster.self_member.roles
+
     def state_read_consistency(self) -> Replicator.ReadConsistency:
         """ClusterSharding.scala 782-788 (``stateReadConsistency``)."""
         n = self.coordinator_state_read_majority_plus
@@ -214,9 +251,10 @@ class ClusterShardingSettings:
         return Replicator.WriteMajorityPlus(self.updating_state_timeout, n, self.majority_min_cap)
 
     def effective_replicator_settings(
-        self, cluster_settings: ClusterSettings
+        self, cluster_settings: ClusterSettings, role: str | None
     ) -> ReplicatorSettings:
-        """ClusterSharding.scala 739-748: sharding's data is durable only under remember entities,
+        """ClusterSharding.scala 731-741: the Replicator of ``role`` counts the members of the
+        data center with that role, and sharding's data is durable only under remember entities,
         by the configured keys, else ``shard-*`` (reference.conf 398)."""
         if self.distributed_data is None:
             base = replace(
@@ -224,8 +262,10 @@ class ClusterShardingSettings:
             )
         else:
             base = self.distributed_data
-        # no role yet: PR 3 sets sharding's role here (ClusterSharding.scala 739-748 withRole)
-        base = replace(base, roles=frozenset())
+        base = replace(
+            base,
+            roles=frozenset({f"{DC_ROLE_PREFIX}{SELF_DATA_CENTER}"} | ({role} if role else set())),
+        )
         if not self.remember_entities:
             return replace(base, durable_keys=frozenset())
         if self.distributed_data is None:
@@ -353,6 +393,8 @@ class Entity[T]:
     # None takes the value from settings; a value set here wins over settings
     buffer_size: int | None = None
     settings: ClusterShardingSettings | None = None
+    role: str | None = None
+    """Wins over ``settings.role`` (Pekko Typed's ``settingsWithRole``)."""
 
     def with_buffer_size(self, size: int) -> Entity[T]:
         """Pekko's buffer-size: caps the messages a shard buffers for its passivating entities,
@@ -368,13 +410,19 @@ class Entity[T]:
     def with_settings(self, settings: ClusterShardingSettings) -> Entity[T]:
         return replace(self, settings=settings)
 
+    def with_role(self, role: str) -> Entity[T]:
+        """The entities run only on members with ``role``; others get a proxy."""
+        return replace(self, role=role)
+
     @property
     def effective_settings(self) -> ClusterShardingSettings:
-        """``settings``, with ``buffer_size`` set on the entity on top, whichever order they
-        were set in."""
+        """``settings``, with ``buffer_size`` and ``role`` set on the entity on top, whichever
+        order they were set in."""
         settings = self.settings or ClusterShardingSettings()
         if self.buffer_size is not None:
             settings = replace(settings, buffer_size=self.buffer_size)
+        if self.role is not None:
+            settings = settings.with_role(self.role)
         return settings
 
 

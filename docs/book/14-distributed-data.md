@@ -173,7 +173,7 @@ async def test_have_api_for_update_and_get(spec: MultiNodeSpec):
 
 ## Roles
 
-By default every member is a replica. `ReplicatorSettings(roles=...)`, or `with_role("backend")`, limits the replicas to the members that have every one of the roles: the consistency levels count only them, and gossip and deltas go only to them. A node without the roles gets dead letters: `DistributedData(system).is_terminated` is true and its `replicator` accepts messages and drops them. The cluster receptionist's and sharding's Replicators have no role.
+By default every member is a replica. `ReplicatorSettings(roles=...)`, or `with_role("backend")`, limits the replicas to the members that have every one of the roles: the consistency levels count only them, and gossip and deltas go only to them. A node without the roles gets dead letters: `DistributedData(system).is_terminated` is true and its `replicator` accepts messages and drops them. The cluster receptionist's Replicator has no role; sharding's takes sharding's own role, not these ([chapter 7](07-sharding.md#roles)).
 
 ```python
 from ohra.cluster import ClusterSettings

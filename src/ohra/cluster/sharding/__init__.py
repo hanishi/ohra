@@ -6,6 +6,7 @@ sharding's own Replicator, as Pekko's DDataShardCoordinator."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote_plus
 
 from ...behavior import Behaviors
 from ...ref import ActorRef
@@ -13,7 +14,7 @@ from ...supervision import SupervisorStrategy
 from ...coordinated_shutdown import CoordinatedShutdown
 from ..core import Cluster
 from ..ddata.replicator import Replicator
-from ..singleton import ClusterSingleton, SingletonActor
+from ..singleton import ClusterSingleton, ClusterSingletonSettings, SingletonActor
 from .backoff_supervisor import backoff_on_stop_supervisor
 from .coordinator import (
     CoordinatorState,
@@ -88,11 +89,19 @@ __all__ = [
 ]
 
 
+def _replicator_name(role: str | None) -> str:
+    """ClusterSharding.scala 755-758: ``replicator``, or the role URL-encoded as Java's
+    ``URLEncoder`` does (``*`` kept, ``~`` encoded) and ``Replicator``."""
+    if role is None:
+        return "replicator"
+    return quote_plus(role, safe="*").replace("~", "%7E") + "Replicator"
+
+
 def _remember_entities_provider(
     name: str, settings: ClusterShardingSettings, replicator: ActorRef[Replicator.Command]
 ) -> DDataRememberEntitiesProvider:
-    """ClusterSharding.scala 766-794, without roles: the provider of the remember-entities
-    stores, the coordinator's and every shard's, on sharding's Replicator."""
+    """ClusterSharding.scala 762-790: the provider of the remember-entities stores, the
+    coordinator's and every shard's, on the given Replicator of sharding's."""
     return DDataRememberEntitiesProvider(name, settings, settings.majority_min_cap, replicator)
 
 
@@ -107,8 +116,8 @@ class ClusterSharding:
     _regions: dict[str, ActorRef[Any]]
     _entities: dict[str, Entity[Any]]
     _parent: ActorCell[Any] | None
-    _replicator: ActorRef[Replicator.Command] | None
-    _replicator_settings: ReplicatorSettings | None
+    _replicators: dict[str | None, ActorRef[Replicator.Command]]
+    _replicator_settings: dict[str | None, ReplicatorSettings]
 
     def __new__(cls, system: ActorSystem[Any]) -> ClusterSharding:
         if system.cluster is None:
@@ -122,8 +131,8 @@ class ClusterSharding:
             self._regions = {}
             self._entities = {}
             self._parent = None
-            self._replicator = None
-            self._replicator_settings = None
+            self._replicators = {}
+            self._replicator_settings = {}
             system.cluster_sharding = self
         return system.cluster_sharding
 
@@ -152,37 +161,97 @@ class ClusterSharding:
         settings = entity.effective_settings
         if self._parent is None:
             self._parent = self.system._system_root.spawn_child(Behaviors.empty, "sharding", None)  # pyright: ignore[reportPrivateUsage]
-        # ClusterSharding.scala 730-815: the guardian spawns one Replicator, for all entity types
-        wanted = settings.effective_replicator_settings(Cluster(self.system).settings)
-        if self._replicator is None:
-            self._replicator_settings = wanted
-            self._replicator = self._parent.spawn_child(
-                Replicator.behavior(wanted), "replicator", None
-            ).ref
-        elif wanted != self._replicator_settings:
-            self._parent.log.warning(
-                "Entity type [%s] has other distributed_data settings than the first init; "
-                "sharding's Replicator keeps the first's",
+        parent = self._parent
+        cluster = Cluster(self.system)
+        host_shard = settings.should_host_shard(cluster)
+        host_coordinator = settings.should_host_coordinator(cluster)
+        # a proxy that runs no coordinator needs no store (internalStart 321-333)
+        remember = settings.remember_entities and (host_shard or host_coordinator)
+        # ClusterSharding.scala 774-777: must run Replicator for DDataRememberEntities on both
+        # shard and coordinator roles (if different)
+        store_role = (
+            settings.role if settings.role == settings.coordinator_singleton_role else None
+        )
+        region_name = name if host_shard else f"{name}Proxy"
+        # Pekko's actorOf fails on a taken name midway; here nothing starts
+        roles = {store_role} if remember else set[str | None]()
+        if host_coordinator:
+            roles.add(settings.coordinator_singleton_role)
+        new = [_replicator_name(r) for r in roles if r not in self._replicators]
+        for child in [region_name, *new]:
+            if child in parent.children or [region_name, *new].count(child) > 1:
+                raise ValueError(
+                    f"Entity type [{name}] cannot start: /system/sharding/{child} is taken"
+                )
+        provider: DDataRememberEntitiesProvider | None = None
+        if remember:
+            provider = _remember_entities_provider(
+                name, settings, self._replicator(name, store_role, settings)
+            )
+        if host_coordinator:
+            self._start_coordinator(name, settings, provider)
+        progress = _ExitingProgress()
+        if host_shard:
+            region = parent.spawn_child(
+                region_behavior(entity, settings, progress, provider), region_name, None
+            )
+        else:
+            # internalStart (321-333), startProxy and StartProxy (880-905)
+            parent.log.debug(
+                "Starting Shard Region Proxy [%s] (no actors will be hosted on this node)...",
                 name,
             )
-        # ClusterSharding.scala 766-794: the stores of the coordinator and of the region's
-        # shards, when remember entities is on
-        provider = (
-            _remember_entities_provider(name, settings, self._replicator)
-            if settings.remember_entities
-            else None
-        )
-        progress = _ExitingProgress()
-        region = self._parent.spawn_child(
-            region_behavior(entity, settings, progress, provider), name, None
-        )
+            region = parent.spawn_child(
+                region_behavior(entity, settings, progress, None, proxy=True),
+                region_name,
+                None,
+            )
         CoordinatedShutdown(self.system).add_task(
             "cluster-sharding-shutdown-region",
             f"region-shutdown-{name}",
-            progress.task(Cluster(self.system), region.ref),
+            progress.task(cluster, region.ref),
         )
+        self._regions[name] = region.ref
+        self._entities[name] = entity
+        return region.ref
+
+    def _replicator(
+        self, name: str, role: str | None, settings: ClusterShardingSettings
+    ) -> ActorRef[Replicator.Command]:
+        """ClusterSharding.scala 731-760: one Replicator per role, ``replicator`` for none and
+        ``<url-encoded role>Replicator`` for a role, with the settings of the first ``init``
+        that needs it."""
+        assert self._parent is not None
+        wanted = settings.effective_replicator_settings(Cluster(self.system).settings, role)
+        existing = self._replicators.get(role)
+        if existing is not None:
+            if wanted != self._replicator_settings[role]:
+                self._parent.log.warning(
+                    "Entity type [%s] has other distributed_data settings than the first init; "
+                    "sharding's Replicator [%s] keeps the first's",
+                    name,
+                    existing.path,
+                )
+            return existing
+        ref = self._parent.spawn_child(
+            Replicator.behavior(wanted), _replicator_name(role), None
+        ).ref
+        self._replicators[role] = ref
+        self._replicator_settings[role] = wanted
+        return ref
+
+    def _start_coordinator(
+        self,
+        name: str,
+        settings: ClusterShardingSettings,
+        provider: DDataRememberEntitiesProvider | None,
+    ) -> None:
+        """startCoordinatorIfNeeded (796-838): the coordinator under the on-stop backoff
+        supervisor, as the singleton of the coordinator's role, on that role's Replicator."""
+        role = settings.coordinator_singleton_role
+        replicator = self._replicator(name, role, settings)
         supervised = Behaviors.supervise(
-            coordinator_behavior(name, settings, self._replicator, provider)
+            coordinator_behavior(name, settings, replicator, provider)
         ).on_failure(SupervisorStrategy.restart())
         # ClusterSharding.scala 816-834: Pekko's BackoffOpts.onStop(...).withFinalStopMessage(_ ==
         # Terminate), with the coordinator as its child "coordinator". Its default decider
@@ -197,19 +266,15 @@ class ClusterSharding:
             0.2,
             lambda m: isinstance(m, _Terminate),
         )
-        coordinator = SingletonActor(singleton, f"{name}Coordinator").with_stop_message(
-            _Terminate()
+        base = settings.coordinator_singleton_settings or ClusterSingletonSettings()
+        # Pekko's withRole(coordinatorSingletonRole) on the singleton settings (831)
+        singleton_settings = base.with_role(role) if role is not None else base.with_no_role()
+        coordinator = (
+            SingletonActor(singleton, f"{name}Coordinator")
+            .with_stop_message(_Terminate())
+            .with_settings(singleton_settings)
         )
-        if settings.coordinator_singleton_settings is not None:
-            # Pekko's ClusterSharding overrides the role with sharding's own
-            # (coordinatorSingletonRole); PR 3 sets it here, until then none
-            coordinator = coordinator.with_settings(
-                settings.coordinator_singleton_settings.with_no_role()
-            )
         ClusterSingleton(self.system)._init_manager(coordinator)  # pyright: ignore[reportPrivateUsage]
-        self._regions[name] = region.ref
-        self._entities[name] = entity
-        return region.ref
 
     def entity_ref_for[M](self, key: EntityTypeKey[M], entity_id: str) -> EntityRef[M]:
         region = self._regions.get(key.name)

@@ -125,7 +125,10 @@ async def test_a_replicator_spawned_without_its_role_stops():
         assert any("doesn't have all the roles [backend]" in r.getMessage() for r in errors)
 
 
-def test_the_receptionist_and_sharding_replicators_have_no_role():
+def test_the_receptionist_and_sharding_replicators_ignore_the_configured_roles():
+    """Sharding's Replicator takes its data center's role and sharding's own role
+    (ClusterSharding.scala 739-742), never ``distributed_data.roles``."""
     cs = ClusterSettings(distributed_data=ReplicatorSettings(roles=BACKEND))
     assert ClusterReceptionistSettings().effective_replicator_settings(cs).roles == frozenset()
-    assert ClusterShardingSettings().effective_replicator_settings(cs).roles == frozenset()
+    sharding = ClusterShardingSettings().effective_replicator_settings(cs, None)
+    assert sharding.roles == frozenset({"dc-default"})

@@ -14,6 +14,7 @@ from ...context import ActorContext
 from ...ref import ActorRef
 from ...signals import PostStop, Signal
 from ...supervision import SupervisorStrategy
+from .message_extractor import HashCodeMessageExtractor
 from .shard import (
     ClusterShardingSettings,
     ClusterShardingStats,
@@ -34,7 +35,6 @@ from .shard import (
     region_state_query,
     region_stats_query,
     shard_behavior,
-    shard_id_of,
 )
 from .passivation_settings import NoPassivationStrategy
 from .remember_entities import DDataRememberEntitiesProvider
@@ -69,6 +69,7 @@ from .coordinator import (
     ShardStarted,
     by_age,
     _is_at,  # pyright: ignore[reportPrivateUsage]
+    StopShards,
 )
 from ..singleton import _manager_name  # pyright: ignore[reportPrivateUsage]
 
@@ -155,6 +156,9 @@ def region_behavior(
         graceful_shutdown_in_progress = False
         preparing_for_shutdown = False
         passivation_strategy = settings.passivation_strategy
+        extractor = entity.message_extractor or HashCodeMessageExtractor[Any](
+            settings.number_of_shards
+        )
         cluster.subscriptions.tell(ClusterSubscribe(ctx.self, MemberEvent))
         ctx.timers.start_timer_with_fixed_delay("retry", _Retry(), settings.retry_interval)
         # When rememberEntities is enabled, create a manager to throttle entity starting across
@@ -320,7 +324,7 @@ def region_behavior(
 
         def deliver(envelope: ShardingEnvelope[Any] | _StartEntity) -> None:
             """ShardRegion.scala 1281-1329, for an envelope or a ``_StartEntity``."""
-            shard = shard_id_of(envelope.entity_id, settings.number_of_shards)
+            shard = extractor.shard_id(envelope.entity_id)
             home = region_by_shard.get(shard)
             if home is None:
                 # as Pekko's deliverMessage: ask on a shard's first message, even one the full
@@ -343,9 +347,10 @@ def region_behavior(
                 home.tell(envelope)
 
         def deliver_start_entity(msg: _StartEntity) -> None:
-            """ShardRegion.scala 1266-1276. Pekko catches the MatchError of a shard id extractor
-            that does not handle ``StartEntity``; ohra's shard id is always ``shard_id_of``, so
-            this is a plain delivery."""
+            """ShardRegion.scala 1266-1276. Pekko catches the MatchError of a classic shard id
+            extractor that does not handle ``StartEntity``; Pekko Typed's ExtractorAdapter
+            handles it for every extractor, as ohra's region does, so this is a plain
+            delivery."""
             deliver(msg)
 
         def restart_shard(msg: _RestartShard) -> None:
@@ -640,6 +645,20 @@ def region_behavior(
                     deliver_start_entity(msg)
                 case SetActiveEntityLimit():
                     deliver_to_all_shards(msg)
+                case StopShards():
+                    # deliverCoordinatorCommand (962-964)
+                    if coordinator is not None:
+                        coordinator.tell(msg)
+                case _ if entity.message_extractor is not None:
+                    # Pekko Typed's ExtractorAdapter: a message of the extractor's own, which
+                    # goes on as the envelope of its entity id and unwrapped message
+                    envelope = ShardingEnvelope(
+                        extractor.entity_id(msg), extractor.unwrap_message(msg)
+                    )
+                    if not envelope.entity_id:
+                        ctx.system.dead_letter(envelope.message, ctx.self)
+                    else:
+                        deliver(envelope)
                 case _:
                     pass
             return Behaviors.stopped() if try_complete_graceful_shutdown() else Behaviors.same

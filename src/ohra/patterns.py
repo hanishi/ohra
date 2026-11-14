@@ -1,4 +1,4 @@
-"""Patterns built on the core: ask, batching, SpawnProtocol."""
+"""Patterns built on the core: ask, ask_with_status and StatusReply, batching, SpawnProtocol."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ import inspect
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Never, Protocol, cast, final
 
 from .behavior import Behavior, Behaviors, MaybeAwaitable
 from .mailbox import MailboxSelector
 from .ref import ActorRef, PromiseRef
+from .remote.serialization import Serialization, transient
+from .result import Failure, Success, Try
 from .scheduler import EventLoopScheduler, Scheduler
 from .signals import PostStop, Signal
 
@@ -78,6 +80,128 @@ def start_ask[Res](
         fut.cancel()
         raise
     return fut
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Done:
+    """Pekko's ``Done``: a completion, or an acknowledgement, that carries no value."""
+
+    def __repr__(self) -> str:
+        return "DONE"
+
+
+DONE: Final = Done()
+
+
+@dataclass(frozen=True)
+class StatusReply[T]:
+    """Pekko's ``StatusReply``: a reply that is a success value or an error, for a request that
+    can be denied. Build it with ``success``, ``error``, ``from_try`` or ``ACK``; ``value`` gives
+    the value or raises the error.
+
+    An error made from a text holds ``ErrorMessage(text)``. One made from an exception keeps the
+    exception on this node; on the wire only its message goes, so it arrives as an
+    ``ErrorMessage``, as Pekko serializes no arbitrary exception."""
+
+    success_value: T | None = None
+    error_message: str | None = None
+    cause: Exception | None = transient()
+
+    ACK: ClassVar[StatusReply[Done]]
+
+    class ErrorMessage(Exception):  # noqa: N818 (Pekko's name)
+        """Pekko's ``StatusReply.ErrorMessage``: the error of a reply made from a text."""
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, StatusReply.ErrorMessage) and other.args == self.args
+
+        def __hash__(self) -> int:
+            return hash(self.args)
+
+    @staticmethod
+    def success[V](value: V) -> StatusReply[V]:
+        return StatusReply(value)
+
+    @staticmethod
+    def error(error: str | Exception) -> StatusReply[Never]:
+        if isinstance(error, str):
+            return StatusReply(error_message=error)
+        return StatusReply(error_message=str(error), cause=error)
+
+    @staticmethod
+    def from_try[V](status: Try[V]) -> StatusReply[V]:
+        """A success, or an error with the exception's message, or its class name when it has
+        none: the exception itself is not kept."""
+        match status:
+            case Success(value):
+                return StatusReply(value)
+            case Failure(e):
+                return StatusReply(error_message=str(e) or type(e).__name__)
+
+    @staticmethod
+    def from_try_keep_exception[V](status: Try[V]) -> StatusReply[V]:
+        match status:
+            case Success(value):
+                return StatusReply(value)
+            case Failure(e):
+                return StatusReply.error(e)
+
+    @property
+    def is_success(self) -> bool:
+        return self.error_message is None
+
+    @property
+    def is_error(self) -> bool:
+        return self.error_message is not None
+
+    @property
+    def value(self) -> T:
+        """The success value; for an error, raises it."""
+        if self.error_message is not None:
+            raise self.exception
+        return cast(T, self.success_value)
+
+    @property
+    def exception(self) -> Exception:
+        """The error: the exception it was made from on this node, else ``ErrorMessage``."""
+        if self.error_message is None:
+            raise ValueError("Expected reply to be a failure, but was a success")
+        return self.cause or StatusReply.ErrorMessage(self.error_message)
+
+    def __str__(self) -> str:
+        if self.error_message is None:
+            return f"Success({self.success_value})"
+        return f"Error({self.error_message})"
+
+
+StatusReply.ACK = StatusReply.success(DONE)
+# under ohra. names, leaving the plain ones to the user's own messages
+Serialization.register(Done, "ohra.Done")
+Serialization.register(StatusReply, "ohra.StatusReply")
+
+
+def flatten_status(reply: object) -> Any:
+    """Pekko's ``flattenStatusFuture`` on one reply: the success value, or raises the error."""
+    match reply:
+        case StatusReply() if reply.is_success:
+            return cast(StatusReply[Any], reply).success_value
+        case StatusReply():
+            raise cast(StatusReply[Any], reply).exception
+        case _:
+            raise ValueError(f"Unexpected status reply success value: {reply!r}")
+
+
+async def ask_with_status[Res](
+    target: ActorRef[Any],
+    make: Callable[[ActorRef[StatusReply[Res]]], Replyable[StatusReply[Res]]],
+    timeout: float,
+    *,
+    scheduler: Scheduler | None = None,
+) -> Res:
+    """Pekko's ``askWithStatus``: ``ask`` for a ``StatusReply``, returning its value or raising
+    its error. A reply that is not a ``StatusReply`` raises ``ValueError``."""
+    return cast(Res, flatten_status(await ask(target, make, timeout, scheduler=scheduler)))
 
 
 class _Flush:

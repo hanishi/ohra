@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from ohra.cluster.sharding import ShardStopped
 from ohra import (
     ActorContext,
     ActorRef,
@@ -19,6 +20,7 @@ from ohra import (
     RemoteRef,
     ShardingEnvelope,
     StartEntity,
+    StopShards,
     ActorSystem,
     Behavior,
     Behaviors,
@@ -36,6 +38,8 @@ from ohra import (
     StashBuffer,
     TimerScheduler,
     UniqueAddress,
+    StatusReply,
+    ask_with_status,
     batching,
 )
 from ohra.stream import (
@@ -160,6 +164,7 @@ def cluster_sharding_region_takes_the_region_messages(
     system: ActorSystem[Any],
     stats: ActorRef[ShardRegionStats],
     cluster: ActorRef[ClusterShardingStats],
+    stopped: ActorRef[ShardStopped],
 ) -> None:
     key = EntityTypeKey[Ping]("Ping")
     region = ClusterSharding(system).init(Entity(key, lambda _e: _b))
@@ -169,7 +174,31 @@ def cluster_sharding_region_takes_the_region_messages(
     region.tell(SetActiveEntityLimit(10))
     region.tell(StartEntity("a"))
     region.tell(ShardingEnvelope("a", "not a ping"))  # type: ignore[arg-type]
+    region.tell(StopShards(frozenset({"1"}), stopped))
+    region.tell(StopShards(frozenset({"1"}), stats))  # type: ignore[arg-type]
     del envelopes
+
+
+def extracted_region_takes_its_messages(system: ActorSystem[Any], ping: Ping) -> None:
+    from ohra import ExtractedEntity, ShardingMessageExtractor
+
+    def ping_id(msg: Ping) -> str:
+        return "a"
+
+    def str_id(msg: str) -> str:
+        return msg
+
+    key = EntityTypeKey[Ping]("Ping")
+    extractor = ShardingMessageExtractor.no_envelope(10, None, ping_id)
+    entity = Entity(key, lambda _e: _b).with_message_extractor(extractor).with_role("r")
+    kept: ExtractedEntity[Ping, Ping] = entity
+    region = ClusterSharding(system).init(entity)
+    region.tell(ping)
+    region.tell(StartEntity("a"))
+    region.tell("not a ping")  # type: ignore[arg-type]
+    str_extractor = ShardingMessageExtractor.no_envelope(10, None, str_id)
+    Entity(key, lambda _e: _b).with_message_extractor(str_extractor)  # type: ignore[arg-type]
+    del kept
 
 
 def persistence_is_typed() -> None:
@@ -277,3 +306,20 @@ def check_replicator(rep: ActorRef[Replicator.Command], me: ActorRef[Any]) -> No
 def check_get_success(success: Replicator.GetSuccess[GCounter]) -> None:
     data: ORSet[str] = success.data  # type: ignore[assignment]
     del data
+
+
+@dataclass(frozen=True)
+class StatusRequest:
+    reply_to: ActorRef[StatusReply[str]]
+
+
+async def ask_with_status_is_typed(ref: ActorRef[StatusRequest]) -> None:
+    ok: str = await ask_with_status(ref, StatusRequest, 1)
+    wrong: int = await ask_with_status(ref, StatusRequest, 1)  # type: ignore[assignment]
+    error_reply: StatusReply[str] = StatusReply.error("no")
+    ref_reply: ActorRef[StatusReply[str]] = ref_of_status()
+    ref_reply.tell(StatusReply.success(1))  # type: ignore[arg-type]
+    print(ok, wrong, error_reply)
+
+
+def ref_of_status() -> ActorRef[StatusReply[str]]: ...

@@ -13,7 +13,6 @@ from ..cluster.sharding import (
     ClusterSharding,
     CurrentShardRegionState,
     GetShardRegionState,
-    shard_id_of,
 )
 from ..remote import Address
 from ..patterns import AskTimeoutError, ask
@@ -102,10 +101,8 @@ def register_cluster_routes(management: Management, system: ActorSystem[Any]) ->
             return json_response(
                 500, {"message": f"Shard region [{type_name}] did not answer within 5 s"}
             )
-        counts = Counter(
-            shard_id_of(entity_id, entity.effective_settings.number_of_shards)
-            for entity_id in state.entity_ids
-        )
+        extractor = entity.extractor
+        counts = Counter(extractor.shard_id(entity_id) for entity_id in state.entity_ids)
         return json_response(
             200,
             {

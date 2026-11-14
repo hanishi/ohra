@@ -244,6 +244,36 @@ def client(fetcher: ActorRef[Fetch]) -> Behavior[Fetched | str]:
 
 The `make` argument is anything that turns a reply ref into the request: a lambda, or the message class itself when `reply_to` is its only field. Pyright infers the reply type from the request's `reply_to` field.
 
+A request that can be denied replies with a `StatusReply`, Pekko's: `StatusReply.success(value)`, `StatusReply.error("why")`, or `StatusReply.ACK`, a success of `DONE`. `ask_with_status` returns the value or raises the error, `StatusReply.ErrorMessage` for one made from a text, and `ctx.ask_with_status(target, make, adapt, timeout)` hands `adapt` a `Success` of the value or a `Failure` of the error.
+
+```python
+from ohra import DONE, Done, StatusReply, ask_with_status
+
+
+@dataclass(frozen=True)
+class Withdraw:
+    amount: int
+    reply_to: ActorRef[StatusReply[Done]]
+
+
+def account(balance: int) -> Behavior[Withdraw]:
+    @Behaviors.receive_message
+    def on_message(msg: Withdraw) -> Behavior[Withdraw]:
+        if msg.amount > balance:
+            msg.reply_to.tell(StatusReply.error("insufficient funds"))
+            return Behaviors.same
+        msg.reply_to.tell(StatusReply.ACK)
+        return account(balance - msg.amount)
+
+    return on_message
+
+
+async def withdraw(acct: ActorRef[Withdraw]) -> None:
+    assert await ask_with_status(acct, lambda r: Withdraw(10, r), timeout=1) == DONE
+```
+
+An error made from an exception keeps the exception on its own node, but only its message crosses the wire: the other node gets a `StatusReply.ErrorMessage`.
+
 `ctx.pipe_to_self(awaitable, adapt)` does the same for any awaitable, and `ctx.message_adapter(f)` gives you a ref of another type that translates into your own protocol. Leave `adapt` out of `ctx.ask` or `ctx.pipe_to_self` and either one becomes a [decorator](#decorators) for it.
 
 ### Children, stopping, and DeathWatch

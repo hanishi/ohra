@@ -40,6 +40,7 @@ from ohra.cluster.sharding.coordinator import (
     ShardHome,
     ShardHomeAllocated,
     ShardRegionRegistered,
+    StopShards,
     _Terminate,  # pyright: ignore[reportPrivateUsage]
     coordinator_behavior,
 )
@@ -584,3 +585,19 @@ async def test_terminate_stops_the_supervised_coordinator_for_good():
         await replicator.expect_terminated(singleton, 3)
         assert node.manual is not None
         await node.manual.expect_no_message_for(REMEMBER.coordinator_failure_backoff * 6, store)
+
+
+async def test_stop_shards_with_remember_entities_logs_an_error(caplog: pytest.LogCaptureFixture):
+    """ShardCoordinator.scala 1113-1117: StopShards cannot be combined with remember entities."""
+    async with started() as h:
+        await to_active(h)
+        region, stopper = h.node.probe(), h.node.probe()
+        await registered(h.coordinator, h.replicator, region)
+        with caplog.at_level(logging.ERROR, logger="ohra.actor"):
+            h.coordinator.tell(StopShards(frozenset({"1"}), stopper.ref))
+            await settle(h.node)
+        text = (
+            "Stop shards cannot be combined with remember entities, ignoring command to stop [1]"
+        )
+        assert logged(caplog, logging.ERROR, text) == 1
+        await stopper.expect_no_message(0.1)

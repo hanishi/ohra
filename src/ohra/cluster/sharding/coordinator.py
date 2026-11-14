@@ -5,6 +5,7 @@ Pekko's DDataShardCoordinator."""
 
 from __future__ import annotations
 
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
@@ -363,6 +364,16 @@ class GracefulShutdownReq:
 
 
 @dataclass(frozen=True)
+class StopShards:
+    """ShardCoordinator.scala 432: stop the shards; ``reply_to`` gets a ``ShardStopped`` for each
+    once it has stopped. Sent to a region, which passes it to its coordinator. It cannot be
+    combined with remember entities."""
+
+    shards: frozenset[str]
+    reply_to: ActorRef[ShardStopped]
+
+
+@dataclass(frozen=True)
 class CoordinatorStopped:
     """Sent by a stopping coordinator to its regions, in place of their remote DeathWatch of it."""
 
@@ -390,6 +401,7 @@ for _cls in (
     BeginHandOff,
     BeginHandOffAck,
     GracefulShutdownReq,
+    StopShards,
     CoordinatorStopped,
     RegionStopped,
 ):
@@ -448,6 +460,13 @@ class _Terminate:
 
 @dataclass(frozen=True)
 class _HandOffTimeout: ...
+
+
+@dataclass(frozen=True)
+class _StopShardTimeout:
+    """ShardCoordinator.scala 1147: the timeout of the ``StopShards`` request ``request_id``."""
+
+    request_id: str
 
 
 @dataclass(frozen=True)
@@ -625,6 +644,8 @@ def coordinator_behavior(
             region_termination_in_progress: set[str] = set()
             rebalance_in_progress: dict[str, list[ActorRef[Any]]] = {}
             rebalance_workers: dict[str, ActorRef[Any]] = {}
+            # waitingForShardsToStop (700): each StopShards requester and its request id
+            waiting_for_shards_to_stop: dict[str, set[tuple[ActorRef[ShardStopped], str]]] = {}
             waiting_for_local_region_to_terminate = False
             stop_now = False
             preparing_for_shutdown = False
@@ -1247,7 +1268,7 @@ def coordinator_behavior(
 
             def active() -> Behavior[Any]:
                 """active (740-967), with receiveLateRememberedEntities (1875-1889) and the
-                store's end (1950-1954). ``StopShards`` (1118) has no ohra counterpart."""
+                store's end (1950-1954)."""
 
                 def on_message(_ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                     nonlocal preparing_for_shutdown
@@ -1279,6 +1300,10 @@ def coordinator_behavior(
                             pass
                         case _RebalanceTick() | _RebalanceDone() | GracefulShutdownReq():
                             on_rebalance_message(msg)
+                        case StopShards(shards, reply_to):
+                            stop_shards(shards, reply_to)
+                        case _StopShardTimeout(request_id):
+                            stop_shard_timeout(request_id)
                         case RegionStopped(path):
                             # receiveTerminated (1093-1103): a region, else a proxy
                             if path in state.region_proxies:
@@ -1608,6 +1633,71 @@ def coordinator_behavior(
                     case _:
                         pass
 
+            def stop_shards(shards: frozenset[str], reply_to: ActorRef[ShardStopped]) -> None:
+                """active's StopShards (1112-1145)."""
+                if settings.remember_entities:
+                    log.error(
+                        "%s: Stop shards cannot be combined with remember entities, ignoring "
+                        "command to stop [%s]",
+                        type_name,
+                        ", ".join(sorted(shards)),
+                    )
+                elif state.regions and not preparing_for_shutdown:
+                    request_id = uuid.uuid4().hex
+                    running = sorted(s for s in shards if s in state.shards)
+                    for shard in sorted(shards - set(running)):
+                        reply_to.tell(ShardStopped(shard))
+                    if running:
+                        for shard in running:
+                            waiting_for_shards_to_stop.setdefault(shard, set()).add(
+                                (reply_to, request_id)
+                            )
+                        # no need to stop already rebalancing
+                        to_stop = [s for s in running if s not in rebalance_in_progress]
+                        log.info(
+                            "%s: Explicitly stopping shards [%s] (request id [%s])",
+                            type_name,
+                            ", ".join(to_stop),
+                            request_id,
+                        )
+                        per_region: dict[str, list[str]] = {}
+                        for shard in to_stop:
+                            per_region.setdefault(state.shards[shard], []).append(shard)
+                        for region, region_shards in per_region.items():
+                            shutdown_shards(region, tuple(region_shards))
+                        timeout = _StopShardTimeout(request_id)
+                        ctx.timers.start_single_timer(timeout, timeout, settings.handoff_timeout)
+                else:
+                    log.warning(
+                        "%s: Explicit stop shards of shards [%s] ignored (no known regions or "
+                        "sharding shutting down)",
+                        type_name,
+                        ", ".join(sorted(shards)),
+                    )
+
+            def stop_shard_timeout(request_id: str) -> None:
+                """active's StopShardTimeout (1147-1163)."""
+                timed_out = sorted(
+                    shard
+                    for shard, waiting in waiting_for_shards_to_stop.items()
+                    if any(r == request_id for _, r in waiting)
+                )
+                if timed_out:
+                    log.info(
+                        "%s: Stop shard request [%s] timed out for shards [%s]",
+                        type_name,
+                        request_id,
+                        ", ".join(timed_out),
+                    )
+                    for shard in timed_out:
+                        waiting = {
+                            w for w in waiting_for_shards_to_stop[shard] if w[1] != request_id
+                        }
+                        if waiting:
+                            waiting_for_shards_to_stop[shard] = waiting
+                        else:
+                            del waiting_for_shards_to_stop[shard]
+
             def continue_rebalance(shards: frozenset[str]) -> None:
                 if shards:
                     log.info(
@@ -1621,6 +1711,14 @@ def coordinator_behavior(
                         start_shard_rebalance(shard, state.shards[shard], is_rebalance=True)
 
             def shutdown_shards(region: str, shards: tuple[str, ...]) -> None:
+                """shutdownShards (1367-1377)."""
+                if shards:
+                    log.info(
+                        "%s: Starting shutting down shards [%s] due to region shutting down or "
+                        "explicit stopping of shards.",
+                        type_name,
+                        ",".join(shards),
+                    )
                 for shard in shards:
                     if shard not in rebalance_in_progress:
                         start_shard_rebalance(shard, region, is_rebalance=False)
@@ -1649,6 +1747,12 @@ def coordinator_behavior(
                 """active's RebalanceDone (849-890)."""
                 rebalance_workers.pop(shard, None)
                 if ok:
+                    log.debug(
+                        "%s: Shard [%s] deallocation completed successfully.", type_name, shard
+                    )
+                    # ack to external trigger of rebalance/stop
+                    for reply_to, _ in waiting_for_shards_to_stop.pop(shard, set()):
+                        reply_to.tell(ShardStopped(shard))
                     # The shard could have been removed by ShardRegionTerminated
                     if shard in state.shards:
 

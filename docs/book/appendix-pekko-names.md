@@ -6,6 +6,8 @@
 | `ActorRef[-T]` | `ActorRef[T]`, contravariant, enforced by pyright strict |
 | `sealed trait` + case classes | `type Cmd = A \| B` + frozen dataclasses + `match` |
 | `ask`, `ctx.ask` | `await ask(ref, make, timeout)`, `ctx.ask(ref, make, adapt, timeout)`, or `@ctx.ask(ref, make, timeout=...)` over `adapt` |
+| `askWithStatus`, `ctx.askWithStatus` | `await ask_with_status(ref, make, timeout)`, `ctx.ask_with_status(ref, make, adapt, timeout)` |
+| `StatusReply.success / error / Ack / fromTry / fromTryKeepException`, `StatusReply.ErrorMessage`, `isSuccess`, `getValue`, `getError` | `StatusReply.success / error / ACK / from_try / from_try_keep_exception`, `StatusReply.ErrorMessage`, `is_success`, `value`, `exception` |
 | `ctx.pipeToSelf(future)(Try => T)` | `ctx.pipe_to_self(awaitable, adapt)` with `Success` / `Failure`, or `@ctx.pipe_to_self(awaitable)` over `adapt` |
 | `ctx.messageAdapter` | `ctx.message_adapter` |
 | `spawn`, `spawnAnonymous`, `ctx.stop(child)` | same |
@@ -92,6 +94,8 @@
 | `pekko.cluster.sharding.remember-entities-store = ddata` | `ClusterShardingSettings.remember_entities_store`, which is only `"ddata"` |
 | `entity-recovery-strategy`, `entity-recovery-constant-rate-strategy.frequency`, `number-of-entities` | `ClusterShardingSettings.entity_recovery_strategy` (`"all"` or `"constant"`), `entity_recovery_constant_rate_frequency`, `entity_recovery_constant_rate_number_of_entities` |
 | `ShardRegion.StartEntity(entityId)`; typed `ClusterSharding.StartEntity(entityId)` | `StartEntity(entity_id)`, sent to the region; `ShardRegion.StartEntityAck` is internal |
+| `ShardCoordinator.Internal.StopShards(shards)`, acked with `ShardStopped(shard)` to the sender | `StopShards(shards, reply_to)`, sent to the region, acked with `ShardStopped(shard)` to `reply_to` |
+| typed `ShardingMessageExtractor`, `HashCodeMessageExtractor`, `HashCodeNoEnvelopeMessageExtractor`, `ShardingMessageExtractor.noEnvelope(numberOfShards, stopMessage)(extractEntityId)`; `Entity.withMessageExtractor`, `Entity[M, E]` | the same names; `ShardingMessageExtractor.no_envelope(number_of_shards, stop_message, extract_entity_id)`; `Entity.with_message_extractor`, which returns `ExtractedEntity[M, E]` |
 | `RememberEntityStarterManager`, `RememberEntityStarter` (internal) | internal, in `remember_entity_starter.py`: `remember_entity_starter_manager`, `remember_entity_starter` |
 | `DistributedData(system).replicator`, `selfUniqueAddress`, `isTerminated` | `DistributedData(system).replicator`, `self_unique_address`, `is_terminated`; raises `RuntimeError` on a system without `cluster=` |
 | `DistributedData.withReplicatorMessageAdapter[Command, A](factory)` | `DistributedData.with_replicator_message_adapter(factory, unexpected_ask_timeout=20.0)` |

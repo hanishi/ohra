@@ -22,7 +22,7 @@ import sys
 import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast, overload
 from urllib.parse import quote
 
 from ...behavior import Behavior, Behaviors, StashBuffer
@@ -70,6 +70,7 @@ from .remember_entities import DDataRememberEntitiesProvider, RememberEntitiesSh
 
 if TYPE_CHECKING:
     from ..core import Cluster, ClusterSettings
+    from .message_extractor import ShardingMessageExtractor
     from ..singleton import ClusterSingletonSettings
 
 
@@ -395,22 +396,24 @@ class Entity[T]:
     settings: ClusterShardingSettings | None = None
     role: str | None = None
     """Wins over ``settings.role`` (Pekko Typed's ``settingsWithRole``)."""
+    message_extractor: ShardingMessageExtractor[Any, T] | None = None
+    """None is ``HashCodeMessageExtractor(number_of_shards)``: see ``with_message_extractor``."""
 
-    def with_buffer_size(self, size: int) -> Entity[T]:
+    def with_buffer_size(self, size: int) -> Self:
         """Pekko's buffer-size: caps the messages a shard buffers for its passivating entities,
         in total across them, and the messages the region buffers. The shard drops what is
         beyond it."""
         return replace(self, buffer_size=size)
 
-    def with_stop_message(self, msg: T) -> Entity[T]:
+    def with_stop_message(self, msg: T) -> Self:
         """Passivation delivers msg and lets the entity stop itself, instead of stopping it
         outright."""
         return replace(self, stop_message=msg)
 
-    def with_settings(self, settings: ClusterShardingSettings) -> Entity[T]:
+    def with_settings(self, settings: ClusterShardingSettings) -> Self:
         return replace(self, settings=settings)
 
-    def with_role(self, role: str) -> Entity[T]:
+    def with_role(self, role: str) -> Self:
         """The entities run only on members with ``role``; others get a proxy."""
         return replace(self, role=role)
 
@@ -424,6 +427,41 @@ class Entity[T]:
         if self.role is not None:
             settings = settings.with_role(self.role)
         return settings
+
+    def with_message_extractor[E](
+        self, extractor: ShardingMessageExtractor[E, T]
+    ) -> ExtractedEntity[T, E]:
+        """Pekko Typed's ``withMessageExtractor``: the region takes the messages ``E`` and the
+        extractor gives their entity ids, the shard of each entity id and the entity's message.
+        ``number_of_shards`` of the settings is then only what the default extractor uses."""
+        return ExtractedEntity(
+            self.type_key,
+            self.create_behavior,
+            self.stop_message,
+            self.buffer_size,
+            self.settings,
+            self.role,
+            extractor,
+        )
+
+    @property
+    def extractor(self) -> ShardingMessageExtractor[Any, T]:
+        """The message extractor, or the default for ``number_of_shards`` (Pekko Typed's
+        ``messageExtractor.getOrElse(HashCodeMessageExtractor(numberOfShards))``)."""
+        if self.message_extractor is not None:
+            return self.message_extractor
+        from .message_extractor import HashCodeMessageExtractor
+
+        return HashCodeMessageExtractor[T](self.effective_settings.number_of_shards)
+
+
+@dataclass(frozen=True)
+class ExtractedEntity[T, E](Entity[T]):
+    """An ``Entity`` with a message extractor of the messages ``E``, from
+    ``Entity.with_message_extractor``. It is a class of its own so that ``ClusterSharding.init``
+    can type the region as taking ``E``, as Pekko's ``Entity[M, E]`` does."""
+
+    message_extractor: ShardingMessageExtractor[E, T] | None = None
 
 
 class EntityRef[T](ActorRef[T]):
@@ -1838,12 +1876,22 @@ def _log_passivation_strategy(
 
 
 class Sharding:
+    @overload
+    @staticmethod
+    def init[T, E](
+        entity: ExtractedEntity[T, E],
+    ) -> Behavior[
+        E | ShardingEnvelope[T] | GetShardRegionState | GetShardRegionStats | SetActiveEntityLimit
+    ]: ...
+    @overload
     @staticmethod
     def init[T](
         entity: Entity[T],
     ) -> Behavior[
         ShardingEnvelope[T] | GetShardRegionState | GetShardRegionStats | SetActiveEntityLimit
-    ]:
+    ]: ...
+    @staticmethod
+    def init[T](entity: Entity[T]) -> Behavior[Any]:
         """The shard region behavior for one entity type, inside one process. Spawn it; message it
         through entity refs. Each shard id gets a child Shard actor on first use. As Pekko's
         region, it passes ``SetActiveEntityLimit`` to every shard, and tells every shard the
@@ -1857,6 +1905,7 @@ class Sharding:
                 "Replicator to remember entities in"
             )
         strategy = settings.passivation_strategy
+        extractor = entity.extractor
 
         @Behaviors.setup
         def setup(ctx: ActorContext[_RegionCmd[T]]) -> Behavior[_RegionCmd[T]]:
@@ -1872,7 +1921,7 @@ class Sharding:
                         shard.tell(update)
 
             def shard_for(entity_id: str) -> ActorRef[_ShardCmd[T]]:
-                shard_id = shard_id_of(entity_id, settings.number_of_shards)
+                shard_id = extractor.shard_id(entity_id)
                 shard = shards.get(shard_id)
                 if shard is None:
                     shard = ctx.spawn(shard_behavior(entity, shard_id, ctx.self), shard_id)
@@ -1882,16 +1931,20 @@ class Sharding:
                     shards_updated()
                 return shard
 
+            def deliver(envelope: ShardingEnvelope[T]) -> None:
+                if not envelope.entity_id:
+                    ctx.log.warning("dropping message for empty entity id: %r", envelope.message)
+                    ctx.system.dead_letter(envelope.message, ctx.self)
+                else:
+                    shard_for(envelope.entity_id).tell(envelope)
+
             @Behaviors.receive
             def on_message(
                 _ctx: ActorContext[_RegionCmd[T]], msg: _RegionCmd[T]
             ) -> Behavior[_RegionCmd[T]]:
                 match msg:
-                    case ShardingEnvelope("", message):
-                        ctx.log.warning("dropping message for empty entity id: %r", message)
-                        ctx.system.dead_letter(message, ctx.self)
-                    case ShardingEnvelope(entity_id, _):
-                        shard_for(entity_id).tell(msg)
+                    case ShardingEnvelope():
+                        deliver(msg)
                     case ShardInitialized():
                         pass  # the shard stashes while it waits for its lease
                     case SetActiveEntityLimit():
@@ -1916,6 +1969,16 @@ class Sharding:
                                 settings.shard_region_query_timeout,
                             )
                         )
+                    case _ if entity.message_extractor is not None:
+                        # Pekko Typed's ExtractorAdapter: a message of the extractor's own
+                        message: Any = msg
+                        deliver(
+                            ShardingEnvelope(
+                                extractor.entity_id(message), extractor.unwrap_message(message)
+                            )
+                        )
+                    case _:
+                        pass
                 return Behaviors.same
 
             def on_signal(

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from .mailbox import MailboxSelector
-from .patterns import Replyable, start_ask
+from .patterns import Replyable, StatusReply, flatten_status, start_ask
 from .ref import ActorRef, FunctionRef
-from .result import Try
+from .result import Failure, Success, Try
 
 if TYPE_CHECKING:
     from .behavior import Behavior
@@ -115,6 +115,32 @@ class ActorContext[T]:
             return f
 
         return start
+
+    def ask_with_status[Res](
+        self,
+        target: ActorRef[Any],
+        make: Callable[[ActorRef[StatusReply[Res]]], Replyable[StatusReply[Res]]],
+        adapt: Callable[[Try[Res]], T],
+        timeout: float,
+    ) -> None:
+        """Pekko's ``ctx.askWithStatus``: ``ask`` for a ``StatusReply``; adapt gets the value as
+        a Success and the error, or the timeout, as a Failure."""
+
+        def flattened(result: Try[StatusReply[Res]]) -> T:
+            # ActorContextImpl.askWithStatus: the ask's own result, flattened in the adapter
+            match result:
+                case Success(reply):
+                    try:
+                        value = cast(Res, flatten_status(reply))
+                    except Exception as e:
+                        return adapt(Failure(e))
+                    return adapt(Success(value))
+                case Failure():
+                    return adapt(result)
+
+        self.pipe_to_self(
+            start_ask(target, make, timeout, scheduler=self._cell.system.scheduler), flattened
+        )
 
     def message_adapter[U](self, f: Callable[[U], T]) -> ActorRef[U]:
         """A ref that accepts U and delivers f(u) to this actor. f runs inside the actor. The actor

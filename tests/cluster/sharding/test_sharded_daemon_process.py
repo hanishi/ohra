@@ -13,13 +13,15 @@ Differences from the Scala:
   intervals as the multi-jvm spec's ``retry-interval = 0.2s`` does.
 - ``MyActor`` is ``my_actor``, and its ``Started`` and ``Stop`` are ``SdpStarted`` and ``SdpStop``.
 - ``ProcessActor`` tells ``SdpEvent`` to the snitch it is given, the ref a ``Receptionist.Find``
-  on its node returned, as ohra has no ``Routers.group``. ``SdpEvent`` names the node's port too.
+  on its node returned, as ohra has no ``Routers.group``. ``SdpEvent`` names the node's port and
+  the worker's ref too.
 - The last three tests are ohra's own: ``init`` twice, the workers and the coordinator moving off a
   leaving node (the multi-jvm spec's FIXME), and the sharding settings the daemon forces.
 """
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -76,6 +78,7 @@ class SdpEvent:
     id: int
     event: str
     port: int
+    self_ref: ActorRef[Any]
 
 
 SNITCH = ServiceKey[SdpEvent]("snitch")
@@ -107,14 +110,19 @@ def my_actor(n: int, probe: ActorRef[Any]) -> Behavior[SdpStop]:
 
 def process_actor(n: int, snitch: ActorRef[SdpEvent], port: int) -> Behavior[SdpStop]:
     """``ProcessActor``."""
-    snitch.tell(SdpEvent(n, "Started", port))
 
-    @Behaviors.receive_message
-    def receive(_msg: SdpStop) -> Behavior[SdpStop]:
-        snitch.tell(SdpEvent(n, "Stopped", port))
-        return Behaviors.stopped()
+    @Behaviors.setup
+    def setup(ctx: ActorContext[SdpStop]) -> Behavior[SdpStop]:
+        snitch.tell(SdpEvent(n, "Started", port, ctx.self))
 
-    return Behaviors.setup(lambda _ctx: receive)
+        @Behaviors.receive_message
+        def receive(_msg: SdpStop) -> Behavior[SdpStop]:
+            snitch.tell(SdpEvent(n, "Stopped", port, ctx.self))
+            return Behaviors.stopped()
+
+        return receive
+
+    return setup
 
 
 def port_of(system: ActorSystem[Any]) -> int:
@@ -223,7 +231,7 @@ async def test_init_actor_set():
         for system in systems:
             await init_processes(system, "the-fearless", 4, SDP_SETTINGS)
 
-        events = [await probe.expect_message_type(SdpEvent, max=5.0) for _ in range(4)]
+        events: list[SdpEvent] = await probe.receive_messages(4, max=5.0)
         assert all(e.event == "Started" for e in events)
         assert len({e.id for e in events}) == 4
 
@@ -261,21 +269,33 @@ async def test_workers_and_coordinator_move_when_the_oldest_node_leaves():
         on_first = {e.id for e in events if e.port == first_port}
         assert on_first  # or nothing has to move
         stopped: set[int] = set()
-        on_remaining = {e.id for e in events if e.port != first_port}
+        on_remaining = {e.id: e for e in events if e.port != first_port}
 
         def until_all_moved(e: SdpEvent) -> FishingOutcome:
             if e.event == "Stopped" and e.port == first_port:
                 stopped.add(e.id)
             elif e.event == "Started" and e.port != first_port:
-                on_remaining.add(e.id)
-            if stopped == on_first and on_remaining == set(range(4)):
+                on_remaining[e.id] = e
+            if stopped == on_first and on_remaining.keys() == set(range(4)):
                 return FishingOutcomes.complete()
             return FishingOutcomes.continue_()
 
-        # the first node is the oldest, so the coordinator moves too: no remembered entities, so
-        # only its keep-alive starts the stopped workers again
         Cluster(first).manager.tell(Leave(Cluster(first).self_address))
         await probe.fish_for_message(10.0, until_all_moved)
+
+        # the old coordinator may have restarted the workers before it handed over; once the
+        # first node is gone, a worker that stops is started again only by a coordinator on a
+        # remaining node
+        await asyncio.wait_for(first.when_terminated(), 10.0)
+        worker = on_remaining[min(on_first)]
+        worker.self_ref.tell(SdpStop())
+
+        def restarted(e: SdpEvent) -> FishingOutcome:
+            if e.id == worker.id and e.event == "Started" and e.port != first_port:
+                return FishingOutcomes.complete()
+            return FishingOutcomes.continue_and_ignore()
+
+        await probe.fish_for_message(2 * settings.keep_alive_interval, restarted)
 
 
 # --- the settings --------------------------------------------------------------------------------

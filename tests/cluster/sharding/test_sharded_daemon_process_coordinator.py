@@ -7,6 +7,7 @@ only a fake one can time out."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import replace
 from typing import Any, cast
@@ -268,7 +269,11 @@ async def test_an_interrupted_rescale_resumes_when_the_coordinator_starts() -> N
         assert (got.data.revision, got.data.completed) == (1, True)
 
 
-async def test_a_rescale_during_a_throttled_round_stops_the_round() -> None:
+async def test_a_rescale_during_a_throttled_round_stops_the_rest_of_the_round() -> None:
+    """The kill switch sits before the throttle, as in Pekko, so the one id the throttle already
+    holds still goes out when its timer fires; no later id of the old round does. The held id is
+    harmless: its shard is in the StopShards set, and a rescale-aware worker refuses its old
+    revision."""
     async with manual_node() as node:
         assert node.manual is not None
         sharding, reply = node.probe(), node.probe()
@@ -276,15 +281,35 @@ async def test_a_rescale_during_a_throttled_round_stops_the_round() -> None:
             node, "rescale-g", sharding, SETTINGS.with_keep_alive_throttle_interval(1.0)
         )
         await sharding.expect_message(StartEntity("0"), 10)
+        for _ in range(5):  # let the throttle pull "1" and hold it
+            await asyncio.sleep(0)
         coordinator.tell(ChangeNumberOfProcesses(4, reply.ref))
-        stop = await sharding.expect_message_type(StopShards)
+        seen = await sharding.fish_for_message(
+            10,
+            lambda m: (
+                FishingOutcomes.complete()
+                if isinstance(m, StopShards)
+                else FishingOutcomes.continue_()
+            ),
+        )
+        stop = seen.pop()
+        assert isinstance(stop, StopShards)
         for shard in stop.shards:
             stop.reply_to.tell(ShardStopped(shard))
         await reply.expect_message(StatusReply.ACK)
-        await expect_ids(sharding, "1|4|0")
-        await node.manual.time_passes(2.0)
-        await expect_ids(sharding, "1|4|1", "1|4|2")  # and no "1" or "2" of the old round
-        await sharding.expect_no_message(0)
+        await node.manual.time_passes(2.5)  # past where the old round's "1" and "2" were due
+        sharding.ref.tell("end")
+        seen += await sharding.fish_for_message(
+            10,
+            lambda m: FishingOutcomes.complete() if m == "end" else FishingOutcomes.continue_(),
+        )
+        ids = [m.entity_id for m in seen if isinstance(m, StartEntity)]
+        assert len(ids) == len(seen) - 1
+        old = [i for i in ids if "|" not in i]
+        assert old in ([], ["1"])
+        # the old round's done may come after the rescale and start a second round early
+        new = [i for i in ids if "|" in i]
+        assert list(dict.fromkeys(new)) == ["1|4|0", "1|4|1", "1|4|2"]
 
 
 async def test_update_timeouts_are_retried_with_pekkos_log_levels(

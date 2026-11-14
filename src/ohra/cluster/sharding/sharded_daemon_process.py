@@ -150,6 +150,8 @@ class ChangeNumberOfProcesses:
 
 @dataclass(frozen=True)
 class GetNumberOfProcesses:
+    """Query the sharded daemon process for the current scale."""
+
     reply_to: ActorRef[NumberOfProcesses]
 
 
@@ -323,8 +325,9 @@ class ShardedDaemonProcess:
         settings: ShardedDaemonProcessSettings | None = None,
         stop_message: T | None = None,
     ) -> None:
-        """For a fixed set of processes. ``stop_message`` is what a process gets when its shard is
-        handed off, instead of being stopped outright."""
+        """Pekko's scaladsl ``init(name, numberOfInstances, behaviorFactory, settings,
+        stopMessage)``, for a fixed set of processes. ``stop_message`` is what a process gets when
+        its shard is handed off, instead of being stopped outright."""
         if number_of_instances < 1:
             raise ValueError(f"number_of_instances must be >= 1, got {number_of_instances}")
         self._init_with_context(

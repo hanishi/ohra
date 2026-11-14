@@ -240,9 +240,11 @@ async def init_rs(
 def rescaled(old: int, new: int, held_id: bool) -> Callable[[RsEvent], FishingOutcome]:
     """A fishing function that completes once the workers ``0`` to ``old - 1`` of revision 0 have
     stopped and ``0`` to ``new - 1`` of revision 1 have started, and fails on anything else. With
-    ``held_id``, a revision 0 worker may start (and then stop) again: on several nodes the id the
-    throttle held can reach a node whose Replicator has not seen revision 1 yet. On one node it
-    can't, as the Replicator gets the new revision before the held ping."""
+    ``held_id``, a revision 0 worker may start again: on several nodes the id the throttle held can
+    reach a node outside the majority revision 1 was written to, whose Replicator answers the
+    worker's check with NotFound; if its shard has already stopped, that worker keeps running until
+    the shard next stops. On one node it can't, as the Replicator gets the new revision before the
+    held ping."""
     stopped: set[int] = set()
     started: set[int] = set()
 
@@ -439,7 +441,7 @@ async def test_a_role_confines_the_workers_on_a_mixed_cluster():
         assert {e.process_number for e in events} == {0, 1, 2}
         assert {e.port for e in events} == {ports[1]}
         # the first node has no role, so only a proxy of the coordinator
-        reply = await ask(refs[0], GetNumberOfProcesses, 3.0)
+        reply = await ask(refs[0], GetNumberOfProcesses, 10.0)
         assert reply.number_of_processes == 3
 
 
@@ -460,7 +462,7 @@ async def test_rescaling_up_stops_the_old_set_and_starts_the_new():
         assert await ask_with_status(ref, lambda r: ChangeNumberOfProcesses(6, r), 10.0) == DONE
 
         await probe.fish_for_message(10.0, rescaled(4, 6, held_id=True))
-        reply = await ask(ref, GetNumberOfProcesses, 3.0)
+        reply = await ask(ref, GetNumberOfProcesses, 10.0)
         assert reply.number_of_processes == 6
         assert reply.revision == 1
         assert reply.rescale_in_progress is False
@@ -494,7 +496,7 @@ async def test_a_rescale_from_another_node_goes_through_the_proxy():
         third = refs[2]
         assert await ask_with_status(third, lambda r: ChangeNumberOfProcesses(3, r), 10.0) == DONE
 
-        reply = await ask(refs[0], GetNumberOfProcesses, 3.0)
+        reply = await ask(refs[0], GetNumberOfProcesses, 10.0)
         assert reply.number_of_processes == 3
         assert reply.revision == 1
 

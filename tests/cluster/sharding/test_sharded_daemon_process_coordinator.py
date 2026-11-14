@@ -272,8 +272,10 @@ async def test_an_interrupted_rescale_resumes_when_the_coordinator_starts() -> N
 async def test_a_rescale_during_a_throttled_round_stops_the_rest_of_the_round() -> None:
     """The kill switch sits before the throttle, as in Pekko, so the one id the throttle already
     holds still goes out when its timer fires; no later id of the old round does. The held id is
-    harmless: its shard is in the StopShards set, and a rescale-aware worker refuses its old
-    revision."""
+    usually harmless: its shard is in the StopShards set, or a rescale-aware worker refuses its old
+    revision. On a node outside the majority the new revision was written to, the Replicator may
+    still hold the old revision, or answer NotFound for revision 0, and the old worker starts; if
+    the ping lands after its shard stopped, that worker runs until its shard next stops."""
     async with manual_node() as node:
         assert node.manual is not None
         sharding, reply = node.probe(), node.probe()

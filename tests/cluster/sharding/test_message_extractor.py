@@ -42,54 +42,54 @@ from ..test_cluster_sharding import FAST_SHARDING, node
 
 @remotable
 @dataclass(frozen=True)
-class Where:
+class ExtractorWhere:
     reply_to: ActorRef[str]
 
 
 @remotable
 @dataclass(frozen=True)
-class Ping:
+class ExtractorPing:
     id: str
     reply_to: ActorRef[str]
 
 
-def where(entity: EntityContext[Where]) -> Behavior[Where]:
+def where(entity: EntityContext[ExtractorWhere]) -> Behavior[ExtractorWhere]:
     @Behaviors.receive_message
-    def on_message(msg: Where) -> Behavior[Where]:
+    def on_message(msg: ExtractorWhere) -> Behavior[ExtractorWhere]:
         msg.reply_to.tell(entity.entity_id)
         return Behaviors.same
 
     return on_message
 
 
-def pinged(entity: EntityContext[Ping]) -> Behavior[Ping]:
+def pinged(entity: EntityContext[ExtractorPing]) -> Behavior[ExtractorPing]:
     @Behaviors.receive_message
-    def on_message(msg: Ping) -> Behavior[Ping]:
+    def on_message(msg: ExtractorPing) -> Behavior[ExtractorPing]:
         msg.reply_to.tell(entity.entity_id)
         return Behaviors.same
 
     return on_message
 
 
-class PrefixExtractor(ShardingMessageExtractor[ShardingEnvelope[Where], Where]):
+class PrefixExtractor(ShardingMessageExtractor[ShardingEnvelope[ExtractorWhere], ExtractorWhere]):
     """The shard of ``"a-1"`` is ``"a"``."""
 
-    def entity_id(self, message: ShardingEnvelope[Where]) -> str:
+    def entity_id(self, message: ShardingEnvelope[ExtractorWhere]) -> str:
         return message.entity_id
 
     def shard_id(self, entity_id: str) -> str:
         return entity_id.split("-")[0]
 
-    def unwrap_message(self, message: ShardingEnvelope[Where]) -> Where:
+    def unwrap_message(self, message: ShardingEnvelope[ExtractorWhere]) -> ExtractorWhere:
         return message.message
 
 
-def ping_id(message: Ping) -> str:
+def ping_id(message: ExtractorPing) -> str:
     return message.id
 
 
-WHERE = EntityTypeKey[Where]("Where")
-PING = EntityTypeKey[Ping]("Ping")
+WHERE = EntityTypeKey[ExtractorWhere]("ExtractorWhere")
+PING = EntityTypeKey[ExtractorPing]("ExtractorPing")
 
 
 async def region_shards(region: ActorRef[Any]) -> frozenset[str]:
@@ -121,7 +121,7 @@ async def test_a_custom_extractor_puts_entities_on_its_shards():
         )
         for entity_id in ("a-1", "a-2", "b-1"):
             ref = sharding.entity_ref_for(WHERE, entity_id)
-            assert await ask(ref, Where, timeout=5) == entity_id
+            assert await ask(ref, ExtractorWhere, timeout=5) == entity_id
         assert await region_shards(region) == {"a", "b"}
 
 
@@ -133,7 +133,7 @@ async def test_a_no_envelope_extractor_delivers_its_own_messages():
         region = ClusterSharding(system).init(
             Entity(PING, pinged).with_settings(FAST_SHARDING).with_message_extractor(extractor)
         )
-        assert await ask(region, lambda r: Ping("x", r), timeout=5) == "x"
+        assert await ask(region, lambda r: ExtractorPing("x", r), timeout=5) == "x"
         assert await region_shards(region) == {shard_id_of("x", 10)}
 
 
@@ -147,7 +147,7 @@ async def test_entity_ref_for_and_start_entity_use_the_extractors_shard():
             .with_settings(FAST_SHARDING)
             .with_message_extractor(PrefixExtractor())
         )
-        assert await ask(sharding.entity_ref_for(WHERE, "c-9"), Where, timeout=5) == "c-9"
+        assert await ask(sharding.entity_ref_for(WHERE, "c-9"), ExtractorWhere, timeout=5) == "c-9"
         region.tell(StartEntity("d-1"))
         await shards_become(region, frozenset({"c", "d"}))
 
@@ -167,7 +167,7 @@ async def test_single_node_sharding_uses_the_extractor():
         region = testkit.spawn(Sharding.init(entity))
         probe: TestProbe[str] = testkit.create_test_probe()
         for entity_id in ("a-1", "a-2", "b-1"):
-            Sharding.entity_ref_for(region, entity_id).tell(Where(probe.ref))
+            Sharding.entity_ref_for(region, entity_id).tell(ExtractorWhere(probe.ref))
             await probe.expect_message(entity_id)
         assert await region_shards(region) == {"a", "b"}
 
@@ -179,7 +179,7 @@ async def test_single_node_sharding_takes_a_no_envelope_extractors_messages():
             Sharding.init(Entity(PING, pinged).with_message_extractor(extractor))
         )
         probe: TestProbe[str] = testkit.create_test_probe()
-        region.tell(Ping("y", probe.ref))
+        region.tell(ExtractorPing("y", probe.ref))
         await probe.expect_message("y")
 
 
@@ -191,12 +191,12 @@ def test_the_default_extractor_is_crc32():
 
 
 def test_a_no_envelope_extractor_unwraps_to_itself():
-    class ById(HashCodeNoEnvelopeMessageExtractor[Ping]):
-        def entity_id(self, message: Ping) -> str:
+    class ById(HashCodeNoEnvelopeMessageExtractor[ExtractorPing]):
+        def entity_id(self, message: ExtractorPing) -> str:
             return message.id
 
     probe_ref: Any = None
-    msg = Ping("z", probe_ref)
+    msg = ExtractorPing("z", probe_ref)
     extractor = ById(7)
     assert extractor.entity_id(msg) == "z"
     assert extractor.unwrap_message(msg) is msg

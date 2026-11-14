@@ -206,6 +206,8 @@ class ShardedDaemonProcess:
     ) -> None:
         """``internalInitWithContext`` (135-210), for a fixed set of processes. ``stop_message``
         is what a process gets when its shard is handed off, instead of being stopped outright."""
+        if number_of_instances < 1:
+            raise ValueError(f"number_of_instances must be >= 1, got {number_of_instances}")
         # imported here: the package and the coordinator's module import this one
         from . import ClusterSharding
         from .sharded_daemon_process_coordinator import sharded_daemon_process_coordinator

@@ -171,6 +171,8 @@ class ManualTime:
         while True:
             await asyncio.sleep(0)
             settled = (
+                # _ready is CPython's private ready queue; a loop without it (uvloop) skips this
+                # check and settles on the other two, as before
                 not getattr(loop, "_ready", None)
                 and all(_idle(c) for c in roots)
                 and all(_blocked(t) for t in asyncio.all_tasks() if t is not me)

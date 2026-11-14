@@ -29,6 +29,12 @@ def _round_trip(v: object) -> object:
     return Serialization.decode(json.loads(json.dumps(data)), lambda _p: _never())
 
 
+def _wire_name(v: object) -> object:
+    encoded = Serialization.encode(v, lambda r: r.path)
+    assert isinstance(encoded, dict)
+    return encoded["$type"]
+
+
 def test_decode_single_int_in_id_as_id_for_non_rescaling():
     assert decode_entity_id("1", 8) == DecodedId(0, 8, 1)
 
@@ -88,8 +94,10 @@ def test_the_state_crosses_the_wire():
     state = ShardedDaemonProcessState.initial_state(4).start_scaling_to(6)
     key = ShardedDaemonProcessStateKey("sdp")
     assert _round_trip(state) == state
-    assert _round_trip(key) == key
-    assert Serialization.encode(state, lambda r: r.path)["$type"] == "ShardedDaemonProcess.State"
+    decoded_key = _round_trip(key)
+    assert isinstance(decoded_key, ShardedDaemonProcessStateKey) and decoded_key == key
+    assert _wire_name(key) == "ShardedDaemonProcess.StateKey"
+    assert _wire_name(state) == "ShardedDaemonProcess.State"
 
 
 def test_the_settings_defaults_are_pekkos():

@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, cast
+
+import pytest
 
 from ohra import (
     ActorContext,
@@ -161,7 +163,8 @@ async def snitch_on(systems: list[ActorSystem[Any]], host: ActorSystem[Any]) -> 
 
 
 async def find_snitch(system: ActorSystem[Any]) -> Listing[SdpEvent]:
-    return await ask(Receptionist(system).ref, lambda r: Find(SNITCH, r), timeout=1)
+    timeout = TestKitSettings().single_expect_default_dilated
+    return await ask(Receptionist(system).ref, lambda r: Find(SNITCH, r), timeout=timeout)
 
 
 async def init_processes(
@@ -295,7 +298,16 @@ async def test_workers_and_coordinator_move_when_the_oldest_node_leaves():
                 return FishingOutcomes.complete()
             return FishingOutcomes.continue_and_ignore()
 
-        await probe.fish_for_message(2 * settings.keep_alive_interval, restarted)
+        # 10 s, as above: the moved coordinator may still be reading its state
+        await probe.fish_for_message(10.0, restarted)
+
+
+def test_init_refuses_no_instances():
+    # ShardedDaemonProcess is a plain class: init fails before it touches the system
+    with pytest.raises(ValueError, match="number_of_instances must be >= 1, got 0"):
+        ShardedDaemonProcess(cast(ActorSystem[Any], None)).init(
+            "none", 0, lambda n: Behaviors.empty
+        )
 
 
 # --- the settings --------------------------------------------------------------------------------

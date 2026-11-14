@@ -484,14 +484,14 @@ It prints:
 ```
 
 - **The workers are sharded entities.** `init("TagProcessors", n, factory)` runs the entity type `sharded-daemon-process-TagProcessors` with one shard per worker. The entity ids are the process numbers `0` to `n - 1`, and the factory gets the number of the worker it makes. `init` returns nothing: the workers are not sent messages through sharding. Pekko's docs suggest a [receptionist](02-actor-system.md#receptionist) key that the workers register with.
-- **The keep-alive.** A coordinator, a cluster singleton named `ShardedDaemonProcessCoordinator-TagProcessors`, sends the region a `StartEntity` for every worker, one every `keep_alive_throttle_interval`, and again every `keep_alive_interval`. That starts the workers at first, and starts again a worker that stopped, or that moved.
-- **A worker moves when its node leaves.** The leaving node's region hands the worker's shard off, which stops the worker, and the next keep-alive starts it on another node. With `stop_message`, the worker gets that message and stops itself instead of being stopped outright. A worker also moves when the coordinator rebalances its shard to a new node. If the leaving node is the oldest, the coordinator moves with it, as any singleton does.
+- **The keep-alive.** A coordinator, a cluster singleton named `ShardedDaemonProcessCoordinator-TagProcessors`, sends the region a `StartEntity` for every worker, one every `keep_alive_throttle_interval`, and starts the next round `keep_alive_interval` after a round ends. That starts the workers at first, and starts again a worker that stopped, or that moved.
+- **A worker moves when its node leaves.** The leaving node's region hands the worker's shard off, which stops the worker, and the next keep-alive starts it on another node. With `stop_message`, the worker gets that message and stops itself instead of being stopped outright. A worker also moves when sharding's coordinator rebalances its shard to a new node. If the leaving node is the oldest, the coordinator moves with it, as any singleton does.
 - **The role.** `with_role("workers")` runs the workers and the coordinator only on nodes with that role. The other nodes still call `init`, and start a proxy region and the default Replicator.
 - **Sharding is forced to fit.** The daemon's sharding settings are `sharding_settings` with `number_of_shards` set to the number of workers, the daemon's role, no remembered entities and no passivation. A second `init` of a name on a node does nothing.
 
 | Field | Pekko key | Default and meaning |
 |---|---|---|
-| `keep_alive_interval` | `keep-alive-interval` | 10.0 s: how often the coordinator sends every worker a `StartEntity` |
+| `keep_alive_interval` | `keep-alive-interval` | 10.0 s: the pause after a round of `StartEntity`s ends before the next starts |
 | `keep_alive_throttle_interval` | `keep-alive-throttle-interval` | 0.1 s: the pause between two `StartEntity`s of a round; 0 sends them all at once |
 | `keep_alive_from_number_of_nodes` | `keep-alive-from-number-of-nodes` | 3: unused, as in Pekko |
 | `sharding_settings` | `sharding` | `None`: `ClusterShardingSettings()`, as Pekko's `sharding = ${pekko.cluster.sharding}` |

@@ -22,6 +22,7 @@ from collections.abc import (
 )
 from typing import TYPE_CHECKING, Any, Final, Generic, Never, TypeVar, final
 
+from ..patterns import DONE, Done
 from . import ops
 from .ops import Stage, filter_op, map_op
 
@@ -42,18 +43,7 @@ class NotUsed:
         return "NOT_USED"
 
 
-@final
-class Done:
-    """Pekko's ``Done``: a completion that carries no value."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "DONE"
-
-
 NOT_USED: Final = NotUsed()
-DONE: Final = Done()
 
 
 class AbruptStageTerminationError(Exception):

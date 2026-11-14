@@ -6,6 +6,8 @@
 | `ActorRef[-T]` | `ActorRef[T]`, contravariant, enforced by pyright strict |
 | `sealed trait` + case classes | `type Cmd = A \| B` + frozen dataclasses + `match` |
 | `ask`, `ctx.ask` | `await ask(ref, make, timeout)`, `ctx.ask(ref, make, adapt, timeout)`, or `@ctx.ask(ref, make, timeout=...)` over `adapt` |
+| `askWithStatus`, `ctx.askWithStatus` | `await ask_with_status(ref, make, timeout)`, `ctx.ask_with_status(ref, make, adapt, timeout)` |
+| `StatusReply.success / error / Ack / fromTry / fromTryKeepException`, `StatusReply.ErrorMessage`, `isSuccess`, `getValue`, `getError` | `StatusReply.success / error / ACK / from_try / from_try_keep_exception`, `StatusReply.ErrorMessage`, `is_success`, `value`, `exception` |
 | `ctx.pipeToSelf(future)(Try => T)` | `ctx.pipe_to_self(awaitable, adapt)` with `Success` / `Failure`, or `@ctx.pipe_to_self(awaitable)` over `adapt` |
 | `ctx.messageAdapter` | `ctx.message_adapter` |
 | `spawn`, `spawnAnonymous`, `ctx.stop(child)` | same |

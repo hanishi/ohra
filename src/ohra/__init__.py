@@ -143,7 +143,15 @@ from .management import Management, ManagementSettings
 from .management.bootstrap import ClusterBootstrap, ClusterBootstrapSettings
 from .management.kubernetes import KubernetesApiServiceDiscovery, KubernetesApiSettings
 from .management.health import HealthCheckSettings
-from .patterns import AskTimeoutError, Replyable, SpawnProtocol, ask, batching
+from .patterns import (
+    AskTimeoutError,
+    Replyable,
+    SpawnProtocol,
+    StatusReply,
+    ask,
+    ask_with_status,
+    batching,
+)
 from .receptionist import (
     Deregister,
     Deregistered,
@@ -346,6 +354,7 @@ __all__ = [
     "SplitBrainResolverSettings",
     "StaticQuorum",
     "SpawnProtocol",
+    "StatusReply",
     "SqliteStore",
     "StashBuffer",
     "StashOverflowError",
@@ -365,6 +374,7 @@ __all__ = [
     "Unsubscribe",
     "WatchedActorTerminatedError",
     "ask",
+    "ask_with_status",
     "batching",
     "remotable",
     "SelfUniqueAddress",

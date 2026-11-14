@@ -36,6 +36,8 @@ from ohra import (
     StashBuffer,
     TimerScheduler,
     UniqueAddress,
+    StatusReply,
+    ask_with_status,
     batching,
 )
 from ohra.stream import (
@@ -277,3 +279,20 @@ def check_replicator(rep: ActorRef[Replicator.Command], me: ActorRef[Any]) -> No
 def check_get_success(success: Replicator.GetSuccess[GCounter]) -> None:
     data: ORSet[str] = success.data  # type: ignore[assignment]
     del data
+
+
+@dataclass(frozen=True)
+class StatusRequest:
+    reply_to: ActorRef[StatusReply[str]]
+
+
+async def ask_with_status_is_typed(ref: ActorRef[StatusRequest]) -> None:
+    ok: str = await ask_with_status(ref, StatusRequest, 1)
+    wrong: int = await ask_with_status(ref, StatusRequest, 1)  # type: ignore[assignment]
+    error_reply: StatusReply[str] = StatusReply.error("no")
+    ref_reply: ActorRef[StatusReply[str]] = ref_of_status()
+    ref_reply.tell(StatusReply.success(1))  # type: ignore[arg-type]
+    print(ok, wrong, error_reply)
+
+
+def ref_of_status() -> ActorRef[StatusReply[str]]: ...

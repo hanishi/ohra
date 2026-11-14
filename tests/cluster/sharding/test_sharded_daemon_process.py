@@ -237,25 +237,30 @@ async def init_rs(
     )
 
 
-def rescaled(old: int, new: int) -> tuple[set[int], set[int], Callable[[RsEvent], FishingOutcome]]:
+def rescaled(old: int, new: int, held_id: bool) -> Callable[[RsEvent], FishingOutcome]:
     """A fishing function that completes once the workers ``0`` to ``old - 1`` of revision 0 have
-    stopped and ``0`` to ``new - 1`` of revision 1 have started, and the two sets it fills.
-    Anything else of revision 0 is ignored: the throttle may have held an old id."""
+    stopped and ``0`` to ``new - 1`` of revision 1 have started, and fails on anything else. With
+    ``held_id``, a revision 0 worker may start (and then stop) again: on several nodes the id the
+    throttle held can reach a node whose Replicator has not seen revision 1 yet. On one node it
+    can't, as the Replicator gets the new revision before the held ping."""
     stopped: set[int] = set()
     started: set[int] = set()
 
     def fish(e: RsEvent) -> FishingOutcome:
-        if e.revision == 0 and e.event == "Stopped":
-            stopped.add(e.process_number)
-        elif e.revision == 1 and e.event == "Started":
-            assert e.total_processes == new
-            assert e.process_number < new
-            started.add(e.process_number)
+        match e.revision, e.event:
+            case 0, "Stopped" if e.process_number < old:
+                stopped.add(e.process_number)
+            case 0, "Started" if held_id and e.process_number < old:
+                pass
+            case 1, "Started" if e.total_processes == new and e.process_number < new:
+                started.add(e.process_number)
+            case _:
+                return FishingOutcomes.fail(f"unexpected {e}")
         if stopped == set(range(old)) and started == set(range(new)):
             return FishingOutcomes.complete()
         return FishingOutcomes.continue_()
 
-    return stopped, started, fish
+    return fish
 
 
 # --- "The ShardedDaemonProcess" (79-117) ---------------------------------------------------------
@@ -407,7 +412,8 @@ async def test_two_daemon_processes_on_one_system():
             ("two", 1),
             ("two", 2),
         }
-        await probe.expect_no_message()
+        # and none more over the next keep-alive rounds
+        await probe.expect_no_message(2 * SDP_SETTINGS.keep_alive_interval)
 
 
 async def test_a_role_confines_the_workers_on_a_mixed_cluster():
@@ -453,9 +459,7 @@ async def test_rescaling_up_stops_the_old_set_and_starts_the_new():
 
         assert await ask_with_status(ref, lambda r: ChangeNumberOfProcesses(6, r), 10.0) == DONE
 
-        stopped, started, fish = rescaled(4, 6)
-        await probe.fish_for_message(10.0, fish)
-        assert (stopped, started) == (set(range(4)), set(range(6)))
+        await probe.fish_for_message(10.0, rescaled(4, 6, held_id=True))
         reply = await ask(ref, GetNumberOfProcesses, 3.0)
         assert reply.number_of_processes == 6
         assert reply.revision == 1
@@ -474,8 +478,7 @@ async def test_rescaling_down_stops_the_extra_workers():
 
         assert await ask_with_status(ref, lambda r: ChangeNumberOfProcesses(2, r), 10.0) == DONE
 
-        _, _, fish = rescaled(4, 2)
-        await probe.fish_for_message(10.0, fish)
+        await probe.fish_for_message(10.0, rescaled(4, 2, held_id=False))
         # no process 2 or 3 starts again, of either revision
         await probe.expect_no_message(2 * SDP_SETTINGS.keep_alive_interval)
 

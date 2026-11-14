@@ -18,7 +18,7 @@ from ohra import (
     SupervisorStrategy,
     ask,
 )
-from ohra.stream import Source
+from ohra.stream import KillSwitches, Source
 from ohra.testkit import ActorTestKit, ManualTime, TestProbe
 
 
@@ -275,6 +275,19 @@ async def test_time_passes_waits_for_a_stream_run_just_before_to_reach_its_pull(
         await manual_time.time_passes(1.0)
         await probe.expect_message("tick")
         await done
+
+
+async def test_time_passes_waits_for_a_wakeup_already_scheduled_on_the_loop():
+    async with ActorTestKit(manual_time=True) as testkit:
+        manual_time = ManualTime(testkit.system)
+        # each pull of the kill switch wakes the drive through asyncio.wait's done callback
+        done = (
+            Source.from_iterable(range(3))
+            .via(KillSwitches.single())
+            .run_foreach(lambda _: None, testkit.system)
+        )
+        await manual_time.time_passes(0)
+        assert done.done()
 
 
 async def test_manual_time_on_a_default_system_raises():

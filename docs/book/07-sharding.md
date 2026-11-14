@@ -431,6 +431,74 @@ stateDiagram-v2
     RememberingStop --> RememberingStart: stop stored, messages were buffered
 ```
 
+### Sharded daemon process
+
+Some work is split into a fixed number of parts, each with a worker that runs all the time, such as Pekko's tag processors: events are tagged with one of N tags, and one worker per tag consumes its events. A **sharded daemon process** keeps N such workers running, spread over the cluster, and starts each again if it stops. Call `init` with the same arguments on every node:
+
+```python
+import asyncio
+
+from ohra import (
+    ActorContext,
+    ActorSystem,
+    Address,
+    Behavior,
+    Behaviors,
+    ClusterSettings,
+    ShardedDaemonProcess,
+)
+
+started: asyncio.Queue[str] = asyncio.Queue()
+
+
+def tag_processor(tag: str) -> Behavior[str]:
+    @Behaviors.setup
+    def setup(_ctx: ActorContext[str]) -> Behavior[str]:
+        started.put_nowait(tag)  # a real one would consume the events tagged with tag
+        return Behaviors.ignore
+
+    return setup
+
+
+def node() -> ActorSystem[None]:
+    settings = ClusterSettings(seed_nodes=(Address("tags", "127.0.0.1", 2551),))
+    return ActorSystem(Behaviors.empty, "tags", address=("127.0.0.1", 2551), cluster=settings)
+
+
+async def main() -> None:
+    tags = ["tag-1", "tag-2", "tag-3"]
+    async with node() as system:
+        ShardedDaemonProcess(system).init(
+            "TagProcessors", len(tags), lambda n: tag_processor(tags[n])
+        )
+        print(sorted([await asyncio.wait_for(started.get(), 10) for _ in tags]))
+
+
+asyncio.run(main())
+```
+
+It prints:
+
+```
+['tag-1', 'tag-2', 'tag-3']
+```
+
+- **The workers are sharded entities.** `init("TagProcessors", n, factory)` runs the entity type `sharded-daemon-process-TagProcessors` with one shard per worker. The entity ids are the process numbers `0` to `n - 1`, and the factory gets the number of the worker it makes. `init` returns nothing: the workers are not sent messages through sharding. Pekko's docs suggest a [receptionist](02-actor-system.md#receptionist) key that the workers register with.
+- **The keep-alive.** A coordinator, a cluster singleton named `ShardedDaemonProcessCoordinator-TagProcessors`, sends the region a `StartEntity` for every worker, one every `keep_alive_throttle_interval`, and starts the next round `keep_alive_interval` after a round ends. That starts the workers at first, and starts again a worker that stopped, or that moved.
+- **A worker moves when its node leaves.** The leaving node's region hands the worker's shard off, which stops the worker, and the next keep-alive starts it on another node. With `stop_message`, the worker gets that message and stops itself instead of being stopped outright. A worker also moves when sharding's coordinator rebalances its shard to a new node. If the leaving node is the oldest, the coordinator moves with it, as any singleton does.
+- **The role.** `with_role("workers")` runs the workers and the coordinator only on nodes with that role. The other nodes still call `init`, and start a proxy region and the default Replicator.
+- **Sharding is forced to fit.** The daemon's sharding settings are `sharding_settings` with `number_of_shards` set to the number of workers, the daemon's role, no remembered entities and no passivation. A second `init` of a name on a node does nothing.
+
+| Field | Pekko key | Default and meaning |
+|---|---|---|
+| `keep_alive_interval` | `keep-alive-interval` | 10.0 s: the pause after a round of `StartEntity`s ends before the next starts |
+| `keep_alive_throttle_interval` | `keep-alive-throttle-interval` | 0.1 s: the pause between two `StartEntity`s of a round; 0 sends them all at once |
+| `keep_alive_from_number_of_nodes` | `keep-alive-from-number-of-nodes` | 3: unused, as in Pekko |
+| `sharding_settings` | `sharding` | `None`: `ClusterShardingSettings()`, as Pekko's `sharding = ${pekko.cluster.sharding}` |
+| `role` | `withRole` | `None`: every node runs workers |
+
+The settings are a frozen dataclass with Pekko's `with_*` builders: `ShardedDaemonProcessSettings().with_keep_alive_interval(1.0).with_role("workers")`.
+
 ### The shard
 
 A shard hosts the entities of one shard id. Both `Sharding.init` and the cluster regions run it. It follows Pekko's `Shard`, and the [remembered entities](#remembered-entities) section has what it does when it remembers.

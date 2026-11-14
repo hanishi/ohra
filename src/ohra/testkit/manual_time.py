@@ -159,7 +159,9 @@ class ManualTime:
     async def _settle(self) -> None:
         # Pekko sleeps 100 ms once, to let the dispatchers clear. Here the loop is settled when
         # every mailbox is empty and every other task waits on a future, so a stream's drive
-        # has reached its pull (a tick's waiter, grouped_within's timer) before time moves.
+        # has reached its pull (a tick's waiter, grouped_within's timer) before time moves. The
+        # loop's ready queue must be empty too: a done callback still in it (asyncio.wait's, in
+        # the kill switch's pull) wakes a task that looks blocked.
         # ponytail: a task that never blocks (a busy loop of sleep(0)) never settles; the
         # 100 ms deadline is the fallback for it, as Pekko's fixed sleep is.
         loop = asyncio.get_running_loop()
@@ -168,8 +170,12 @@ class ManualTime:
         me = asyncio.current_task()
         while True:
             await asyncio.sleep(0)
-            settled = all(_idle(c) for c in roots) and all(
-                _blocked(t) for t in asyncio.all_tasks() if t is not me
+            settled = (
+                # _ready is CPython's private ready queue; a loop without it (uvloop) skips this
+                # check and settles on the other two, as before
+                not getattr(loop, "_ready", None)
+                and all(_idle(c) for c in roots)
+                and all(_blocked(t) for t in asyncio.all_tasks() if t is not me)
             )
             if settled or loop.time() >= deadline:
                 return

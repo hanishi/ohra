@@ -499,6 +499,83 @@ It prints:
 
 The settings are a frozen dataclass with Pekko's `with_*` builders: `ShardedDaemonProcessSettings().with_keep_alive_interval(1.0).with_role("workers")`.
 
+#### Rescaling
+
+`init` keeps a fixed number of workers. `init_with_context` starts a set that can be rescaled while it runs. It takes the initial number of workers, and its factory gets a `ShardedDaemonProcessContext` instead of a number:
+
+- `process_number`, from `0` to `total_processes - 1`;
+- `total_processes`, the number of workers in the worker's set;
+- `name`, the daemon process's name;
+- `revision`, which is 0 for the initial set and goes up by one with each rescale.
+
+`init_with_context` returns an `ActorRef[ShardedDaemonProcessCommand]`, a proxy of the coordinator singleton, so any node can send it commands. `ChangeNumberOfProcesses(n, reply_to)` rescales to `n` workers, and its reply is a `StatusReply[Done]`, so `ask_with_status` awaits it. `GetNumberOfProcesses(reply_to)` replies with `NumberOfProcesses(number_of_processes, started, rescale_in_progress, revision)`, where `started` is when the change to this number began, in epoch seconds:
+
+```python
+import asyncio
+
+from ohra import (
+    ActorContext,
+    ActorSystem,
+    Address,
+    Behavior,
+    Behaviors,
+    ChangeNumberOfProcesses,
+    ClusterSettings,
+    GetNumberOfProcesses,
+    ShardedDaemonProcess,
+    ShardedDaemonProcessContext,
+    ask,
+    ask_with_status,
+)
+
+started: asyncio.Queue[tuple[int, int, int]] = asyncio.Queue()
+
+
+def tag_processor(sdp: ShardedDaemonProcessContext) -> Behavior[str]:
+    @Behaviors.setup
+    def setup(_ctx: ActorContext[str]) -> Behavior[str]:
+        started.put_nowait((sdp.revision, sdp.process_number, sdp.total_processes))
+        return Behaviors.ignore
+
+    return setup
+
+
+async def workers_started(n: int) -> list[tuple[int, int, int]]:
+    return sorted([await asyncio.wait_for(started.get(), 10) for _ in range(n)])
+
+
+def node() -> ActorSystem[None]:
+    settings = ClusterSettings(seed_nodes=(Address("tags", "127.0.0.1", 2551),))
+    return ActorSystem(Behaviors.empty, "tags", address=("127.0.0.1", 2551), cluster=settings)
+
+
+async def main() -> None:
+    async with node() as system:
+        ref = ShardedDaemonProcess(system).init_with_context("TagProcessors", 2, tag_processor)
+        print(await workers_started(2))
+        await ask_with_status(ref, lambda r: ChangeNumberOfProcesses(3, r), 10.0)
+        print(await workers_started(3))
+        reply = await ask(ref, GetNumberOfProcesses, 3.0)
+        print(reply.number_of_processes, reply.revision, reply.rescale_in_progress)
+
+
+asyncio.run(main())
+```
+
+It prints the two workers of revision 0, as `(revision, process_number, total_processes)`, then the three of revision 1:
+
+```
+[(0, 0, 2), (0, 1, 2)]
+[(1, 0, 3), (1, 1, 3), (1, 2, 3)]
+3 1 False
+```
+
+- **The workflow** is the one in the class comment of Pekko's coordinator. The coordinator stops pinging the workers, and writes the new number and revision to [Distributed Data](14-distributed-data.md), marked in progress. It stops every shard of the old set through `StopShards`, retrying with all of them each `handoff_timeout / 4` until each has stopped. It acks the request, marks the rescale completed, and pings the new set. A coordinator that moves to another node mid-rescale finds the state in progress when it starts, and runs the rescale again from the stopping of the shards, at worst stopping every worker before it starts them again.
+- **The entity ids** of revision 0 are the process numbers, as with `init`. From revision 1 on they are `revision|total_processes|process_number`, and the shard is still the process number.
+- **The replies.** A rescale to the current number is acked at once. A second `ChangeNumberOfProcesses` while one runs gets `StatusReply.error("Rescale in progress, retry later")`, and one to fewer than one process gets `StatusReply.error("number_of_processes must be >= 1, got n")`. `GetNumberOfProcesses` is answered during a rescale too, with `rescale_in_progress` set.
+- **A keep-alive round in flight.** A rescale shuts the rest of the round down. At most the one id that the round's throttle already holds still goes out after the command. That ping is harmless: its shard is one of those `StopShards` stops, or the worker it starts refuses its old revision.
+- **Each worker checks its revision before it starts.** A worker of `init_with_context` first reads the state from its node's Replicator, and runs the factory's behavior only if its revision is the latest; a worker of an old revision stops instead. Messages that reach the worker before that reply, `stop_message` included, are unhandled.
+
 ### The shard
 
 A shard hosts the entities of one shard id. Both `Sharding.init` and the cluster regions run it. It follows Pekko's `Shard`, and the [remembered entities](#remembered-entities) section has what it does when it remembers.

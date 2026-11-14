@@ -15,13 +15,17 @@ Differences from the Scala:
 - ``ProcessActor`` tells ``SdpEvent`` to the snitch it is given, the ref a ``Receptionist.Find``
   on its node returned, as ohra has no ``Routers.group``. ``SdpEvent`` names the node's port and
   the worker's ref too.
-- The last three tests are ohra's own: ``init`` twice, the workers and the coordinator moving off a
-  leaving node (the multi-jvm spec's FIXME), and the sharding settings the daemon forces.
+- The tests after those are ohra's own: ``init`` twice, the workers and the coordinator moving
+  off a leaving node (the multi-jvm spec's FIXME), the sharding settings the daemon forces, two
+  daemon processes on one system, a role on a mixed cluster, and rescaling through
+  ``init_with_context``'s ref, which Pekko has no spec for. ``rs_worker`` reports ``RsEvent`` with
+  its context.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
@@ -34,9 +38,14 @@ from ohra import (
     ActorSystem,
     Behavior,
     Behaviors,
+    ChangeNumberOfProcesses,
+    GetNumberOfProcesses,
     ShardedDaemonProcess,
+    ShardedDaemonProcessCommand,
+    ShardedDaemonProcessContext,
     ShardedDaemonProcessSettings,
     ask,
+    ask_with_status,
     remotable,
 )
 from ohra.cluster.core import Cluster, Leave
@@ -45,6 +54,7 @@ from ohra.cluster.sharding.passivation_settings import NoPassivationStrategy
 from ohra.cluster.sharding.sharded_daemon_process import (
     _sharding_settings,  # pyright: ignore[reportPrivateUsage]
 )
+from ohra.patterns import DONE
 from ohra.receptionist import Find, Listing, Receptionist, Register, ServiceKey
 from ohra.testkit import FishingOutcome, FishingOutcomes, TestProbe
 from ohra.testkit.settings import TestKitSettings
@@ -81,6 +91,17 @@ class SdpEvent:
     event: str
     port: int
     self_ref: ActorRef[Any]
+
+
+@remotable
+@dataclass(frozen=True)
+class RsEvent:
+    process_number: int
+    total_processes: int
+    revision: int
+    port: int
+    event: str
+    name: str
 
 
 SNITCH = ServiceKey[SdpEvent]("snitch")
@@ -120,6 +141,29 @@ def process_actor(n: int, snitch: ActorRef[SdpEvent], port: int) -> Behavior[Sdp
         @Behaviors.receive_message
         def receive(_msg: SdpStop) -> Behavior[SdpStop]:
             snitch.tell(SdpEvent(n, "Stopped", port, ctx.self))
+            return Behaviors.stopped()
+
+        return receive
+
+    return setup
+
+
+def rs_worker(sdp: ShardedDaemonProcessContext, snitch: ActorRef[Any]) -> Behavior[SdpStop]:
+    """A worker that reports its context when it starts and when it is told to stop."""
+
+    @Behaviors.setup
+    def setup(ctx: ActorContext[SdpStop]) -> Behavior[SdpStop]:
+        port = port_of(ctx.system)
+
+        def event(name: str) -> RsEvent:
+            n, total, revision = sdp.process_number, sdp.total_processes, sdp.revision
+            return RsEvent(n, total, revision, port, name, sdp.name)
+
+        snitch.tell(event("Started"))
+
+        @Behaviors.receive_message
+        def receive(_msg: SdpStop) -> Behavior[SdpStop]:
+            snitch.tell(event("Stopped"))
             return Behaviors.stopped()
 
         return receive
@@ -179,6 +223,39 @@ async def init_processes(
     ShardedDaemonProcess(system).init(
         name, n, lambda i: process_actor(i, snitch, port), settings, stop_message
     )
+
+
+async def init_rs(
+    system: ActorSystem[Any],
+    name: str,
+    n: int,
+    settings: ShardedDaemonProcessSettings = SDP_SETTINGS,
+) -> ActorRef[ShardedDaemonProcessCommand]:
+    [snitch] = (await find_snitch(system)).service_instances
+    return ShardedDaemonProcess(system).init_with_context(
+        name, n, lambda c: rs_worker(c, snitch), settings, SdpStop()
+    )
+
+
+def rescaled(old: int, new: int) -> tuple[set[int], set[int], Callable[[RsEvent], FishingOutcome]]:
+    """A fishing function that completes once the workers ``0`` to ``old - 1`` of revision 0 have
+    stopped and ``0`` to ``new - 1`` of revision 1 have started, and the two sets it fills.
+    Anything else of revision 0 is ignored: the throttle may have held an old id."""
+    stopped: set[int] = set()
+    started: set[int] = set()
+
+    def fish(e: RsEvent) -> FishingOutcome:
+        if e.revision == 0 and e.event == "Stopped":
+            stopped.add(e.process_number)
+        elif e.revision == 1 and e.event == "Started":
+            assert e.total_processes == new
+            assert e.process_number < new
+            started.add(e.process_number)
+        if stopped == set(range(old)) and started == set(range(new)):
+            return FishingOutcomes.complete()
+        return FishingOutcomes.continue_()
+
+    return stopped, started, fish
 
 
 # --- "The ShardedDaemonProcess" (79-117) ---------------------------------------------------------
@@ -308,6 +385,115 @@ def test_init_refuses_no_instances():
         ShardedDaemonProcess(cast(ActorSystem[Any], None)).init(
             "none", 0, lambda n: Behaviors.empty
         )
+
+
+async def test_two_daemon_processes_on_one_system():
+    async with AsyncExitStack() as stack:
+        system = await single_node(stack)
+        probe = TestProbe[Any](Host(system))
+        sdp = ShardedDaemonProcess(system)
+        sdp.init(
+            "one", 2, lambda n: rs_worker(ShardedDaemonProcessContext(n, 2, "one", 0), probe.ref)
+        )
+        sdp.init(
+            "two", 3, lambda n: rs_worker(ShardedDaemonProcessContext(n, 3, "two", 0), probe.ref)
+        )
+
+        events: list[RsEvent] = await probe.receive_messages(5, max=10.0)
+        assert {(e.name, e.process_number) for e in events} == {
+            ("one", 0),
+            ("one", 1),
+            ("two", 0),
+            ("two", 1),
+            ("two", 2),
+        }
+        await probe.expect_no_message()
+
+
+async def test_a_role_confines_the_workers_on_a_mixed_cluster():
+    ports = [free_port() for _ in range(3)]
+    async with AsyncExitStack() as stack:
+        systems = [
+            await stack.enter_async_context(
+                node(
+                    p,
+                    [ports[0]],
+                    roles=frozenset({"workers"}) if i == 1 else frozenset(),
+                    distributed_data=FAST_DDATA,
+                )
+            )
+            for i, p in enumerate(ports)
+        ]
+        await eventually(lambda: all(all_up(s, 3) for s in systems), timeout=10)
+        probe = await snitch_on(systems, systems[0])
+
+        refs = [await init_rs(s, "roles", 3, SDP_SETTINGS.with_role("workers")) for s in systems]
+
+        events: list[RsEvent] = await probe.receive_messages(3, max=10.0)
+        assert {e.process_number for e in events} == {0, 1, 2}
+        assert {e.port for e in events} == {ports[1]}
+        # the first node has no role, so only a proxy of the coordinator
+        reply = await ask(refs[0], GetNumberOfProcesses, 3.0)
+        assert reply.number_of_processes == 3
+
+
+# --- rescaling -----------------------------------------------------------------------------------
+
+
+async def test_rescaling_up_stops_the_old_set_and_starts_the_new():
+    async with AsyncExitStack() as stack:
+        systems = await three_nodes(stack)
+        probe = await snitch_on(systems, systems[0])
+        refs = [await init_rs(s, "grow", 4) for s in systems]
+        ref = refs[0]
+        events: list[RsEvent] = await probe.receive_messages(4, max=10.0)
+        assert {(e.process_number, e.revision, e.event) for e in events} == {
+            (n, 0, "Started") for n in range(4)
+        }
+
+        assert await ask_with_status(ref, lambda r: ChangeNumberOfProcesses(6, r), 10.0) == DONE
+
+        stopped, started, fish = rescaled(4, 6)
+        await probe.fish_for_message(10.0, fish)
+        assert (stopped, started) == (set(range(4)), set(range(6)))
+        reply = await ask(ref, GetNumberOfProcesses, 3.0)
+        assert reply.number_of_processes == 6
+        assert reply.revision == 1
+        assert reply.rescale_in_progress is False
+
+
+async def test_rescaling_down_stops_the_extra_workers():
+    async with AsyncExitStack() as stack:
+        system = await single_node(stack)
+        probe = TestProbe[Any](Host(system))
+        ref = ShardedDaemonProcess(system).init_with_context(
+            "shrink", 4, lambda c: rs_worker(c, probe.ref), SDP_SETTINGS, SdpStop()
+        )
+        events: list[RsEvent] = await probe.receive_messages(4, max=10.0)
+        assert {(e.process_number, e.revision) for e in events} == {(n, 0) for n in range(4)}
+
+        assert await ask_with_status(ref, lambda r: ChangeNumberOfProcesses(2, r), 10.0) == DONE
+
+        _, _, fish = rescaled(4, 2)
+        await probe.fish_for_message(10.0, fish)
+        # no process 2 or 3 starts again, of either revision
+        await probe.expect_no_message(2 * SDP_SETTINGS.keep_alive_interval)
+
+
+async def test_a_rescale_from_another_node_goes_through_the_proxy():
+    async with AsyncExitStack() as stack:
+        systems = await three_nodes(stack)
+        probe = await snitch_on(systems, systems[0])
+        refs = [await init_rs(s, "proxied", 2) for s in systems]
+        await probe.receive_messages(2, max=10.0)
+
+        # the coordinator runs on the oldest node, the first
+        third = refs[2]
+        assert await ask_with_status(third, lambda r: ChangeNumberOfProcesses(3, r), 10.0) == DONE
+
+        reply = await ask(refs[0], GetNumberOfProcesses, 3.0)
+        assert reply.number_of_processes == 3
+        assert reply.revision == 1
 
 
 # --- the settings --------------------------------------------------------------------------------

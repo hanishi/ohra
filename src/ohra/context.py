@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from .mailbox import MailboxSelector
 from .patterns import Replyable, StatusReply, flatten_status, start_ask
 from .ref import ActorRef, FunctionRef
-from .result import Try
+from .result import Failure, Success, Try
 
 if TYPE_CHECKING:
     from .behavior import Behavior
@@ -126,12 +126,21 @@ class ActorContext[T]:
         """Pekko's ``ctx.askWithStatus``: ``ask`` for a ``StatusReply``; adapt gets the value as
         a Success and the error, or the timeout, as a Failure."""
 
-        reply = start_ask(target, make, timeout, scheduler=self._cell.system.scheduler)
+        def flattened(result: Try[StatusReply[Res]]) -> T:
+            # ActorContextImpl.askWithStatus: the ask's own result, flattened in the adapter
+            match result:
+                case Success(reply):
+                    try:
+                        value = cast(Res, flatten_status(reply))
+                    except Exception as e:
+                        return adapt(Failure(e))
+                    return adapt(Success(value))
+                case Failure():
+                    return adapt(result)
 
-        async def flattened() -> Res:
-            return cast(Res, flatten_status(await reply))
-
-        self.pipe_to_self(flattened(), adapt)
+        self.pipe_to_self(
+            start_ask(target, make, timeout, scheduler=self._cell.system.scheduler), flattened
+        )
 
     def message_adapter[U](self, f: Callable[[U], T]) -> ActorRef[U]:
         """A ref that accepts U and delivers f(u) to this actor. f runs inside the actor. The actor

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Never, Protocol, cast, f
 from .behavior import Behavior, Behaviors, MaybeAwaitable
 from .mailbox import MailboxSelector
 from .ref import ActorRef, PromiseRef
-from .remote.serialization import remotable, transient
+from .remote.serialization import Serialization, transient
 from .result import Failure, Success, Try
 from .scheduler import EventLoopScheduler, Scheduler
 from .signals import PostStop, Signal
@@ -82,7 +82,6 @@ def start_ask[Res](
     return fut
 
 
-@remotable
 @final
 @dataclass(frozen=True, slots=True)
 class Done:
@@ -95,7 +94,6 @@ class Done:
 DONE: Final = Done()
 
 
-@remotable
 @dataclass(frozen=True)
 class StatusReply[T]:
     """Pekko's ``StatusReply``: a reply that is a success value or an error, for a request that
@@ -108,7 +106,7 @@ class StatusReply[T]:
 
     success_value: T | None = None
     error_message: str | None = None
-    cause: BaseException | None = transient()
+    cause: Exception | None = transient()
 
     ACK: ClassVar[StatusReply[Done]]
 
@@ -126,7 +124,7 @@ class StatusReply[T]:
         return StatusReply(value)
 
     @staticmethod
-    def error(error: str | BaseException) -> StatusReply[Never]:
+    def error(error: str | Exception) -> StatusReply[Never]:
         if isinstance(error, str):
             return StatusReply(error_message=error)
         return StatusReply(error_message=str(error), cause=error)
@@ -165,7 +163,7 @@ class StatusReply[T]:
         return cast(T, self.success_value)
 
     @property
-    def exception(self) -> BaseException:
+    def exception(self) -> Exception:
         """The error: the exception it was made from on this node, else ``ErrorMessage``."""
         if self.error_message is None:
             raise ValueError("Expected reply to be a failure, but was a success")
@@ -178,6 +176,9 @@ class StatusReply[T]:
 
 
 StatusReply.ACK = StatusReply.success(DONE)
+# under ohra. names, leaving the plain ones to the user's own messages
+Serialization.register(Done, "ohra.Done")
+Serialization.register(StatusReply, "ohra.StatusReply")
 
 
 def flatten_status(reply: object) -> Any:

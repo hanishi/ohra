@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ import pytest
 
 from ohra import (
     DONE,
+    ActorContext,
     ActorRef,
     AskTimeoutError,
     Behavior,
@@ -255,3 +257,36 @@ async def test_ctx_ask_with_status_unwraps_a_custom_exception():
         testkit.spawn(_asker(target.ref, probe.ref))
         (await target.receive_message()).reply_to.tell(StatusReply.error(TestException("boho")))
         await probe.expect_message("got error: TestException, boho")
+
+
+async def test_ctx_ask_with_status_ends_its_ask_when_the_actor_stops(
+    caplog: pytest.LogCaptureFixture,
+):
+    """As ctx.ask: an actor that stops before the reply cancels the ask, so the reply is a dead
+    letter and no timeout is left running."""
+
+    def stops_after_asking(target: ActorRef[Request]) -> Behavior[str]:
+        @Behaviors.setup
+        def setup(ctx: ActorContext[str]) -> Behavior[str]:
+            ctx.ask_with_status(target, Request, lambda _r: "answered", timeout=3)
+            return Behaviors.stopped()
+
+        return setup
+
+    async with ActorTestKit() as testkit:
+        target: TestProbe[Request] = testkit.create_test_probe()
+        watcher: TestProbe[Any] = testkit.create_test_probe()
+        asker = testkit.spawn(stops_after_asking(target.ref))
+        await watcher.expect_terminated(asker)
+        request = await target.receive_message()
+        with caplog.at_level(logging.DEBUG, logger="ohra.dead_letters"):
+            request.reply_to.tell(StatusReply.success("late"))
+        assert any("ask already completed" in r.getMessage() for r in caplog.records)
+
+
+def test_done_and_status_reply_leave_the_plain_manifests_to_the_users_messages():
+    """A user's own ``@remotable`` Done or StatusReply registers under its class name, so the
+    core's go on the wire under ``ohra.`` names, as sharding's go under ``Sharding.``."""
+    assert Serialization.encode(DONE, lambda r: r.path) == {"$type": "ohra.Done"}
+    encoded = Serialization.encode(StatusReply.ACK, lambda r: r.path)
+    assert isinstance(encoded, dict) and encoded["$type"] == "ohra.StatusReply"
